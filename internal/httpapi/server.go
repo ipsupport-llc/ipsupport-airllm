@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 
 	"github.com/rromenskyi/ipsupport-airllm/internal/auth"
+	"github.com/rromenskyi/ipsupport-airllm/internal/capture"
 	"github.com/rromenskyi/ipsupport-airllm/internal/config"
 	"github.com/rromenskyi/ipsupport-airllm/internal/ledger"
 	"github.com/rromenskyi/ipsupport-airllm/internal/limits"
@@ -27,23 +28,26 @@ type Deps struct {
 	Sealer    *secrets.Sealer
 	Auth      auth.Authenticator
 	Login     auth.LoginProvider // nil when not using password login (e.g. OIDC)
+	Capture   *capture.Pipeline  // nil disables capture
 }
 
 // Server is the top-level HTTP handler.
 type Server struct {
-	cfg     *config.Config
-	st      *store.Store
-	mux     *http.ServeMux
-	regPtr  atomic.Pointer[providers.Registry] // swapped on provider changes
-	dlpPtr  atomic.Pointer[dlpConfig]          // swapped on DLP config changes
-	router  *routing.Router
-	limiter *limits.Limiter
-	pricing *pricing.Table
-	sealer  *secrets.Sealer
-	ledger  *ledger.Ledger
-	auth    auth.Authenticator
-	login   auth.LoginProvider
-	httpc   *http.Client // shared client for the DLP model sidecar
+	cfg        *config.Config
+	st         *store.Store
+	mux        *http.ServeMux
+	regPtr     atomic.Pointer[providers.Registry] // swapped on provider changes
+	dlpPtr     atomic.Pointer[dlpConfig]          // swapped on DLP config changes
+	capturePtr atomic.Pointer[captureConfig]      // swapped on capture config changes
+	router     *routing.Router
+	limiter    *limits.Limiter
+	pricing    *pricing.Table
+	sealer     *secrets.Sealer
+	ledger     *ledger.Ledger
+	auth       auth.Authenticator
+	login      auth.LoginProvider
+	httpc      *http.Client      // shared client for the DLP model sidecar
+	capturePl  *capture.Pipeline // nil when capture is not configured
 }
 
 // NewServer builds the routed handler.
@@ -63,6 +67,10 @@ func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 	}
 	s.regPtr.Store(deps.Providers)
 	s.loadDLP(context.Background())
+	s.loadCapture(context.Background())
+	if deps.Capture != nil {
+		s.capturePl = deps.Capture
+	}
 	s.routes()
 	return s
 }
