@@ -77,11 +77,11 @@ English-only repo. No secrets in git.
 - [x] web/embed.go (go:embed) + httpapi/spa.go: catch-all GET "/" serves SPA with index fallback; /api,/v1,/auth excluded → JSON 404
 - [x] Verify: served / (html), /app.css, /app.js (correct content-types); /api/me→401 JSON, /v1/*→404 JSON, deep routes→SPA fallback; API endpoints wired to Phase-5 control-plane. Browser click-through = operator's manual test (login pw in logs).
 
-## Phase 7 — Hardening + docs
-- [ ] audit log writes on control-plane mutations
-- [ ] README quickstart (compose up → seed → use a key → see usage)
-- [ ] seed script: demo role policy, aliases, mock provider, demo key
-- [ ] Verify: fresh `compose up` + seed → end-to-end demo works from clean state
+## Phase 7 — Hardening + docs  ✅ DONE (2026-06-27)
+- [x] audit log writes on control-plane mutations (done in P5: role/provider/alias/pricing/key.revoke)
+- [x] README quickstart (compose up → get pw from logs → console → create key → curl /v1 → usage) + config table + mock behaviours + loopback note
+- [x] seed: demo role policy / aliases (mock-gpt + mock-fallback) / mock provider / pricing / fixed dev key — idempotent on boot (done in P5)
+- [x] Verify: `docker compose down -v` then `up --build` from clean state → app image builds (go:embed), boots/migrates/seeds, console served, login→create key→/v1 200→/v1/messages 200→usage. FULL STACK e2e green.
 
 ## Phase 8 — Review gates (the "done" bar)
 - [ ] Readiness review 1/5 — everything ready?
