@@ -53,6 +53,14 @@ func (s *Server) enqueueCapture(
 		return
 	}
 	capCfg := s.captureCfg()
+	if !capCfg.Enabled {
+		return
+	}
+	// When DLP action="redact", messages are already masked in place; re-applying
+	// the original byte offsets would corrupt the stored body (label markers are
+	// longer than the redacted spans). Redact in captureBody only when the
+	// capture layer itself must apply redaction (action≠redact or no findings).
+	needRedact := capCfg.Redact && !dlpRes.AlreadyRedacted
 	pl.Enqueue(capture.Record{
 		KeyID:            ak.KeyID,
 		UserID:           ak.UserID,
@@ -66,7 +74,7 @@ func (s *Server) enqueueCapture(
 		CostUSD:          costUSD,
 		Detected:         dlpRes.Findings,
 		HadIncident:      dlpRes.HadIncident,
-		Body:             captureBody(msgs, response, capCfg.Redact, dlpRes.MsgFindings),
+		Body:             captureBody(msgs, response, needRedact, dlpRes.MsgFindings),
 		Redacted:         capCfg.Redact,
 	})
 }

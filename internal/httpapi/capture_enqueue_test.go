@@ -48,6 +48,39 @@ func TestCaptureBodyPreservesRawContentWhenRedactFalse(t *testing.T) {
 	}
 }
 
+// TestCaptureBodyNoDoubleRedactionWhenAlreadyRedacted verifies that when DLP
+// action="redact" has already masked message content in place (AlreadyRedacted=true),
+// enqueueCapture passes needRedact=false to captureBody, preventing a second
+// redaction pass from re-applying the original byte offsets to the now-longer
+// "[REDACTED:label]" string, which would produce corrupted output.
+func TestCaptureBodyNoDoubleRedactionWhenAlreadyRedacted(t *testing.T) {
+	secret := "sk-ant-api03-aaaabbbbccccddddeeee1234"
+	content := "key: " + secret
+	findings := [][]dlp.Finding{
+		{{Label: "anthropic_key", Start: 5, End: 5 + len(secret)}},
+	}
+
+	// Simulate what dlpEnforce does with action="redact": redact in place.
+	alreadyRedacted := dlp.Redact(content, findings[0])
+	if bytes.Contains([]byte(alreadyRedacted), []byte(secret)) {
+		t.Fatal("test setup: dlp.Redact must have removed the secret")
+	}
+	msgs := []llm.Message{{Role: "user", Content: alreadyRedacted}}
+
+	// With AlreadyRedacted=true in dlpResult, enqueueCapture passes needRedact=false.
+	// The original findings are still in dlpRes.MsgFindings but captureBody must
+	// not apply them again.
+	body := captureBody(msgs, "ok", false /* needRedact=false, already redacted */, findings)
+
+	if bytes.Contains(body, []byte(secret)) {
+		t.Error("stored body must not contain raw secret")
+	}
+	n := bytes.Count(body, []byte("[REDACTED:"))
+	if n != 1 {
+		t.Errorf("expected exactly 1 [REDACTED:] marker (no double-redaction), got %d", n)
+	}
+}
+
 // TestCaptureBodyNoFindingsNoChange verifies that captureBody with Redact=true
 // but no findings is a no-op (nothing to redact).
 func TestCaptureBodyNoFindingsNoChange(t *testing.T) {

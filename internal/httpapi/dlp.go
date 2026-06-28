@@ -59,9 +59,10 @@ func (s *Server) dlpCfg() dlpConfig {
 
 // dlpResult carries the outcome of a DLP scan for use by the capture pipeline.
 type dlpResult struct {
-	Findings    []dlp.Finding   // flat list (per-message offsets; for HadIncident / index)
-	MsgFindings [][]dlp.Finding // per-message findings, indexed parallel to req.Messages
-	HadIncident bool
+	Findings        []dlp.Finding   // flat list (per-message offsets; for HadIncident / index)
+	MsgFindings     [][]dlp.Finding // per-message findings, indexed parallel to req.Messages
+	HadIncident     bool
+	AlreadyRedacted bool // true when action="redact" masked req.Messages in place
 }
 
 // dlpEnforce scans the request messages. On "redact" it masks secrets in place;
@@ -122,7 +123,12 @@ func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, r
 	if cfg.Action == "block" {
 		return true, "request blocked: sensitive content detected (" + strings.Join(labels, ", ") + ")", dlpResult{}
 	}
-	return false, "", dlpResult{Findings: allFindings, MsgFindings: perMsg, HadIncident: true}
+	return false, "", dlpResult{
+		Findings:        allFindings,
+		MsgFindings:     perMsg,
+		HadIncident:     true,
+		AlreadyRedacted: cfg.Action == "redact",
+	}
 }
 
 func (s *Server) recordDLP(ctx context.Context, ak authedKey, ingress, alias, action string, labels []string, count int, sample string) {

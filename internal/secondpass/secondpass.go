@@ -84,6 +84,7 @@ type PendingRow struct {
 	ID       string
 	BlobKey  string
 	Detected []dlp.Finding
+	Redacted bool // snapshot of capture config Redact at enqueue time
 }
 
 // Store is the secondpass view of the capture index.
@@ -193,6 +194,17 @@ func (j *Job) processOne(ctx context.Context, row PendingRow) {
 	}
 
 	status, falsePositives, misses := diff(row.Detected, engineFindings)
+
+	// Confirm/clear (false_positive -> dlp.alert_cleared) requires a raw body:
+	// when the capture was redacted, the engine cannot re-find the masked secret,
+	// so an apparent false_positive is actually a confirmed detection that can no
+	// longer be verified. Treat it as confirmed to avoid erasing valid alerts.
+	// Full flywheel accuracy (false_positive discrimination) requires
+	// raw-window captures (Redacted=false).
+	if row.Redacted && status == "false_positive" {
+		status = "confirmed"
+		falsePositives = nil
+	}
 
 	if err := j.store.UpdateSecondPass(ctx, row.ID, status, engineFindings); err != nil {
 		slog.Error("secondpass: update failed", "id", row.ID, "err", err)

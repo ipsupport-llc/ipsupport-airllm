@@ -61,7 +61,8 @@ type Pipeline struct {
 	cfg     func() Config
 	ch      chan Record
 	dropped atomic.Int64
-	stopped atomic.Bool
+	mu      sync.RWMutex // guards closed; held as RLock during channel send
+	closed  bool
 	wg      sync.WaitGroup
 	sweepWG sync.WaitGroup
 	stopCh  chan struct{}
@@ -113,10 +114,15 @@ func (p *Pipeline) Start(workers int) {
 
 // Stop signals the sweeper, drains the work channel, and waits for all
 // goroutines to finish. After Stop returns, Enqueue is a safe no-op.
+//
+// The write lock is held while closing the channel so that no concurrent
+// Enqueue (which holds a read lock during the send) can race against close.
 func (p *Pipeline) Stop() {
-	p.stopped.Store(true) // must happen before close(p.ch) to guard Enqueue
+	p.mu.Lock()
+	p.closed = true
 	close(p.stopCh)
 	close(p.ch)
+	p.mu.Unlock()
 	p.wg.Wait()
 	p.sweepWG.Wait()
 }
@@ -124,15 +130,24 @@ func (p *Pipeline) Stop() {
 // Enqueue submits a record for capture. It never blocks; if the buffer is
 // full the record is dropped and the dropped counter is incremented. Enqueue
 // is a safe no-op after Stop.
+//
+// A read lock is held across the channel send so that Stop's write lock
+// cannot close the channel while a send is in flight (preventing a panic on
+// send-after-close). The lock is never held while blocking; the send uses a
+// non-blocking select so Enqueue always returns promptly.
 func (p *Pipeline) Enqueue(r Record) {
-	if p.stopped.Load() {
+	p.mu.RLock()
+	if p.closed {
+		p.mu.RUnlock()
 		return
 	}
 	cfg := p.cfg()
 	if !cfg.Enabled {
+		p.mu.RUnlock()
 		return
 	}
 	if !r.HadIncident && rand.Float64() >= cfg.SampleRate {
+		p.mu.RUnlock()
 		return
 	}
 	select {
@@ -140,6 +155,7 @@ func (p *Pipeline) Enqueue(r Record) {
 	default:
 		p.dropped.Add(1)
 	}
+	p.mu.RUnlock()
 }
 
 // Dropped returns the total number of records dropped due to a full buffer.

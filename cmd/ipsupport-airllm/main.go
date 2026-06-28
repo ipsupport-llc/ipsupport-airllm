@@ -223,7 +223,7 @@ func (a *secondpassStoreAdapter) PendingForSecondPass(ctx context.Context, limit
 	}
 	out := make([]secondpass.PendingRow, len(rows))
 	for i, r := range rows {
-		out[i] = secondpass.PendingRow{ID: r.ID, BlobKey: r.BlobKey, Detected: r.Detected}
+		out[i] = secondpass.PendingRow{ID: r.ID, BlobKey: r.BlobKey, Detected: r.Detected, Redacted: r.Redacted}
 	}
 	return out, nil
 }

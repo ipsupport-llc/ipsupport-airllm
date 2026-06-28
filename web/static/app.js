@@ -207,9 +207,9 @@ async function viewCaptures(view) {
             <select id="cap-status">
               <option value="">all</option>
               <option value="unreviewed">unreviewed</option>
-              <option value="reviewed">reviewed</option>
               <option value="confirmed">confirmed</option>
               <option value="false_positive">false_positive</option>
+              <option value="false_negative">false_negative</option>
             </select>
           </label>
           <label class="field" style="flex:0 1 200px;margin:0">

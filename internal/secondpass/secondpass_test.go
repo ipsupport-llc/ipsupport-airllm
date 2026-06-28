@@ -299,6 +299,42 @@ func TestJob_CleanPath(t *testing.T) {
 	}
 }
 
+// TestJob_RedactedRow_NoFalsePositive verifies that when a capture was stored
+// with Redacted=true the second-pass never emits false_positive or fires the
+// dlp.alert_cleared webhook, even when the engine finds nothing (because the
+// secret is masked). The detection is treated as confirmed instead.
+func TestJob_RedactedRow_NoFalsePositive(t *testing.T) {
+	store := newFakeStore(PendingRow{
+		ID:       "id-red",
+		BlobKey:  "k-red",
+		Detected: []dlp.Finding{{Label: "key", Start: 0, End: 5}},
+		Redacted: true,
+	})
+	engine := &fakeEngine{findings: nil} // engine sees "[REDACTED:key]", finds nothing
+
+	var hookEvent string
+	hook := WebhookSender(func(_ context.Context, event string, _ []byte) {
+		hookEvent = event
+	})
+
+	job := NewJob(store, fakeReadBody([]byte("[REDACTED:key]")), engine, hook, 10)
+	job.RunOnce(context.Background())
+
+	u, ok := store.updates["id-red"]
+	if !ok {
+		t.Fatal("expected update for id-red")
+	}
+	if u.status == "false_positive" {
+		t.Fatal("redacted row must not be classified as false_positive")
+	}
+	if u.status != "confirmed" {
+		t.Fatalf("redacted row with detections must be confirmed, got %s", u.status)
+	}
+	if hookEvent == "dlp.alert_cleared" {
+		t.Fatal("dlp.alert_cleared must not fire for redacted rows")
+	}
+}
+
 func TestJob_MalformedEngineOutput_NoCrash(t *testing.T) {
 	store := newFakeStore(PendingRow{
 		ID:      "id5",

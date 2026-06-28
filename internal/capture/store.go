@@ -200,7 +200,8 @@ var validReviewStatuses = map[string]bool{
 }
 
 // ReviewQueue returns captures pending review: rows where review_status is
-// 'unreviewed' or secondpass_status is 'suspect', newest first.
+// 'unreviewed' or secondpass_status surfaced a discrepancy (false_negative or
+// false_positive), newest first.
 func (p *PGInserter) ReviewQueue(ctx context.Context, limit int) ([]IndexRow, error) {
 	if limit <= 0 {
 		limit = 200
@@ -212,7 +213,7 @@ func (p *PGInserter) ReviewQueue(ctx context.Context, limit int) ([]IndexRow, er
 		       blob_key, redacted, model_version,
 		       detected, review_status, secondpass_status, secondpass_labels, gold_labels
 		FROM capture_index
-		WHERE review_status = 'unreviewed' OR secondpass_status = 'suspect'
+		WHERE review_status = 'unreviewed' OR secondpass_status IN ('false_negative','false_positive')
 		ORDER BY ts DESC
 		LIMIT $1`, limit)
 	if err != nil {
@@ -229,7 +230,7 @@ func (p *PGInserter) PendingForSecondPass(ctx context.Context, limit int) ([]Ind
 		limit = 50
 	}
 	rows, err := p.PG.Query(ctx, `
-		SELECT id, blob_key, detected
+		SELECT id, blob_key, detected, redacted
 		FROM capture_index
 		WHERE secondpass_status = 'pending'
 		ORDER BY ts ASC
@@ -242,7 +243,7 @@ func (p *PGInserter) PendingForSecondPass(ctx context.Context, limit int) ([]Ind
 	for rows.Next() {
 		var r IndexRow
 		var detectedRaw []byte
-		if err := rows.Scan(&r.ID, &r.BlobKey, &detectedRaw); err != nil {
+		if err := rows.Scan(&r.ID, &r.BlobKey, &detectedRaw, &r.Redacted); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(detectedRaw, &r.Detected); err != nil {
