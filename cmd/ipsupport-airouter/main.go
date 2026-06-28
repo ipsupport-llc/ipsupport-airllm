@@ -14,6 +14,8 @@ import (
 
 	"github.com/rromenskyi/ipsupport-airouter/internal/config"
 	"github.com/rromenskyi/ipsupport-airouter/internal/httpapi"
+	"github.com/rromenskyi/ipsupport-airouter/internal/limits"
+	"github.com/rromenskyi/ipsupport-airouter/internal/pricing"
 	"github.com/rromenskyi/ipsupport-airouter/internal/providers"
 	"github.com/rromenskyi/ipsupport-airouter/internal/seed"
 	"github.com/rromenskyi/ipsupport-airouter/internal/store"
@@ -70,9 +72,20 @@ func run() error {
 		reg.Register(providers.NewMock("mock"))
 	}
 
+	priceTable, err := pricing.Load(ctx, st)
+	if err != nil {
+		return err
+	}
+
+	deps := httpapi.Deps{
+		Providers: reg,
+		Limiter:   limits.New(st.RDB),
+		Pricing:   priceTable,
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.NewServer(cfg, st, reg),
+		Handler:           httpapi.NewServer(cfg, st, deps),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

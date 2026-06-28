@@ -8,10 +8,19 @@ import (
 
 	"github.com/rromenskyi/ipsupport-airouter/internal/config"
 	"github.com/rromenskyi/ipsupport-airouter/internal/ledger"
+	"github.com/rromenskyi/ipsupport-airouter/internal/limits"
+	"github.com/rromenskyi/ipsupport-airouter/internal/pricing"
 	"github.com/rromenskyi/ipsupport-airouter/internal/providers"
 	"github.com/rromenskyi/ipsupport-airouter/internal/routing"
 	"github.com/rromenskyi/ipsupport-airouter/internal/store"
 )
+
+// Deps are the runtime dependencies wired into the server.
+type Deps struct {
+	Providers *providers.Registry
+	Limiter   *limits.Limiter
+	Pricing   *pricing.Table
+}
 
 // Server is the top-level HTTP handler.
 type Server struct {
@@ -20,18 +29,21 @@ type Server struct {
 	mux       *http.ServeMux
 	providers *providers.Registry
 	router    *routing.Router
+	limiter   *limits.Limiter
+	pricing   *pricing.Table
 	ledger    *ledger.Ledger
 }
 
-// NewServer builds the routed handler with a provider registry, router, and
-// ledger.
-func NewServer(cfg *config.Config, st *store.Store, reg *providers.Registry) *Server {
+// NewServer builds the routed handler.
+func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 	s := &Server{
 		cfg:       cfg,
 		st:        st,
 		mux:       http.NewServeMux(),
-		providers: reg,
+		providers: deps.Providers,
 		router:    routing.NewRouter(st),
+		limiter:   deps.Limiter,
+		pricing:   deps.Pricing,
 		ledger:    ledger.New(st),
 	}
 	s.routes()

@@ -34,6 +34,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeProtocolError(w, r, http.StatusNotFound, "invalid_request_error", err.Error())
 		return
 	}
+	if msg, denied := s.limitDenied(r.Context(), ak); denied {
+		writeProtocolError(w, r, http.StatusTooManyRequests, "rate_limit_error", msg)
+		return
+	}
 
 	if req.Stream {
 		s.streamChatCompletions(w, r, req, ak, start, targets)
@@ -45,16 +49,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if callErr != nil {
 		entry.Status = http.StatusBadGateway
 		entry.ErrorMsg = callErr.Error()
-		s.ledger.Record(r.Context(), entry)
+		s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, 0, 0)
 		writeProtocolError(w, r, http.StatusBadGateway, "upstream_error", callErr.Error())
 		return
 	}
 
 	resp.Model = req.Model
 	entry.Status = http.StatusOK
-	entry.PromptTokens = resp.Usage.PromptTokens
-	entry.CompletionTokens = resp.Usage.CompletionTokens
-	s.ledger.Record(r.Context(), entry)
+	s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 
 	body, err := openai.MarshalChatResponse(resp)
 	if err != nil {
@@ -81,26 +83,24 @@ func (s *Server) streamChatCompletions(w http.ResponseWriter, r *http.Request, r
 
 	target, usage, started, err := s.runStream(r.Context(), targets, req, sink)
 	entry := chatEntry(ak, req.Model, target, "openai", start)
-	entry.PromptTokens = usage.PromptTokens
-	entry.CompletionTokens = usage.CompletionTokens
 
 	if err != nil {
 		entry.ErrorMsg = err.Error()
 		if !started {
 			entry.Status = http.StatusBadGateway
-			s.ledger.Record(r.Context(), entry)
+			s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, 0, 0)
 			writeProtocolError(w, r, http.StatusBadGateway, "upstream_error", err.Error())
 			return
 		}
 		entry.Status = http.StatusOK // headers already sent; cannot signal failure
-		s.ledger.Record(r.Context(), entry)
+		s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, usage.PromptTokens, usage.CompletionTokens)
 		return
 	}
 
 	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher.Flush()
 	entry.Status = http.StatusOK
-	s.ledger.Record(r.Context(), entry)
+	s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, usage.PromptTokens, usage.CompletionTokens)
 }
 
 // handleModels lists the model aliases as OpenAI model objects.

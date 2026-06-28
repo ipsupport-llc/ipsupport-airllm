@@ -56,10 +56,11 @@ English-only repo. No secrets in git.
 - [x] translation = IR codecs (no redundant translate pkg); caveats documented in docs/translation.md (router prefers same-protocol target)
 - [x] Verify e2e: normal alias 200; fallback alias served by secondary (ledger=mock-model-1); explicit passthrough 200; unknown model/provider 404; streaming fallback recovers; go test (policy+providers) green
 
-## Phase 4 — Limits + metering
-- [ ] internal/limits: Redis rolling buckets per key×window×unit (5h/24h/7d), tokens + USD
-- [ ] pricing table seed + cost computation; check-before / increment-after
-- [ ] Verify: exceeding a window returns clear 429; counters decay over time; tests with a fake clock
+## Phase 4 — Limits + metering  ✅ DONE (2026-06-27)
+- [x] internal/limits: Redis time-bucket counters (5-min) per key×unit; rolling window sums (5h/24h/7d) for tokens + cost(micro-USD); prune + TTL; injectable clock; fail-open on Redis error
+- [x] internal/pricing: in-memory price table (loaded from DB) → CostMicroUSD; seed prices for mock models
+- [x] policy.Limits + ParseLimits; check-before (429) in both ingresses; increment-after via finalizeUsage (cost in ledger.cost_usd)
+- [x] Verify e2e: ledger cost_usd non-zero (0.000044 for 9/26 tok @ 0.5/1.5); first req 200 then second 429 with clear message "tokens over 5h (31 used, 5 cap)"; unit tests SumWindows/BucketStamp/expiredFields green
 
 ## Phase 5 — Control-plane API (mock auth, no OIDC)
 - [ ] internal/auth: pluggable auth iface; mock/dev impl (config-set admin user, no OIDC)

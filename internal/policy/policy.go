@@ -12,6 +12,22 @@ type KeyPolicy struct {
 	Limits           json.RawMessage `json:"limits,omitempty"`
 }
 
+// Limits are per-window usage caps. Keys are window names ("5h"/"24h"/"7d");
+// a missing or non-positive value means no cap for that window/unit.
+type Limits struct {
+	Tokens  map[string]int64   `json:"tokens,omitempty"`
+	CostUSD map[string]float64 `json:"cost_usd,omitempty"`
+}
+
+// ParseLimits decodes the limits snapshot.
+func (p KeyPolicy) ParseLimits() Limits {
+	var l Limits
+	if len(p.Limits) > 0 {
+		_ = json.Unmarshal(p.Limits, &l)
+	}
+	return l
+}
+
 // Parse decodes a policy snapshot; an empty or invalid snapshot yields a
 // zero policy (which permits nothing).
 func Parse(raw []byte) KeyPolicy {

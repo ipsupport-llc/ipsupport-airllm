@@ -76,6 +76,23 @@ func Dev(ctx context.Context, st *store.Store) (string, error) {
 		}
 	}
 
+	// Pricing for the mock upstream models so cost metering is non-zero.
+	for _, p := range []struct {
+		model         string
+		input, output float64
+	}{
+		{"mock-model-1", 0.50, 1.50},
+		{"custom-model-x", 1.00, 2.00},
+	} {
+		if _, err := st.PG.Exec(ctx, `
+			INSERT INTO pricing (model, input_per_1m, output_per_1m)
+			VALUES ($1, $2, $3)
+			ON CONFLICT (model) DO UPDATE SET input_per_1m = EXCLUDED.input_per_1m, output_per_1m = EXCLUDED.output_per_1m`,
+			p.model, p.input, p.output); err != nil {
+			return "", fmt.Errorf("seed pricing: %w", err)
+		}
+	}
+
 	k := apikey.Describe(DevToken)
 	if _, err := st.PG.Exec(ctx, `
 		INSERT INTO api_keys (user_id, name, hash, prefix, last4, policy_snapshot, status)
