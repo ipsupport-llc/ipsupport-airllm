@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -244,7 +245,9 @@ func (p *PGInserter) PendingForSecondPass(ctx context.Context, limit int) ([]Ind
 		if err := rows.Scan(&r.ID, &r.BlobKey, &detectedRaw); err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal(detectedRaw, &r.Detected)
+		if err := json.Unmarshal(detectedRaw, &r.Detected); err != nil {
+			slog.Warn("capture: corrupt detected JSON", "id", r.ID, "err", err)
+		}
 		out = append(out, r)
 	}
 	return out, rows.Err()
