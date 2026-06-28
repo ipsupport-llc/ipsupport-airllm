@@ -5,9 +5,9 @@ services:
       POSTGRES_USER: airouter
       POSTGRES_PASSWORD: airouter
       POSTGRES_DB: airouter
-    # Host port offset to avoid colliding with other local services.
+    # Loopback-only + offset host port (never expose a DB on a public IP).
     ports:
-      - "55432:5432"
+      - "127.0.0.1:55432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U airouter"]
       interval: 5s
@@ -18,9 +18,9 @@ services:
 
   redis:
     image: redis:7-alpine
-    # Host port offset to avoid colliding with other local services.
+    # Loopback-only + offset host port (Redis has no auth; never expose it).
     ports:
-      - "56379:6379"
+      - "127.0.0.1:56379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -37,8 +37,10 @@ services:
       REDIS_URL: "redis://redis:6379/0"
       ENV: "dev"
       AUTH_MODE: "mock"
+    # Loopback-only on the host; reach it via a tunnel/port-forward. In k8s
+    # the app listens on 0.0.0.0 and is fronted by the ingress instead.
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     depends_on:
       postgres:
         condition: service_healthy

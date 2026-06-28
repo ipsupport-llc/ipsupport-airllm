@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/rromenskyi/ipsupport-airouter/internal/auth"
 	"github.com/rromenskyi/ipsupport-airouter/internal/config"
 	"github.com/rromenskyi/ipsupport-airouter/internal/httpapi"
 	"github.com/rromenskyi/ipsupport-airouter/internal/limits"
@@ -81,6 +82,17 @@ func run() error {
 		Providers: reg,
 		Limiter:   limits.New(st.RDB),
 		Pricing:   priceTable,
+	}
+
+	// Control-plane auth. The local mock uses password login with random
+	// credentials; real OIDC is wired on the k8s deploy.
+	if cfg.AuthMode == "mock" {
+		mockAuth, creds := auth.NewMock()
+		deps.Auth = mockAuth
+		deps.Login = mockAuth
+		for _, c := range creds {
+			slog.Warn("mock login credential (dev only)", "username", c.Username, "password", c.Password, "admin", c.Admin)
+		}
 	}
 
 	srv := &http.Server{

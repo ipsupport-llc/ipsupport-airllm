@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/rromenskyi/ipsupport-airouter/internal/auth"
 	"github.com/rromenskyi/ipsupport-airouter/internal/config"
 	"github.com/rromenskyi/ipsupport-airouter/internal/ledger"
 	"github.com/rromenskyi/ipsupport-airouter/internal/limits"
@@ -20,6 +21,8 @@ type Deps struct {
 	Providers *providers.Registry
 	Limiter   *limits.Limiter
 	Pricing   *pricing.Table
+	Auth      auth.Authenticator
+	Login     auth.LoginProvider // nil when not using password login (e.g. OIDC)
 }
 
 // Server is the top-level HTTP handler.
@@ -32,6 +35,8 @@ type Server struct {
 	limiter   *limits.Limiter
 	pricing   *pricing.Table
 	ledger    *ledger.Ledger
+	auth      auth.Authenticator
+	login     auth.LoginProvider
 }
 
 // NewServer builds the routed handler.
@@ -45,6 +50,8 @@ func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 		limiter:   deps.Limiter,
 		pricing:   deps.Pricing,
 		ledger:    ledger.New(st),
+		auth:      deps.Auth,
+		login:     deps.Login,
 	}
 	s.routes()
 	return s
@@ -63,6 +70,21 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/chat/completions", s.requireAPIKey(s.handleChatCompletions))
 	s.mux.HandleFunc("GET /v1/models", s.requireAPIKey(s.handleModels))
 	s.mux.HandleFunc("POST /v1/messages", s.requireAPIKey(s.handleMessages))
+
+	// Control-plane auth (password login present only in mock mode).
+	if s.login != nil {
+		s.mux.HandleFunc("POST /auth/login", s.handleLogin)
+		s.mux.HandleFunc("POST /auth/logout", s.handleLogout)
+	}
+
+	// Control-plane self-service (session auth).
+	s.mux.HandleFunc("GET /api/me", s.requireSession(s.handleMe))
+	s.mux.HandleFunc("GET /api/keys", s.requireSession(s.handleListKeys))
+	s.mux.HandleFunc("POST /api/keys", s.requireSession(s.handleCreateKey))
+	s.mux.HandleFunc("POST /api/keys/{id}/revoke", s.requireSession(s.handleRevokeKey))
+	s.mux.HandleFunc("GET /api/usage", s.requireSession(s.handleUsage))
+
+	s.adminRoutes()
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

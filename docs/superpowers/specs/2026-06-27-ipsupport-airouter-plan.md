@@ -62,10 +62,14 @@ English-only repo. No secrets in git.
 - [x] policy.Limits + ParseLimits; check-before (429) in both ingresses; increment-after via finalizeUsage (cost in ledger.cost_usd)
 - [x] Verify e2e: ledger cost_usd non-zero (0.000044 for 9/26 tok @ 0.5/1.5); first req 200 then second 429 with clear message "tokens over 5h (31 used, 5 cap)"; unit tests SumWindows/BucketStamp/expiredFields green
 
-## Phase 5 — Control-plane API (mock auth, no OIDC)
-- [ ] internal/auth: pluggable auth iface; mock/dev impl (config-set admin user, no OIDC)
-- [ ] internal/httpapi: /api keys (self CRUD + show-once), /api/usage (self), /api/admin/* (roles_policy, aliases, providers, users, keys, org-usage, audit) with RBAC
-- [ ] Verify: REST endpoints behave; RBAC denies non-admin; tests
+## Phase 5 — Control-plane API (mock auth, no OIDC)  ✅ DONE (2026-06-27)
+- [x] internal/auth: Authenticator + LoginProvider ifaces; Mock = username/password login with RANDOM passwords (admin + operator) logged at boot + HMAC-signed session cookie (real admin login for pre-deploy testing, per operator)
+- [x] httpapi session/RBAC: requireSession (cookie → ensureUser) + requireAdmin; /auth/login + /auth/logout
+- [x] self-service: /api/me, /api/keys (GET/POST show-once/{id}/revoke), /api/usage (ledger window agg); key snapshots caller's merged role policy
+- [x] admin: users, keys(+revoke), usage, audit, roles(GET/PUT), providers(GET/PUT), aliases(GET/PUT/DELETE), pricing(GET/PUT) — all RBAC-gated; mutations write audit_log
+- [x] SECURITY: docker-compose ports rebound to 127.0.0.1 (public IP host); dev server binds 127.0.0.1
+- [x] Verify e2e: 401 unauth; admin login→cookie→create key→use on /v1 (200); usage; operator 403 vs admin 200; PUT role + audit; auth unit tests green
+- NOTE: provider credential (encrypted) admin CRUD still deferred (creds storage pending); aliases/providers/pricing CRUD present
 
 ## Phase 6 — Frontend SPA
 - [ ] web/ SvelteKit (adapter-static); reuse dash design tokens + ConfirmDialog/Toasts/LiveDot/QuickSearch
