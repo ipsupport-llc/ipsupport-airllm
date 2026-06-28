@@ -1,10 +1,13 @@
-.PHONY: build test vet tidy run compose-up compose-down web-build fmt
+.PHONY: build test test-race vet tidy run compose-up compose-down fmt
 
 build:
 	go build -o bin/ipsupport-airllm ./cmd/ipsupport-airllm
 
 test:
 	go test ./...
+
+test-race:
+	go test -race ./...
 
 vet:
 	go vet ./...
@@ -23,6 +26,3 @@ compose-up:
 
 compose-down:
 	docker compose -f deploy/docker-compose.yml down -v
-
-web-build:
-	cd web && npm ci && npm run build
