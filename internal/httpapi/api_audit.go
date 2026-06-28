@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/capture"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/dlp"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/rromenskyi/ipsupport-airllm/internal/capture"
-	"github.com/rromenskyi/ipsupport-airllm/internal/dlp"
 )
 
 // captureReader provides read and review access to the capture index.

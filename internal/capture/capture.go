@@ -11,9 +11,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/rromenskyi/ipsupport-airllm/internal/blob"
-	"github.com/rromenskyi/ipsupport-airllm/internal/dlp"
-	"github.com/rromenskyi/ipsupport-airllm/internal/secrets"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/blob"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/dlp"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/secrets"
 )
 
 // chanSize is the capacity of the internal work channel.

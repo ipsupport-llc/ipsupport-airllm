@@ -8,8 +8,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/rromenskyi/ipsupport-airllm/internal/apikey"
-	"github.com/rromenskyi/ipsupport-airllm/internal/store"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/apikey"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 )
 
 // DevToken is the fixed, well-known API key seeded in the local mock.

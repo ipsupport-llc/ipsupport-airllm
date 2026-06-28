@@ -4,10 +4,10 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/rromenskyi/ipsupport-airllm/internal/blob"
-	"github.com/rromenskyi/ipsupport-airllm/internal/capture"
-	"github.com/rromenskyi/ipsupport-airllm/internal/dataset"
-	"github.com/rromenskyi/ipsupport-airllm/internal/secrets"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/blob"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/capture"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/dataset"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/secrets"
 )
 
 // captureReviewedAdapter bridges captureReader → dataset.Store by running two

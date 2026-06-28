@@ -14,7 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/rromenskyi/ipsupport-airllm/internal/store"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 )
 
 // Target is one resolved upstream destination.

@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/rromenskyi/ipsupport-airllm/internal/dlp"
-	"github.com/rromenskyi/ipsupport-airllm/internal/llm"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/dlp"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
 )
 
 // TestCaptureBodyRedactsRegardlessOfDLPAction proves the redacted-by-default

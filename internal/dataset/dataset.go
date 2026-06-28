@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rromenskyi/ipsupport-airllm/internal/capture"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/capture"
 )
 
 // Store provides reviewed captures for export.

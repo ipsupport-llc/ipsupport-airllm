@@ -1,4 +1,4 @@
-module github.com/rromenskyi/ipsupport-airllm
+module github.com/ipsupport-llc/ipsupport-airllm
 
 go 1.26
 

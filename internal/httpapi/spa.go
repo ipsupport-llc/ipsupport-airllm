@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/rromenskyi/ipsupport-airllm/web"
+	"github.com/ipsupport-llc/ipsupport-airllm/web"
 )
 
 // registerSPA serves the embedded static console on "/" with a single-page

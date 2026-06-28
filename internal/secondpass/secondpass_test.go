@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rromenskyi/ipsupport-airllm/internal/dlp"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/dlp"
 )
 
 // --- fakeEngine ---

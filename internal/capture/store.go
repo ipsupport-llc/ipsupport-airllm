@@ -8,8 +8,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/dlp"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/rromenskyi/ipsupport-airllm/internal/dlp"
 )
 
 // IndexRow mirrors the capture_index table.

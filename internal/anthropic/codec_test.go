@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rromenskyi/ipsupport-airllm/internal/llm"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
 )
 
 func TestDecodeStringContentWithSystemAndTools(t *testing.T) {

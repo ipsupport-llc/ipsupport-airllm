@@ -9,12 +9,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rromenskyi/ipsupport-airllm/internal/ledger"
-	"github.com/rromenskyi/ipsupport-airllm/internal/limits"
-	"github.com/rromenskyi/ipsupport-airllm/internal/llm"
-	"github.com/rromenskyi/ipsupport-airllm/internal/openai"
-	"github.com/rromenskyi/ipsupport-airllm/internal/providers"
-	"github.com/rromenskyi/ipsupport-airllm/internal/routing"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/ledger"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/limits"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/openai"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
 )
 
 // errAllBusy is returned when every target is at its concurrency cap.

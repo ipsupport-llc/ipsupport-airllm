@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rromenskyi/ipsupport-airllm/internal/llm"
-	"github.com/rromenskyi/ipsupport-airllm/internal/openai"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/openai"
 )
 
 // OpenAICompat is a real upstream that speaks the OpenAI chat-completions API:

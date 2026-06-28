@@ -3,7 +3,7 @@ package openai
 import (
 	"encoding/json"
 
-	"github.com/rromenskyi/ipsupport-airllm/internal/llm"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
 )
 
 // StreamMeta is the stable identity shared by every chunk of one streamed

@@ -7,7 +7,7 @@ import (
 	"math"
 	"sync"
 
-	"github.com/rromenskyi/ipsupport-airllm/internal/store"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 )
 
 // Price is the USD cost per 1M input/output tokens for a model.

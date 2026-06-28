@@ -8,17 +8,17 @@ import (
 	"net/http"
 	"sync/atomic"
 
-	"github.com/rromenskyi/ipsupport-airllm/internal/auth"
-	"github.com/rromenskyi/ipsupport-airllm/internal/blob"
-	"github.com/rromenskyi/ipsupport-airllm/internal/capture"
-	"github.com/rromenskyi/ipsupport-airllm/internal/config"
-	"github.com/rromenskyi/ipsupport-airllm/internal/ledger"
-	"github.com/rromenskyi/ipsupport-airllm/internal/limits"
-	"github.com/rromenskyi/ipsupport-airllm/internal/pricing"
-	"github.com/rromenskyi/ipsupport-airllm/internal/providers"
-	"github.com/rromenskyi/ipsupport-airllm/internal/routing"
-	"github.com/rromenskyi/ipsupport-airllm/internal/secrets"
-	"github.com/rromenskyi/ipsupport-airllm/internal/store"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/auth"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/blob"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/capture"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/config"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/ledger"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/limits"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/pricing"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/secrets"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 )
 
 // Deps are the runtime dependencies wired into the server.

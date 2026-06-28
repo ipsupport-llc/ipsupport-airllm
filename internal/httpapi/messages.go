@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rromenskyi/ipsupport-airllm/internal/anthropic"
-	"github.com/rromenskyi/ipsupport-airllm/internal/llm"
-	"github.com/rromenskyi/ipsupport-airllm/internal/routing"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/anthropic"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
 )
 
 // handleMessages implements the Anthropic POST /v1/messages ingress: policy

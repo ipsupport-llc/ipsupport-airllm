@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rromenskyi/ipsupport-airllm/internal/auth"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/auth"
 )
 
 func TestDefaultSecondpassConfigDisabled(t *testing.T) {
