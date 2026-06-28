@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/rromenskyi/ipsupport-airllm/internal/ledger"
@@ -198,11 +199,13 @@ func (s *Server) runStream(ctx context.Context, plan *routing.Plan, req llm.Chat
 	return routing.Target{}, llm.Usage{}, false, lastErr
 }
 
-// openaiSink streams OpenAI chat.completion.chunk SSE events.
+// openaiSink streams OpenAI chat.completion.chunk SSE events and accumulates
+// the response text for the capture pipeline.
 type openaiSink struct {
-	w     http.ResponseWriter
-	flush func()
-	meta  openai.StreamMeta
+	w       http.ResponseWriter
+	flush   func()
+	meta    openai.StreamMeta
+	content strings.Builder
 }
 
 func (o *openaiSink) begin() {
@@ -210,6 +213,9 @@ func (o *openaiSink) begin() {
 }
 
 func (o *openaiSink) chunk(c llm.StreamChunk) error {
+	if c.Content != "" {
+		o.content.WriteString(c.Content)
+	}
 	b, err := openai.MarshalStreamChunk(o.meta, c)
 	if err != nil {
 		return err
@@ -220,6 +226,9 @@ func (o *openaiSink) chunk(c llm.StreamChunk) error {
 	o.flush()
 	return nil
 }
+
+// assembled returns the full accumulated response text.
+func (o *openaiSink) assembled() string { return o.content.String() }
 
 func writeSSEHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/event-stream")

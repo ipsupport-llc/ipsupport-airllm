@@ -20,8 +20,9 @@ import (
 
 // Roles.
 const (
-	AdminRole = "airllm_admin"
-	UserRole  = "airllm_user"
+	AdminRole   = "airllm_admin"
+	UserRole    = "airllm_user"
+	AuditorRole = "airllm_auditor"
 )
 
 const (
@@ -51,6 +52,9 @@ func (p Principal) HasRole(role string) bool {
 
 // IsAdmin reports whether the principal holds the admin role.
 func (p Principal) IsAdmin() bool { return p.HasRole(AdminRole) }
+
+// IsAuditor reports whether the principal holds the auditor or admin role.
+func (p Principal) IsAuditor() bool { return p.HasRole(AuditorRole) || p.HasRole(AdminRole) }
 
 // Authenticator resolves the principal for a request (from a session cookie).
 type Authenticator interface {
@@ -84,12 +88,14 @@ type Mock struct {
 	signingKey []byte
 }
 
-// NewMock builds the mock with an admin and a non-admin (operator) user,
-// each with a freshly generated random password, and a random signing key.
-// The returned credentials should be logged so the operator can sign in.
+// NewMock builds the mock with an admin, a non-admin (operator), and an
+// auditor user, each with a freshly generated random password, and a random
+// signing key. The returned credentials should be logged so the operator can
+// sign in.
 func NewMock() (*Mock, []Credential) {
 	adminPw := randToken(18)
 	opPw := randToken(18)
+	auditorPw := randToken(18)
 	m := &Mock{
 		users: map[string]mockUser{
 			"admin": {
@@ -100,12 +106,17 @@ func NewMock() (*Mock, []Credential) {
 				password:  opPw,
 				principal: Principal{Subject: "operator", Email: "operator@local", Roles: []string{UserRole}},
 			},
+			"auditor": {
+				password:  auditorPw,
+				principal: Principal{Subject: "auditor", Email: "auditor@local", Roles: []string{AuditorRole}},
+			},
 		},
 		signingKey: randBytes(32),
 	}
 	return m, []Credential{
 		{Username: "admin", Password: adminPw, Admin: true},
 		{Username: "operator", Password: opPw, Admin: false},
+		{Username: "auditor", Password: auditorPw, Admin: false},
 	}
 }
 

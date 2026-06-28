@@ -27,9 +27,16 @@ func (s *Server) adminRoutes() {
 	s.mux.HandleFunc("GET /api/admin/pricing", a(s.handleAdminPricing))
 	s.mux.HandleFunc("PUT /api/admin/pricing/{model}", a(s.handleAdminPutPricing))
 
+	// Dataset export for DLP model fine-tuning.
+	s.mux.HandleFunc("POST /api/admin/dataset/export", a(s.handleAdminDatasetExport))
+
 	// DLP: config, incidents, alert webhooks.
 	s.mux.HandleFunc("GET /api/admin/dlp", a(s.handleAdminGetDLP))
 	s.mux.HandleFunc("PUT /api/admin/dlp", a(s.handleAdminPutDLP))
+
+	// Second-pass: background DLP re-scan config.
+	s.mux.HandleFunc("GET /api/admin/secondpass", a(s.handleAdminGetSecondpass))
+	s.mux.HandleFunc("PUT /api/admin/secondpass", a(s.handleAdminPutSecondpass))
 	s.mux.HandleFunc("GET /api/admin/dlp/incidents", a(s.handleAdminDLPIncidents))
 	s.mux.HandleFunc("GET /api/admin/webhooks", a(s.handleAdminWebhooks))
 	s.mux.HandleFunc("POST /api/admin/webhooks", a(s.handleAdminCreateWebhook))
@@ -476,8 +483,13 @@ func (s *Server) handleAdminPutPricing(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
 }
 
-// audit records a control-plane mutation. Best-effort.
+// audit records a control-plane mutation. Best-effort. When auditHook is set
+// (e.g. in tests) it is called instead of writing to the database.
 func (s *Server) audit(ctx context.Context, actor, action, target string, detail any) {
+	if s.auditHook != nil {
+		s.auditHook(ctx, actor, action, target, detail)
+		return
+	}
 	b, err := json.Marshal(detail)
 	if err != nil || len(b) == 0 || string(b) == "null" {
 		b = []byte("{}")

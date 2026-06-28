@@ -27,7 +27,11 @@ func (s *Server) requireSession(next http.HandlerFunc) http.HandlerFunc {
 			writeControlError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		uid, err := s.ensureUser(r.Context(), p)
+		ensureUser := s.ensureUser
+		if s.ensureUserFn != nil {
+			ensureUser = s.ensureUserFn
+		}
+		uid, err := ensureUser(r.Context(), p)
 		if err != nil {
 			writeControlError(w, http.StatusInternalServerError, "failed to load user")
 			return
@@ -43,6 +47,18 @@ func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 		sess, _ := sessionFrom(r.Context())
 		if !sess.principal.IsAdmin() {
 			writeControlError(w, http.StatusForbidden, "admin role required")
+			return
+		}
+		next(w, r)
+	})
+}
+
+// requireAuditor is requireSession plus an auditor-or-admin check.
+func (s *Server) requireAuditor(next http.HandlerFunc) http.HandlerFunc {
+	return s.requireSession(func(w http.ResponseWriter, r *http.Request) {
+		sess, _ := sessionFrom(r.Context())
+		if !sess.principal.IsAuditor() {
+			writeControlError(w, http.StatusForbidden, "auditor role required")
 			return
 		}
 		next(w, r)

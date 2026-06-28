@@ -41,12 +41,12 @@ request ─▶ gateway (auth, policy, limits, DLP) ─▶ provider ─▶ respon
                                             │
         ┌───────────────────────────────────┼───────────────────────────┐
         ▼                                   ▼                             ▼
-  audit views (auditor role)        async oracle job              labelling/review UI
-  (search, view transcript)     (stronger model re-scans →     (confirm / mark FP / mark FN)
-                                 candidate false negatives →            │
-                                 alert + queue for review)              ▼
-                                                              dataset export ─▶ offline fine-tune
-                                                                                  ─▶ new model ─▶ sidecar swap
+  audit views (auditor role)     async second-pass job          labelling/review UI
+  (search, view transcript)   (stronger model: 1. verify each   (confirm / mark FP / mark FN)
+                               detection -> confirm OR clear            │
+                               the alert; 2. find misses ->             ▼
+                               false negatives -> alert)      dataset export ─▶ offline fine-tune
+                                                                          ─▶ new model ─▶ sidecar swap
 ```
 
 ### Capture pipeline (off the hot path)

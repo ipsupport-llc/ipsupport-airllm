@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/rromenskyi/ipsupport-airllm/internal/anthropic"
@@ -35,13 +36,14 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		writeProtocolError(w, r, http.StatusTooManyRequests, "rate_limit_error", msg)
 		return
 	}
-	if blocked, msg := s.dlpEnforce(r.Context(), ak, "anthropic", &req); blocked {
+	blocked, msg, dlpRes := s.dlpEnforce(r.Context(), ak, "anthropic", &req)
+	if blocked {
 		writeProtocolError(w, r, http.StatusBadRequest, "invalid_request_error", msg)
 		return
 	}
 
 	if req.Stream {
-		s.streamMessages(w, r, req, ak, start, plan)
+		s.streamMessages(w, r, req, ak, start, plan, dlpRes)
 		return
 	}
 
@@ -60,6 +62,14 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	entry.Status = http.StatusOK
 	s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 
+	var responseText string
+	if len(resp.Choices) > 0 {
+		responseText = resp.Choices[0].Message.Content
+	}
+	s.enqueueCapture(ak, "anthropic", req.Model, target.Provider, target.UpstreamModel,
+		http.StatusOK, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, entry.CostUSD,
+		dlpRes, req.Messages, responseText)
+
 	body, err := anthropic.MarshalMessagesResponse(resp)
 	if err != nil {
 		writeProtocolError(w, r, http.StatusInternalServerError, "internal_error", "failed to encode response")
@@ -70,7 +80,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
-func (s *Server) streamMessages(w http.ResponseWriter, r *http.Request, req llm.ChatRequest, ak authedKey, start time.Time, plan *routing.Plan) {
+func (s *Server) streamMessages(w http.ResponseWriter, r *http.Request, req llm.ChatRequest, ak authedKey, start time.Time, plan *routing.Plan, dlpRes dlpResult) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeProtocolError(w, r, http.StatusInternalServerError, "internal_error", "streaming unsupported")
@@ -97,17 +107,25 @@ func (s *Server) streamMessages(w http.ResponseWriter, r *http.Request, req llm.
 		}
 		entry.Status = http.StatusOK
 		s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, usage.PromptTokens, usage.CompletionTokens)
+		s.enqueueCapture(ak, "anthropic", req.Model, target.Provider, target.UpstreamModel,
+			http.StatusOK, usage.PromptTokens, usage.CompletionTokens, entry.CostUSD,
+			dlpRes, req.Messages, sink.assembled())
 		return
 	}
 
 	entry.Status = http.StatusOK
 	s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, usage.PromptTokens, usage.CompletionTokens)
+	s.enqueueCapture(ak, "anthropic", req.Model, target.Provider, target.UpstreamModel,
+		http.StatusOK, usage.PromptTokens, usage.CompletionTokens, entry.CostUSD,
+		dlpRes, req.Messages, sink.assembled())
 }
 
-// anthropicSink streams Anthropic Messages SSE events via a StreamWriter.
+// anthropicSink streams Anthropic Messages SSE events via a StreamWriter and
+// accumulates the response text for the capture pipeline.
 type anthropicSink struct {
-	w  http.ResponseWriter
-	sw *anthropic.StreamWriter
+	w       http.ResponseWriter
+	sw      *anthropic.StreamWriter
+	content strings.Builder
 }
 
 func (a *anthropicSink) begin() {
@@ -115,5 +133,11 @@ func (a *anthropicSink) begin() {
 }
 
 func (a *anthropicSink) chunk(c llm.StreamChunk) error {
+	if c.Content != "" {
+		a.content.WriteString(c.Content)
+	}
 	return a.sw.Chunk(c)
 }
+
+// assembled returns the full accumulated response text.
+func (a *anthropicSink) assembled() string { return a.content.String() }

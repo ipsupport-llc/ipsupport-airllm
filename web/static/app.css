@@ -110,7 +110,7 @@ td.mono { font-family: var(--font-mono); font-size: 0.84rem; }
 .badge.active { background: rgba(52,211,153,0.15); color: var(--ok); }
 .badge.revoked { background: rgba(248,113,113,0.15); color: var(--err); }
 .badge.admin { background: rgba(165,180,252,0.18); color: var(--accent); }
-.badge.neutral { background: var(--bg-soft); color: var(--muted); }
+.badge.neutral { background: var(--bg-soft); color: var(--muted); border: 1px solid var(--rule); }
 
 /* ---------- Forms / buttons ---------- */
 label.field { display: block; margin-bottom: 0.9rem; }
@@ -178,5 +178,8 @@ textarea { min-height: 120px; font-family: var(--font-mono); font-size: 0.84rem;
   .shell { flex-direction: column; }
   .sidebar { width: 100%; flex-direction: row; flex-wrap: wrap; align-items: center; }
   .nav { flex-direction: row; flex-wrap: wrap; }
+  .nav .sect { display: none; }
   .sidebar-foot { margin: 0 0 0 auto; border: none; }
+  /* Wide tables scroll horizontally instead of being clipped by the panel. */
+  .panel table { display: block; overflow-x: auto; white-space: nowrap; min-width: 100%; }
 }

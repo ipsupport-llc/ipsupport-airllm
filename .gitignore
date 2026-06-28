@@ -13,3 +13,9 @@
 /web/node_modules/
 /web/build/
 /web/.svelte-kit/
+
+# sdd scratch
+.superpowers/
+
+# local capture blob store (dev)
+capture-blobs/
