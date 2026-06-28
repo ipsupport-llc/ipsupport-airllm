@@ -49,7 +49,7 @@ function renderLogin() {
   app.innerHTML = `
     <div class="login-wrap">
       <div class="login-card">
-        <h1>air<span>router</span></h1>
+        <h1>ai<span>router</span></h1>
         <p>Sign in to the gateway console.</p>
         <form id="login-form">
           <label class="field"><span class="lab">Username</span>
@@ -85,7 +85,7 @@ function renderShell() {
   app.innerHTML = `
     <div class="shell">
       <aside class="sidebar">
-        <div class="brand">air<span>router</span></div>
+        <div class="brand">ai<span>router</span></div>
         <nav class="nav">
           ${NAV.map((n) => `<a href="${n.href}" data-nav>${n.label}</a>`).join("")}
           ${adminLink}
