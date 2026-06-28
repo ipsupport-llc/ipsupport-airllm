@@ -14,6 +14,7 @@ import (
 
 	"github.com/rromenskyi/ipsupport-airouter/internal/config"
 	"github.com/rromenskyi/ipsupport-airouter/internal/httpapi"
+	"github.com/rromenskyi/ipsupport-airouter/internal/seed"
 	"github.com/rromenskyi/ipsupport-airouter/internal/store"
 )
 
@@ -43,6 +44,15 @@ func run() error {
 
 	if err := st.Migrate(ctx); err != nil {
 		return err
+	}
+
+	// Local-mock convenience: seed demo data + a fixed dev API key.
+	if cfg.Env == "dev" && cfg.AuthMode == "mock" {
+		token, err := seed.Dev(ctx, st)
+		if err != nil {
+			return err
+		}
+		slog.Warn("dev mock seeded; using a fixed, non-secret API key", "token", token)
 	}
 
 	srv := &http.Server{

@@ -7,19 +7,32 @@ import (
 	"net/http"
 
 	"github.com/rromenskyi/ipsupport-airouter/internal/config"
+	"github.com/rromenskyi/ipsupport-airouter/internal/ledger"
+	"github.com/rromenskyi/ipsupport-airouter/internal/providers"
 	"github.com/rromenskyi/ipsupport-airouter/internal/store"
 )
 
 // Server is the top-level HTTP handler.
 type Server struct {
-	cfg *config.Config
-	st  *store.Store
-	mux *http.ServeMux
+	cfg       *config.Config
+	st        *store.Store
+	mux       *http.ServeMux
+	providers *providers.Registry
+	ledger    *ledger.Ledger
 }
 
-// NewServer builds the routed handler.
+// NewServer builds the routed handler with a provider registry and ledger.
 func NewServer(cfg *config.Config, st *store.Store) *Server {
-	s := &Server{cfg: cfg, st: st, mux: http.NewServeMux()}
+	reg := providers.NewRegistry()
+	reg.Register(providers.NewMock("mock"))
+
+	s := &Server{
+		cfg:       cfg,
+		st:        st,
+		mux:       http.NewServeMux(),
+		providers: reg,
+		ledger:    ledger.New(st),
+	}
 	s.routes()
 	return s
 }
@@ -32,6 +45,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealth)
 	s.mux.HandleFunc("GET /readyz", s.handleReady)
+
+	// Data-plane (API-key auth).
+	s.mux.HandleFunc("POST /v1/chat/completions", s.requireAPIKey(s.handleChatCompletions))
+	s.mux.HandleFunc("GET /v1/models", s.requireAPIKey(s.handleModels))
+}
+
+// resolve maps a client-requested model to a provider and upstream model.
+//
+// Phase 1 stub: always the mock provider, with the requested model passed
+// through as the upstream model. Alias-catalog routing with fallback lands
+// in phase 3.
+func (s *Server) resolve(model string) (providers.Provider, string) {
+	p, _ := s.providers.Get("mock")
+	return p, model
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
