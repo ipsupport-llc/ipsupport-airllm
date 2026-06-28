@@ -13,6 +13,7 @@ import (
 	"github.com/rromenskyi/ipsupport-airllm/internal/auth"
 	"github.com/rromenskyi/ipsupport-airllm/internal/blob"
 	"github.com/rromenskyi/ipsupport-airllm/internal/capture"
+	"github.com/rromenskyi/ipsupport-airllm/internal/dlp"
 	"github.com/rromenskyi/ipsupport-airllm/internal/secrets"
 )
 
@@ -29,8 +30,15 @@ func (f *fakeAuth) Authenticate(_ *http.Request) (auth.Principal, error) {
 
 // fakeCaptureStore is a test double for captureReader.
 type fakeCaptureStore struct {
-	mu   sync.Mutex
-	rows []capture.IndexRow
+	mu          sync.Mutex
+	rows        []capture.IndexRow
+	reviewCalls []fakeReviewCall
+}
+
+type fakeReviewCall struct {
+	id           string
+	reviewStatus string
+	goldLabels   []dlp.Finding
 }
 
 func (f *fakeCaptureStore) List(_ context.Context, _ capture.ListFilter) ([]capture.IndexRow, error) {
@@ -48,6 +56,38 @@ func (f *fakeCaptureStore) Get(_ context.Context, id string) (capture.IndexRow, 
 		}
 	}
 	return capture.IndexRow{}, capture.ErrNotFound
+}
+
+func (f *fakeCaptureStore) ReviewQueue(_ context.Context, _ int) ([]capture.IndexRow, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []capture.IndexRow
+	for _, r := range f.rows {
+		if r.ReviewStatus == "unreviewed" || r.SecondpassStatus == "suspect" {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+var fakeValidReviewStatuses = map[string]bool{
+	"confirmed": true, "false_positive": true, "false_negative": true, "unreviewed": true,
+}
+
+func (f *fakeCaptureStore) SetReview(_ context.Context, id string, reviewStatus string, goldLabels []dlp.Finding) error {
+	if !fakeValidReviewStatuses[reviewStatus] {
+		return capture.ErrInvalidReviewStatus
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reviewCalls = append(f.reviewCalls, fakeReviewCall{id: id, reviewStatus: reviewStatus, goldLabels: goldLabels})
+	for i, r := range f.rows {
+		if r.ID == id {
+			f.rows[i].ReviewStatus = reviewStatus
+			f.rows[i].GoldLabels = goldLabels
+		}
+	}
+	return nil
 }
 
 // fakeMemBlob is a simple in-memory blob.Store.
@@ -244,5 +284,106 @@ func TestAuditAdminPassesAuditorCheck(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("admin should pass auditor check, got %d", rec.Code)
+	}
+}
+
+// --- Phase 3 tests ---
+
+func TestAuditReviewQueue(t *testing.T) {
+	store := &fakeCaptureStore{rows: []capture.IndexRow{
+		{ID: "u1", ReviewStatus: "unreviewed", SecondpassStatus: "pending"},
+		{ID: "u2", ReviewStatus: "confirmed", SecondpassStatus: "clean"},   // filtered out
+		{ID: "u3", ReviewStatus: "confirmed", SecondpassStatus: "suspect"}, // secondpass suspect
+	}}
+	auditor := auth.Principal{Subject: "rev", Roles: []string{auth.AuditorRole}}
+	srv, _ := newAuditTestServer(t, auditor, store, newFakeMemBlob())
+
+	req := httptest.NewRequest("GET", "/api/audit/review", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]json.RawMessage
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	var captures []capture.IndexRow
+	if err := json.Unmarshal(body["captures"], &captures); err != nil {
+		t.Fatal(err)
+	}
+	if len(captures) != 2 {
+		t.Fatalf("expected 2 captures in queue, got %d", len(captures))
+	}
+}
+
+func TestAuditPostReviewValidStatus(t *testing.T) {
+	store := &fakeCaptureStore{rows: []capture.IndexRow{
+		{ID: "cap1", ReviewStatus: "unreviewed"},
+	}}
+	auditor := auth.Principal{Subject: "rev", Roles: []string{auth.AuditorRole}}
+	srv, auditLog := newAuditTestServer(t, auditor, store, newFakeMemBlob())
+
+	body := strings.NewReader(`{"review_status":"confirmed","labels":[{"label":"openai_key","start":0,"end":5}]}`)
+	req := httptest.NewRequest("POST", "/api/audit/captures/cap1/review", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(store.reviewCalls) != 1 {
+		t.Fatalf("expected 1 review call, got %d", len(store.reviewCalls))
+	}
+	if store.reviewCalls[0].reviewStatus != "confirmed" {
+		t.Errorf("expected review_status=confirmed, got %q", store.reviewCalls[0].reviewStatus)
+	}
+	if len(store.reviewCalls[0].goldLabels) != 1 {
+		t.Errorf("expected 1 gold label, got %d", len(store.reviewCalls[0].goldLabels))
+	}
+	// Audit event must have been logged.
+	if len(*auditLog) == 0 {
+		t.Error("expected audit.review to be logged")
+	}
+	if (*auditLog)[0] != "audit.review:cap1" {
+		t.Errorf("unexpected audit log entry: %v", *auditLog)
+	}
+}
+
+func TestAuditPostReviewInvalidStatus(t *testing.T) {
+	store := &fakeCaptureStore{rows: []capture.IndexRow{
+		{ID: "cap2", ReviewStatus: "unreviewed"},
+	}}
+	auditor := auth.Principal{Subject: "rev", Roles: []string{auth.AuditorRole}}
+	srv, _ := newAuditTestServer(t, auditor, store, newFakeMemBlob())
+
+	body := strings.NewReader(`{"review_status":"bogus"}`)
+	req := httptest.NewRequest("POST", "/api/audit/captures/cap2/review", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAuditReviewRequiresAuditor(t *testing.T) {
+	store := &fakeCaptureStore{}
+	user := auth.Principal{Subject: "u", Roles: []string{auth.UserRole}}
+	srv, _ := newAuditTestServer(t, user, store, newFakeMemBlob())
+
+	for _, tc := range []struct{ method, path string }{
+		{"GET", "/api/audit/review"},
+		{"POST", "/api/audit/captures/x/review"},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s %s: expected 403, got %d", tc.method, tc.path, rec.Code)
+		}
 	}
 }

@@ -13,25 +13,26 @@ import (
 
 // IndexRow mirrors the capture_index table.
 type IndexRow struct {
-	ID               string
-	TS               time.Time
-	KeyID            string
-	UserID           string
-	IngressProtocol  string
-	Alias            string
-	ProviderName     string
-	UpstreamModel    string
-	Status           int
-	PromptTokens     int64
-	CompletionTokens int64
-	CostUSD          float64
-	BlobKey          string
-	Redacted         bool
-	ModelVersion     string
-	Detected         []dlp.Finding
-	ReviewStatus     string
-	SecondpassStatus string
-	SecondpassLabels []dlp.Finding
+	ID               string        `json:"id"`
+	TS               time.Time     `json:"ts"`
+	KeyID            string        `json:"key_id"`
+	UserID           string        `json:"user_id"`
+	IngressProtocol  string        `json:"ingress_protocol"`
+	Alias            string        `json:"alias"`
+	ProviderName     string        `json:"provider_name"`
+	UpstreamModel    string        `json:"upstream_model"`
+	Status           int           `json:"status"`
+	PromptTokens     int64         `json:"prompt_tokens"`
+	CompletionTokens int64         `json:"completion_tokens"`
+	CostUSD          float64       `json:"cost_usd"`
+	BlobKey          string        `json:"blob_key"`
+	Redacted         bool          `json:"redacted"`
+	ModelVersion     string        `json:"model_version"`
+	Detected         []dlp.Finding `json:"detected"`
+	ReviewStatus     string        `json:"review_status"`
+	SecondpassStatus string        `json:"secondpass_status"`
+	SecondpassLabels []dlp.Finding `json:"secondpass_labels"`
+	GoldLabels       []dlp.Finding `json:"gold_labels"`
 }
 
 // newID returns a hex-encoded random 16-byte ID.
@@ -132,7 +133,7 @@ func (p *PGInserter) List(ctx context.Context, f ListFilter) ([]IndexRow, error)
 		       provider_name, upstream_model, status,
 		       prompt_tokens, completion_tokens, cost_usd,
 		       blob_key, redacted, model_version,
-		       detected, review_status, secondpass_status, secondpass_labels
+		       detected, review_status, secondpass_status, secondpass_labels, gold_labels
 		FROM capture_index
 		WHERE ($1 = '' OR review_status = $1)
 		  AND ($2 = '' OR secondpass_status = $2)
@@ -155,7 +156,7 @@ func (p *PGInserter) Get(ctx context.Context, id string) (IndexRow, error) {
 		       provider_name, upstream_model, status,
 		       prompt_tokens, completion_tokens, cost_usd,
 		       blob_key, redacted, model_version,
-		       detected, review_status, secondpass_status, secondpass_labels
+		       detected, review_status, secondpass_status, secondpass_labels, gold_labels
 		FROM capture_index WHERE id = $1`, id)
 	if err != nil {
 		return IndexRow{}, err
@@ -179,6 +180,63 @@ func (notFoundError) Error() string { return "capture: not found" }
 // ErrNotFound is returned by Get when no row matches.
 var ErrNotFound = notFoundError{}
 
+// ErrInvalidReviewStatus is returned by SetReview when reviewStatus is not one
+// of the allowed values.
+var ErrInvalidReviewStatus = errInvalidReviewStatus{}
+
+type errInvalidReviewStatus struct{}
+
+func (errInvalidReviewStatus) Error() string {
+	return "capture: review_status must be one of: confirmed, false_positive, false_negative, unreviewed"
+}
+
+// validReviewStatuses is the set of permitted values for review_status.
+var validReviewStatuses = map[string]bool{
+	"confirmed":      true,
+	"false_positive": true,
+	"false_negative": true,
+	"unreviewed":     true,
+}
+
+// ReviewQueue returns captures pending review: rows where review_status is
+// 'unreviewed' or secondpass_status is 'suspect', newest first.
+func (p *PGInserter) ReviewQueue(ctx context.Context, limit int) ([]IndexRow, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	rows, err := p.PG.Query(ctx, `
+		SELECT id, ts, key_id, user_id, ingress_protocol, alias,
+		       provider_name, upstream_model, status,
+		       prompt_tokens, completion_tokens, cost_usd,
+		       blob_key, redacted, model_version,
+		       detected, review_status, secondpass_status, secondpass_labels, gold_labels
+		FROM capture_index
+		WHERE review_status = 'unreviewed' OR secondpass_status = 'suspect'
+		ORDER BY ts DESC
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRows(rows)
+}
+
+// SetReview updates review_status and gold_labels for the given capture.
+// reviewStatus must be one of: confirmed, false_positive, false_negative, unreviewed.
+func (p *PGInserter) SetReview(ctx context.Context, id string, reviewStatus string, goldLabels []dlp.Finding) error {
+	if !validReviewStatuses[reviewStatus] {
+		return ErrInvalidReviewStatus
+	}
+	gold, err := json.Marshal(goldLabels)
+	if err != nil {
+		gold = []byte("[]")
+	}
+	_, err = p.PG.Exec(ctx, `
+		UPDATE capture_index SET review_status = $1, gold_labels = $2 WHERE id = $3`,
+		reviewStatus, string(gold), id)
+	return err
+}
+
 func scanRows(rows interface {
 	Next() bool
 	Scan(...any) error
@@ -188,14 +246,14 @@ func scanRows(rows interface {
 	for rows.Next() {
 		var r IndexRow
 		var keyID, userID *string
-		var detectedRaw, secondpassRaw []byte
+		var detectedRaw, secondpassRaw, goldRaw []byte
 		if err := rows.Scan(
 			&r.ID, &r.TS, &keyID, &userID,
 			&r.IngressProtocol, &r.Alias,
 			&r.ProviderName, &r.UpstreamModel, &r.Status,
 			&r.PromptTokens, &r.CompletionTokens, &r.CostUSD,
 			&r.BlobKey, &r.Redacted, &r.ModelVersion,
-			&detectedRaw, &r.ReviewStatus, &r.SecondpassStatus, &secondpassRaw,
+			&detectedRaw, &r.ReviewStatus, &r.SecondpassStatus, &secondpassRaw, &goldRaw,
 		); err != nil {
 			return nil, err
 		}
@@ -207,6 +265,7 @@ func scanRows(rows interface {
 		}
 		_ = json.Unmarshal(detectedRaw, &r.Detected)
 		_ = json.Unmarshal(secondpassRaw, &r.SecondpassLabels)
+		_ = json.Unmarshal(goldRaw, &r.GoldLabels)
 		out = append(out, r)
 	}
 	return out, rows.Err()

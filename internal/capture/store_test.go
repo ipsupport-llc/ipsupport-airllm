@@ -3,6 +3,7 @@ package capture
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,5 +82,55 @@ func TestNullStr(t *testing.T) {
 	}
 	if nullStr("x") == nil {
 		t.Error("non-empty string must not map to nil")
+	}
+}
+
+// TestSetReviewValidation checks that SetReview rejects unknown status values.
+// Validation runs before any DB call, so we can test it without a live pool by
+// only exercising invalid statuses (which return early) and using validReviewStatuses
+// to whitebox-verify that all permitted values are registered.
+func TestSetReviewValidation(t *testing.T) {
+	// All valid statuses must appear in validReviewStatuses.
+	for _, status := range []string{"confirmed", "false_positive", "false_negative", "unreviewed"} {
+		if !validReviewStatuses[status] {
+			t.Errorf("status %q must be in validReviewStatuses", status)
+		}
+	}
+
+	// Invalid statuses must return ErrInvalidReviewStatus (no DB call needed).
+	p := &PGInserter{} // nil pool — safe because validation returns before DB access
+	ctx := context.Background()
+	for _, bad := range []string{"", "ok", "reviewed", "suspect", "CONFIRMED"} {
+		err := p.SetReview(ctx, "id1", bad, nil)
+		if err != ErrInvalidReviewStatus {
+			t.Errorf("status %q should be invalid, want ErrInvalidReviewStatus, got %v", bad, err)
+		}
+	}
+}
+
+// TestIndexRowJSONTags verifies that IndexRow serialises with snake_case keys.
+func TestIndexRowJSONTags(t *testing.T) {
+	row := IndexRow{
+		ID:               "abc",
+		IngressProtocol:  "openai",
+		ReviewStatus:     "unreviewed",
+		SecondpassStatus: "pending",
+		GoldLabels:       []dlp.Finding{{Label: "l", Start: 0, End: 1}},
+	}
+	b, err := json.Marshal(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, want := range []string{`"id"`, `"ingress_protocol"`, `"review_status"`, `"secondpass_status"`, `"gold_labels"`} {
+		if !strings.Contains(s, want) {
+			t.Errorf("JSON missing key %s in: %s", want, s)
+		}
+	}
+	// PascalCase must not appear.
+	for _, bad := range []string{`"ID"`, `"IngressProtocol"`, `"ReviewStatus"`} {
+		if strings.Contains(s, bad) {
+			t.Errorf("JSON should not contain PascalCase key %s in: %s", bad, s)
+		}
 	}
 }
