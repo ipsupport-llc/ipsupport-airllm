@@ -64,11 +64,17 @@ func Export(
 	enc := json.NewEncoder(&buf)
 
 	for _, row := range rows {
-		if row.BlobKey == "" {
+		// Prefer the un-redacted raw-window copy (aligned spans) when it exists
+		// and has not expired; otherwise use the durable (possibly redacted) body.
+		blobKey := row.BlobKey
+		if row.RawBlobKey != "" && row.RawExpiresAt != nil && row.RawExpiresAt.After(time.Now()) {
+			blobKey = row.RawBlobKey
+		}
+		if blobKey == "" {
 			continue
 		}
 
-		body, berr := readBody(ctx, row.BlobKey)
+		body, berr := readBody(ctx, blobKey)
 		if berr != nil {
 			// Unreadable blob (swept or unavailable): skip, best-effort export.
 			continue

@@ -37,3 +37,20 @@ func TestCaptureConfigSampleRateClamp(t *testing.T) {
 		t.Errorf("valid SampleRate must pass through, got %v", cfg3.SampleRate)
 	}
 }
+
+func TestCaptureConfigWindowClamp(t *testing.T) {
+	// Zero/negative retention and raw TTL must clamp to safe defaults so a saved
+	// config can never disable the sweeper or set a zero-length raw window.
+	cfg := clampCaptureConfig(captureConfig{RetentionDays: 0, RawTTLHours: -5})
+	if cfg.RetentionDays != 30 {
+		t.Errorf("RetentionDays <=0 must clamp to 30, got %v", cfg.RetentionDays)
+	}
+	if cfg.RawTTLHours != 24 {
+		t.Errorf("RawTTLHours <=0 must clamp to 24, got %v", cfg.RawTTLHours)
+	}
+
+	cfg2 := clampCaptureConfig(captureConfig{RetentionDays: 7, RawTTLHours: 2})
+	if cfg2.RetentionDays != 7 || cfg2.RawTTLHours != 2 {
+		t.Errorf("positive windows must pass through, got %d / %d", cfg2.RetentionDays, cfg2.RawTTLHours)
+	}
+}

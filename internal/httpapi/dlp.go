@@ -16,9 +16,13 @@ import (
 
 // dlpConfig is the global DLP policy.
 type dlpConfig struct {
-	Enabled       bool   `json:"enabled"`
-	Action        string `json:"action"` // off | flag | redact | block
-	ScanResponses bool   `json:"scan_responses"`
+	Enabled bool   `json:"enabled"`
+	Action  string `json:"action"` // off | flag | redact | block
+	// ScanResponses is reserved and intentionally NOT enforced. DLP governs
+	// prompts only — the data the coding agent sends upstream. Model responses
+	// are never scanned, redacted, or blocked (by design). Kept for forward
+	// compatibility of the stored settings shape.
+	ScanResponses bool `json:"scan_responses"`
 
 	// Layer 2: optional BERT-NER sidecar for fuzzy/contextual PII.
 	ModelEnabled  bool    `json:"model_enabled"`
@@ -63,17 +67,31 @@ type dlpResult struct {
 	MsgFindings     [][]dlp.Finding // per-message findings, indexed parallel to req.Messages
 	HadIncident     bool
 	AlreadyRedacted bool // true when action="redact" masked req.Messages in place
+	// OriginalMessages preserves the pre-redaction messages so the capture
+	// pipeline can build a raw-window body. Set only when action="redact"
+	// (the case that mutates req.Messages in place and loses the original).
+	OriginalMessages []llm.Message
 }
 
-// dlpEnforce scans the request messages. On "redact" it masks secrets in place;
-// on "block" it returns blocked=true with a client message. Detections are
-// recorded and alerted regardless of action (except "off").
+// dlpEnforce scans the request messages — prompts only, by design (responses
+// are never scanned; see dlpConfig.ScanResponses). On "redact" it masks secrets
+// in place; on "block" it returns blocked=true with a client message. Detections
+// are recorded and alerted regardless of action (except "off").
 // It also returns a dlpResult for the capture pipeline (findings are collected
 // across all messages; offsets are per-message and meaningful only in context).
 func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, req *llm.ChatRequest) (blocked bool, message string, result dlpResult) {
 	cfg := s.dlpCfg()
 	if !cfg.Enabled || cfg.Action == "off" {
 		return false, "", dlpResult{}
+	}
+
+	// Snapshot the original messages before any in-place redaction so the
+	// capture pipeline can build an un-redacted raw-window body. Strings are
+	// immutable, so a shallow slice copy preserves the pre-mask content.
+	var original []llm.Message
+	if cfg.Action == "redact" {
+		original = make([]llm.Message, len(req.Messages))
+		copy(original, req.Messages)
 	}
 
 	labelSet := map[string]bool{}
@@ -124,10 +142,11 @@ func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, r
 		return true, "request blocked: sensitive content detected (" + strings.Join(labels, ", ") + ")", dlpResult{}
 	}
 	return false, "", dlpResult{
-		Findings:        allFindings,
-		MsgFindings:     perMsg,
-		HadIncident:     true,
-		AlreadyRedacted: cfg.Action == "redact",
+		Findings:         allFindings,
+		MsgFindings:      perMsg,
+		HadIncident:      true,
+		AlreadyRedacted:  cfg.Action == "redact",
+		OriginalMessages: original,
 	}
 }
 

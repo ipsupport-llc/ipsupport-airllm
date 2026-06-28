@@ -158,6 +158,10 @@ func (s *Server) handleAuditPostReview(w http.ResponseWriter, r *http.Request) {
 			writeControlError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if errors.Is(err, capture.ErrNotFound) {
+			writeControlError(w, http.StatusNotFound, "capture not found")
+			return
+		}
 		writeControlError(w, http.StatusInternalServerError, "failed to update review")
 		return
 	}

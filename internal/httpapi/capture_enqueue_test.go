@@ -81,6 +81,32 @@ func TestCaptureBodyNoDoubleRedactionWhenAlreadyRedacted(t *testing.T) {
 	}
 }
 
+// TestRawBodyUsesOriginalsWhenDLPRedacted proves the raw-training window stores
+// UN-redacted text even when DLP action="redact" masked req.Messages in place:
+// the raw body is built from the originals preserved by dlpEnforce, while the
+// main (durable) body stays redacted. This is the fix that makes the flywheel
+// accurate on a redacted stream.
+func TestRawBodyUsesOriginalsWhenDLPRedacted(t *testing.T) {
+	secret := "sk-ant-api03-aaaabbbbccccddddeeee1234"
+	content := "key: " + secret
+	findings := [][]dlp.Finding{{{Label: "anthropic_key", Start: 5, End: 5 + len(secret)}}}
+
+	// As dlpEnforce(action=redact) leaves things: originals preserved, msgs masked.
+	original := []llm.Message{{Role: "user", Content: content}}
+	masked := []llm.Message{{Role: "user", Content: dlp.Redact(content, findings[0])}}
+
+	// Main body comes from the masked messages (no re-redaction).
+	mainBody := captureBody(masked, "ok", false, findings)
+	if bytes.Contains(mainBody, []byte(secret)) {
+		t.Error("main body must stay redacted")
+	}
+	// Raw body comes from the preserved originals — un-redacted.
+	rawBody := captureBody(original, "ok", false, nil)
+	if !bytes.Contains(rawBody, []byte(secret)) {
+		t.Error("raw body must contain the un-redacted secret (built from originals)")
+	}
+}
+
 // TestCaptureBodyNoFindingsNoChange verifies that captureBody with Redact=true
 // but no findings is a no-op (nothing to redact).
 func TestCaptureBodyNoFindingsNoChange(t *testing.T) {
