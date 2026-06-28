@@ -32,6 +32,16 @@ function toast(msg, kind = "ok") {
 function fmtUSD(n) { return "$" + Number(n || 0).toFixed(4); }
 function fmtNum(n) { return Number(n || 0).toLocaleString("en-US"); }
 function fmtTime(s) { return s ? new Date(s).toLocaleString() : "—"; }
+// Render a role limits object ({tokens:{24h:N}, usd:{7d:N}}) as readable text.
+function fmtLimits(lim) {
+  const parts = [];
+  for (const [dim, windows] of Object.entries(lim || {})) {
+    for (const [win, val] of Object.entries(windows || {})) {
+      parts.push(dim === "usd" ? `$${fmtNum(val)}/${esc(win)}` : `${fmtNum(val)} ${esc(dim)}/${esc(win)}`);
+    }
+  }
+  return parts.length ? parts.join(", ") : "—";
+}
 
 let me = null;
 
@@ -649,7 +659,7 @@ async function adminRoles(c) {
       roles.map((rp) => `<tr><td class="mono">${esc(rp.role)}</td>
         <td>${(rp.allowed_models || []).map(esc).join(", ")}</td>
         <td>${rp.allow_passthrough ? "yes" : "no"}</td>
-        <td class="mono">${esc(JSON.stringify(rp.limits || {}))}</td>
+        <td>${fmtLimits(rp.limits)}</td>
         <td style="text-align:right"><button class="btn ghost sm" data-edit='${esc(JSON.stringify(rp))}'>Edit</button></td></tr>`));
   $("#new-role").addEventListener("click", () => editRole(c, {}));
   document.querySelectorAll("[data-edit]").forEach((b) =>
