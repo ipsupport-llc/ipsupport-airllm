@@ -8,7 +8,7 @@ WORKDIR /app
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
  && pip install --no-cache-dir fastapi "uvicorn[standard]" transformers
 
-ARG DLP_MODEL=Isotonic/distilbert_finetuned_ai4privacy_v2
+ARG DLP_MODEL=dslim/bert-base-NER
 ENV DLP_MODEL=${DLP_MODEL}
 
 # Pre-download the model weights into the image.

@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from transformers import pipeline
 
-MODEL = os.environ.get("DLP_MODEL", "Isotonic/distilbert_finetuned_ai4privacy_v2")
+MODEL = os.environ.get("DLP_MODEL", "dslim/bert-base-NER")
 
 ner = pipeline("token-classification", model=MODEL, aggregation_strategy="simple")
 
