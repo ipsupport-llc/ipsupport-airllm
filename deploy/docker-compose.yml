@@ -37,10 +37,12 @@ services:
       REDIS_URL: "redis://redis:6379/0"
       ENV: "dev"
       AUTH_MODE: "mock"
-    # Loopback-only on the host; reach it via a tunnel/port-forward. In k8s
-    # the app listens on 0.0.0.0 and is fronted by the ingress instead.
+    # Default to loopback; set APP_BIND (e.g. in deploy/.env) to publish on a
+    # specific LAN interface like "10.0.0.2:8088". Never bind to 0.0.0.0 on a
+    # host with a public IP. In k8s the app listens on 0.0.0.0 behind the
+    # ingress instead.
     ports:
-      - "127.0.0.1:8080:8080"
+      - "${APP_BIND:-127.0.0.1:8080}:8080"
     depends_on:
       postgres:
         condition: service_healthy
