@@ -16,3 +16,6 @@
 
 # sdd scratch
 .superpowers/
+
+# local capture blob store (dev)
+capture-blobs/
