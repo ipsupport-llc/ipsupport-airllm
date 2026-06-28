@@ -250,6 +250,13 @@ func (p *Pipeline) sweep(ctx context.Context, now time.Time, retentionDays int) 
 				slog.Warn("capture sweep: blob delete failed", "key", row.BlobKey, "err", err)
 			}
 		}
+		// Delete any un-redacted raw copy too, so the row's removal never leaves
+		// an orphaned secret blob behind.
+		if row.RawBlobKey != "" {
+			if err := p.bs.Delete(ctx, row.RawBlobKey); err != nil {
+				slog.Warn("capture sweep: raw blob delete failed", "key", row.RawBlobKey, "err", err)
+			}
+		}
 		if err := p.idx.DeleteByID(ctx, row.ID); err != nil {
 			slog.Error("capture sweep: index delete failed", "id", row.ID, "err", err)
 		}

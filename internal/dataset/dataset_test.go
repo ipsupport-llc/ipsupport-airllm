@@ -183,6 +183,47 @@ func TestExportPrefersRawBlob(t *testing.T) {
 	}
 }
 
+// TestExportIgnoresExpiredRawBlob verifies that an expired raw window is ignored
+// and Export falls back to the durable main blob.
+func TestExportIgnoresExpiredRawBlob(t *testing.T) {
+	main := "key: sk-main-1234567890abcdefghijk"
+	finding := dlp.Finding{Label: "openai_key", Start: 5, End: len(main)}
+	past := time.Now().Add(-time.Hour)
+
+	store := &fakeStore{rows: []capture.IndexRow{
+		{
+			ID:           "c1",
+			BlobKey:      "captures/c1",
+			RawBlobKey:   "captures-raw/c1",
+			RawExpiresAt: &past,
+			ReviewStatus: "confirmed",
+			Detected:     []dlp.Finding{finding},
+		},
+	}}
+	writer := newFakeWriter()
+	readBody := func(_ context.Context, key string) ([]byte, error) {
+		if key == "captures/c1" {
+			return makeBody(main), nil
+		}
+		return nil, errors.New("expired raw blob must not be read: " + key)
+	}
+
+	artifactKey, count, err := Export(context.Background(), store, readBody, writer)
+	if err != nil {
+		t.Fatalf("Export returned error: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected fallback to main blob (count 1), got %d", count)
+	}
+	lines, err := parseJSONL(writer.data[artifactKey])
+	if err != nil {
+		t.Fatalf("parseJSONL: %v", err)
+	}
+	if len(lines) != 1 || lines[0].Text != main {
+		t.Fatalf("expected exported text from main blob %q, got %+v", main, lines)
+	}
+}
+
 // TestExportPrefersGoldLabels verifies that gold_labels are used when non-empty,
 // even when detected has different labels for the same span.
 func TestExportPrefersGoldLabels(t *testing.T) {

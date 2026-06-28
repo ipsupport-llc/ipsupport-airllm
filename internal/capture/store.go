@@ -94,10 +94,12 @@ func (p *PGInserter) Insert(ctx context.Context, row IndexRow) error {
 	return err
 }
 
-// ListExpired returns rows whose ts is before the cutoff time.
+// ListExpired returns rows whose ts is before the cutoff time. raw_blob_key is
+// included so the sweeper can also delete any un-redacted raw copy along with
+// the row (preventing orphaned raw blobs if the row expires before its raw TTL).
 func (p *PGInserter) ListExpired(ctx context.Context, before time.Time) ([]IndexRow, error) {
 	rows, err := p.PG.Query(ctx,
-		`SELECT id, ts, blob_key FROM capture_index WHERE ts < $1`, before)
+		`SELECT id, ts, blob_key, raw_blob_key FROM capture_index WHERE ts < $1`, before)
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +107,7 @@ func (p *PGInserter) ListExpired(ctx context.Context, before time.Time) ([]Index
 	var out []IndexRow
 	for rows.Next() {
 		var r IndexRow
-		if err := rows.Scan(&r.ID, &r.TS, &r.BlobKey); err != nil {
+		if err := rows.Scan(&r.ID, &r.TS, &r.BlobKey, &r.RawBlobKey); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

@@ -193,6 +193,29 @@ func TestPipeline_SweepRaw(t *testing.T) {
 	}
 }
 
+// TestPipeline_MainSweepDeletesRawBlob verifies the retention sweep deletes a
+// row's un-redacted raw copy along with the row, so an expired row never
+// orphans a secret blob.
+func TestPipeline_MainSweepDeletesRawBlob(t *testing.T) {
+	bs := newMemBlob()
+	idx := &fakeInserter{}
+	p := NewPipeline(bs, idx, testSealer(t), func() Config { return Config{} })
+
+	_ = bs.Put(context.Background(), "captures/x", []byte("main"))
+	_ = bs.Put(context.Background(), "captures-raw/x", []byte("raw-secret"))
+	old := time.Now().Add(-48 * time.Hour)
+	idx.rows = append(idx.rows, IndexRow{ID: "x", TS: old, BlobKey: "captures/x", RawBlobKey: "captures-raw/x"})
+
+	p.sweep(context.Background(), time.Now(), 1) // retention 1 day; row is 2 days old
+
+	if _, err := bs.Get(context.Background(), "captures-raw/x"); err == nil {
+		t.Error("retention sweep must delete the raw blob (no orphaned secret)")
+	}
+	if _, err := bs.Get(context.Background(), "captures/x"); err == nil {
+		t.Error("retention sweep must delete the main blob")
+	}
+}
+
 func testSealer(t *testing.T) *secrets.Sealer {
 	t.Helper()
 	key := make([]byte, 32)

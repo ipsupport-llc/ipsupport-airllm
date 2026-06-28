@@ -53,4 +53,11 @@ func TestCaptureConfigWindowClamp(t *testing.T) {
 	if cfg2.RetentionDays != 7 || cfg2.RawTTLHours != 2 {
 		t.Errorf("positive windows must pass through, got %d / %d", cfg2.RetentionDays, cfg2.RawTTLHours)
 	}
+
+	// The raw TTL must never exceed the retention window, or the retention sweep
+	// would orphan an un-redacted raw blob.
+	cfg3 := clampCaptureConfig(captureConfig{RetentionDays: 1, RawTTLHours: 100})
+	if cfg3.RawTTLHours != 24 {
+		t.Errorf("RawTTLHours must be capped at RetentionDays*24 (24), got %d", cfg3.RawTTLHours)
+	}
 }

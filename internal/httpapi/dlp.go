@@ -73,6 +73,21 @@ type dlpResult struct {
 	OriginalMessages []llm.Message
 }
 
+// snapshotOriginals returns a copy of msgs when the DLP action will redact them
+// in place ("redact"), so the capture pipeline can still build an un-redacted
+// raw-window body; it returns nil for every other action (which leaves
+// req.Messages untouched, so the caller already holds the originals). Message
+// Content is an immutable string, so this shallow copy preserves the pre-mask
+// text even after req.Messages[i].Content is later reassigned.
+func snapshotOriginals(action string, msgs []llm.Message) []llm.Message {
+	if action != "redact" {
+		return nil
+	}
+	out := make([]llm.Message, len(msgs))
+	copy(out, msgs)
+	return out
+}
+
 // dlpEnforce scans the request messages — prompts only, by design (responses
 // are never scanned; see dlpConfig.ScanResponses). On "redact" it masks secrets
 // in place; on "block" it returns blocked=true with a client message. Detections
@@ -86,13 +101,8 @@ func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, r
 	}
 
 	// Snapshot the original messages before any in-place redaction so the
-	// capture pipeline can build an un-redacted raw-window body. Strings are
-	// immutable, so a shallow slice copy preserves the pre-mask content.
-	var original []llm.Message
-	if cfg.Action == "redact" {
-		original = make([]llm.Message, len(req.Messages))
-		copy(original, req.Messages)
-	}
+	// capture pipeline can build an un-redacted raw-window body.
+	original := snapshotOriginals(cfg.Action, req.Messages)
 
 	labelSet := map[string]bool{}
 	total := 0

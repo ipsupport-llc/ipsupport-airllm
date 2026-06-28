@@ -81,6 +81,33 @@ func TestCaptureBodyNoDoubleRedactionWhenAlreadyRedacted(t *testing.T) {
 	}
 }
 
+// TestSnapshotOriginalsPreservesPreMaskContent guards the core of the raw-window
+// fix: snapshotOriginals must capture message content BEFORE dlpEnforce redacts
+// req.Messages in place, and only for action="redact". A later in-place
+// reassignment of Content must not corrupt the snapshot.
+func TestSnapshotOriginalsPreservesPreMaskContent(t *testing.T) {
+	secret := "sk-ant-api03-aaaabbbbccccddddeeee1234"
+	msgs := []llm.Message{{Role: "user", Content: "key: " + secret}}
+
+	snap := snapshotOriginals("redact", msgs)
+	if snap == nil {
+		t.Fatal("redact action must snapshot originals")
+	}
+	// Simulate dlpEnforce's in-place redaction after the snapshot was taken.
+	msgs[0].Content = "key: [REDACTED:anthropic_key]"
+	if snap[0].Content != "key: "+secret {
+		t.Fatalf("snapshot must preserve pre-mask content, got %q", snap[0].Content)
+	}
+
+	// Non-redact actions leave req.Messages untouched -> no snapshot needed.
+	if snapshotOriginals("flag", msgs) != nil {
+		t.Error("non-redact action must not snapshot (caller already holds originals)")
+	}
+	if snapshotOriginals("off", msgs) != nil {
+		t.Error("off action must not snapshot")
+	}
+}
+
 // TestRawBodyUsesOriginalsWhenDLPRedacted proves the raw-training window stores
 // UN-redacted text even when DLP action="redact" masked req.Messages in place:
 // the raw body is built from the originals preserved by dlpEnforce, while the

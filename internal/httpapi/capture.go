@@ -43,6 +43,12 @@ func clampCaptureConfig(cfg captureConfig) captureConfig {
 	if cfg.RawTTLHours <= 0 {
 		cfg.RawTTLHours = 24
 	}
+	// The raw (un-redacted) copy must never outlive its row: otherwise the
+	// retention sweep drops the row and orphans an un-redacted secret blob that
+	// nothing references. Cap the raw TTL to the retention window.
+	if maxRaw := cfg.RetentionDays * 24; cfg.RawTTLHours > maxRaw {
+		cfg.RawTTLHours = maxRaw
+	}
 	return cfg
 }
 
