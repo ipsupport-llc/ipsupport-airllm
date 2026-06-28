@@ -63,6 +63,36 @@ DLP scans **prompts only** — the data an agent sends upstream. Model responses
 are never scanned, redacted, or blocked. This is a deliberate design choice; the
 `scan_responses` config field is reserved and inert, not a missing feature.
 
+## Sensitive Info Detection
+
+Beyond secrets, the detector ships a catalog of toggleable patterns (OpenRouter-
+style guardrails). The operator chooses which run per workspace under **Admin →
+DLP → Sensitive Info Detection**; `GET /api/admin/dlp/patterns` lists the catalog.
+
+| Pattern | Category | Default | Notes |
+|---------|----------|---------|-------|
+| secret rules (`openai_key`, `jwt`, `private_key`, …) | secret | on | the credential detectors |
+| `high_entropy` | secret | on | entropy heuristic (toggleable) |
+| `email` | pii | off | email address |
+| `phone` | pii | off | E.164 / common US/intl forms |
+| `ssn` | pii | off | US `NNN-NN-NNNN` |
+| `credit_card` | pii | off | digit run, **Luhn-validated** |
+| `ip_address` | pii | off | IPv4 with octet-range validation |
+| `person_name` | pii (model) | off | BERT `pii:PER` — *adds latency* |
+| `address` | pii (model) | off | BERT `pii:LOC` — *adds latency* |
+| `organization` | pii (model) | off | BERT `pii:ORG` — *adds latency* |
+
+- **Toggles** are stored in `dlp.patterns` (label → on/off). A label absent from
+  the map uses its default, so partial/legacy configs keep working; the model
+  toggles only take effect when the BERT sidecar is enabled.
+- **Custom patterns** (`dlp.custom_patterns`: `{label, regex, enabled}`) let the
+  operator add their own. They are validated on save (must compile, ≤ 512 chars,
+  ≤ 50 entries). Detection uses Go's RE2 engine, which is linear-time — operator
+  regexes cannot cause catastrophic backtracking (no ReDoS).
+
+A toggled-on PII or custom pattern flows through the same `action`
+(`flag`/`redact`/`block`), incidents, and webhooks as the secret detectors.
+
 ## Alert webhooks
 
 Endpoints registered under **Admin → DLP** receive HMAC-signed POSTs

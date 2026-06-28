@@ -25,26 +25,91 @@ type Finding struct {
 	End   int    `json:"end"`
 }
 
-type rule struct {
-	label string
-	re    *regexp.Regexp
+// pattern is a built-in detection rule. category and defaultOn drive the UI
+// toggles and the default-enabled set; validate (optional) post-filters a regex
+// match (e.g. Luhn for cards, octet ranges for IPs).
+type pattern struct {
+	label     string
+	category  string // "secret" | "pii"
+	re        *regexp.Regexp
+	validate  func(string) bool
+	defaultOn bool
 }
 
-// rules are ordered most-specific first; overlapping matches are merged with
-// the earliest rule's label winning.
-var rules = []rule{
-	{"private_key", regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----`)},
-	{"anthropic_key", regexp.MustCompile(`sk-ant-[A-Za-z0-9_\-]{20,}`)},
-	{"openai_key", regexp.MustCompile(`sk-(?:proj-)?[A-Za-z0-9_\-]{20,}`)},
-	{"openrouter_key", regexp.MustCompile(`sk-or-[A-Za-z0-9_\-]{20,}`)},
-	{"xai_key", regexp.MustCompile(`xai-[A-Za-z0-9]{20,}`)},
-	{"github_token", regexp.MustCompile(`gh[pousr]_[A-Za-z0-9]{36,}`)},
-	{"aws_access_key", regexp.MustCompile(`A(?:KIA|SIA)[0-9A-Z]{16}`)},
-	{"google_api_key", regexp.MustCompile(`AIza[0-9A-Za-z_\-]{35}`)},
-	{"slack_token", regexp.MustCompile(`xox[baprs]-[0-9A-Za-z\-]{10,}`)},
-	{"stripe_key", regexp.MustCompile(`[rs]k_(?:live|test)_[0-9A-Za-z]{16,}`)},
-	{"jwt", regexp.MustCompile(`eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}`)},
-	{"bearer_token", regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._\-]{20,}`)},
+// patterns are ordered most-specific first; overlapping matches are merged with
+// the earliest pattern's label winning. Secret patterns are on by default; the
+// PII patterns are opt-in ("Sensitive Info Detection" — the operator toggles
+// them on per workspace).
+var patterns = []pattern{
+	{label: "private_key", category: "secret", defaultOn: true, re: regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----`)},
+	{label: "anthropic_key", category: "secret", defaultOn: true, re: regexp.MustCompile(`sk-ant-[A-Za-z0-9_\-]{20,}`)},
+	{label: "openai_key", category: "secret", defaultOn: true, re: regexp.MustCompile(`sk-(?:proj-)?[A-Za-z0-9_\-]{20,}`)},
+	{label: "openrouter_key", category: "secret", defaultOn: true, re: regexp.MustCompile(`sk-or-[A-Za-z0-9_\-]{20,}`)},
+	{label: "xai_key", category: "secret", defaultOn: true, re: regexp.MustCompile(`xai-[A-Za-z0-9]{20,}`)},
+	{label: "github_token", category: "secret", defaultOn: true, re: regexp.MustCompile(`gh[pousr]_[A-Za-z0-9]{36,}`)},
+	{label: "aws_access_key", category: "secret", defaultOn: true, re: regexp.MustCompile(`A(?:KIA|SIA)[0-9A-Z]{16}`)},
+	{label: "google_api_key", category: "secret", defaultOn: true, re: regexp.MustCompile(`AIza[0-9A-Za-z_\-]{35}`)},
+	{label: "slack_token", category: "secret", defaultOn: true, re: regexp.MustCompile(`xox[baprs]-[0-9A-Za-z\-]{10,}`)},
+	{label: "stripe_key", category: "secret", defaultOn: true, re: regexp.MustCompile(`[rs]k_(?:live|test)_[0-9A-Za-z]{16,}`)},
+	{label: "jwt", category: "secret", defaultOn: true, re: regexp.MustCompile(`eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}`)},
+	{label: "bearer_token", category: "secret", defaultOn: true, re: regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._\-]{20,}`)},
+
+	// PII — opt-in. Off by default; the operator enables them per workspace.
+	{label: "email", category: "pii", re: regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`)},
+	{label: "phone", category: "pii", re: regexp.MustCompile(`\+?\d{0,3}[ .\-]?\(?\d{3}\)?[ .\-]?\d{3}[ .\-]?\d{4}\b`)},
+	{label: "ssn", category: "pii", re: regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)},
+	{label: "credit_card", category: "pii", validate: luhnValid, re: regexp.MustCompile(`\b\d(?:[ \-]?\d){12,18}\b`)},
+	{label: "ip_address", category: "pii", validate: ipv4Valid, re: regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)},
+}
+
+// luhnValid reports whether the digits in s (13–19 of them) pass the Luhn
+// checksum — used to keep credit_card from flagging arbitrary long numbers.
+func luhnValid(s string) bool {
+	digits := make([]int, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] >= '0' && s[i] <= '9' {
+			digits = append(digits, int(s[i]-'0'))
+		}
+	}
+	if len(digits) < 13 || len(digits) > 19 {
+		return false
+	}
+	sum, dbl := 0, false
+	for i := len(digits) - 1; i >= 0; i-- {
+		d := digits[i]
+		if dbl {
+			if d *= 2; d > 9 {
+				d -= 9
+			}
+		}
+		sum += d
+		dbl = !dbl
+	}
+	return sum%10 == 0
+}
+
+// ipv4Valid reports whether s is a dotted-quad with each octet in 0–255.
+func ipv4Valid(s string) bool {
+	parts := strings.Split(s, ".")
+	if len(parts) != 4 {
+		return false
+	}
+	for _, p := range parts {
+		if len(p) == 0 || len(p) > 3 {
+			return false
+		}
+		n := 0
+		for i := 0; i < len(p); i++ {
+			if p[i] < '0' || p[i] > '9' {
+				return false
+			}
+			n = n*10 + int(p[i]-'0')
+		}
+		if n > 255 {
+			return false
+		}
+	}
+	return true
 }
 
 // entropyCandidate matches long token-like runs to entropy-check.
@@ -52,32 +117,98 @@ var entropyCandidate = regexp.MustCompile(`[A-Za-z0-9+/=_\-]{24,}`)
 
 const entropyThreshold = 3.6 // bits/char; random base64 is ~5-6, English ~2-3
 
-// Scan returns all sensitive spans found in s, merged and sorted by position.
-// Named rules take precedence: an entropy hit is only added when it does not
-// overlap a named finding (so "VAR=sk-..." reports openai_key, not a generic
-// high-entropy span that swallows the variable name).
+// CustomPattern is an operator-defined detection rule, already compiled.
+type CustomPattern struct {
+	Label string
+	Re    *regexp.Regexp
+}
+
+// PatternSet selects which detectors run. Enabled maps a built-in label to
+// on/off; a label absent from the map uses that pattern's default. Custom holds
+// compiled operator patterns. Entropy toggles the high-entropy heuristic.
+type PatternSet struct {
+	Enabled map[string]bool
+	Custom  []CustomPattern
+	Entropy bool
+}
+
+// PatternInfo describes a built-in pattern for the config validator and the UI.
+type PatternInfo struct {
+	Label     string `json:"label"`
+	Category  string `json:"category"`
+	DefaultOn bool   `json:"default_on"`
+}
+
+// BuiltinPatterns returns metadata for every built-in pattern plus the entropy
+// heuristic, in display order.
+func BuiltinPatterns() []PatternInfo {
+	out := make([]PatternInfo, 0, len(patterns)+1)
+	for _, p := range patterns {
+		out = append(out, PatternInfo{Label: p.label, Category: p.category, DefaultOn: p.defaultOn})
+	}
+	out = append(out, PatternInfo{Label: "high_entropy", Category: "secret", DefaultOn: true})
+	return out
+}
+
+// patternEnabled reports whether a label is on for ps, falling back to def when
+// the label is not explicitly set (so partial/legacy configs keep working).
+func patternEnabled(ps PatternSet, label string, def bool) bool {
+	if ps.Enabled != nil {
+		if v, ok := ps.Enabled[label]; ok {
+			return v
+		}
+	}
+	return def
+}
+
+// Scan returns all sensitive spans using the default pattern set (secret rules
+// + entropy; PII patterns off). Kept for back-compat callers and tests.
 func Scan(s string) []Finding {
+	return ScanWith(s, PatternSet{Entropy: true})
+}
+
+// ScanWith returns sensitive spans for the selected pattern set, merged and
+// sorted by position. Named rules take precedence: an entropy hit is only added
+// when it does not overlap a named finding (so "VAR=sk-..." reports openai_key,
+// not a generic high-entropy span that swallows the variable name).
+func ScanWith(s string, ps PatternSet) []Finding {
 	var named []Finding
-	for _, r := range rules {
-		for _, loc := range r.re.FindAllStringIndex(s, -1) {
-			named = append(named, Finding{Label: r.label, Start: loc[0], End: loc[1]})
+	for _, p := range patterns {
+		if !patternEnabled(ps, p.label, p.defaultOn) {
+			continue
+		}
+		for _, loc := range p.re.FindAllStringIndex(s, -1) {
+			if p.validate != nil && !p.validate(s[loc[0]:loc[1]]) {
+				continue
+			}
+			named = append(named, Finding{Label: p.label, Start: loc[0], End: loc[1]})
+		}
+	}
+	for _, c := range ps.Custom {
+		for _, loc := range c.Re.FindAllStringIndex(s, -1) {
+			if loc[1] <= loc[0] {
+				continue // skip zero-width matches (e.g. a custom regex like `\d*`)
+			}
+			named = append(named, Finding{Label: c.Label, Start: loc[0], End: loc[1]})
 		}
 	}
 	named = Merge(named)
 
 	all := append([]Finding(nil), named...)
-	for _, loc := range entropyCandidate.FindAllStringIndex(s, -1) {
-		tok := s[loc[0]:loc[1]]
-		// Require mixed character classes so hex digests, git SHAs, and UUIDs
-		// (single-case) don't trip the entropy detector; real secret tokens
-		// are almost always upper+lower+digit.
-		if !mixedClasses(tok) || shannon(tok) < entropyThreshold {
-			continue
+	if ps.Entropy {
+		for _, loc := range entropyCandidate.FindAllStringIndex(s, -1) {
+			tok := s[loc[0]:loc[1]]
+			// Require mixed character classes so hex digests, git SHAs, and UUIDs
+			// (single-case) don't trip the entropy detector; real secret tokens
+			// are almost always upper+lower+digit.
+			if !mixedClasses(tok) || shannon(tok) < entropyThreshold {
+				continue
+			}
+			if overlapsAny(loc[0], loc[1], named) {
+				continue
+			}
+			all = append(all, Finding{Label: "high_entropy", Start: loc[0], End: loc[1]})
 		}
-		if overlapsAny(loc[0], loc[1], named) {
-			continue
-		}
-		all = append(all, Finding{Label: "high_entropy", Start: loc[0], End: loc[1]})
 	}
 	return Merge(all)
 }
