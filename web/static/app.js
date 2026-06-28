@@ -841,14 +841,16 @@ async function editAlias(c, a) {
 }
 
 async function adminDLP(c) {
-  const [cfgR, incR, whR] = await Promise.all([
+  const [cfgR, incR, whR, capR] = await Promise.all([
     api("GET", "/api/admin/dlp"),
     api("GET", "/api/admin/dlp/incidents"),
     api("GET", "/api/admin/webhooks"),
+    api("GET", "/api/admin/capture"),
   ]);
   const d = cfgR.data || { enabled: false, action: "off" };
   const incidents = (incR.data && incR.data.incidents) || [];
   const hooks = (whR.data && whR.data.webhooks) || [];
+  const cap = capR.data || { enabled: false, sample_rate: 0, redact: true, retention_days: 30, raw_training: false, raw_ttl_hours: 24 };
   const actBadge = (a) => a === "blocked" ? "revoked" : (a === "redacted" ? "admin" : "neutral");
 
   c.innerHTML = `
@@ -867,6 +869,25 @@ async function adminDLP(c) {
         <label class="field"><span class="lab">Min score (0–1)</span>
           <input id="dlp-mscore" type="number" step="0.05" min="0" max="1" value="${d.model_min_score ?? 0.5}" /></label>
         <button class="btn" id="dlp-save">Save policy</button>
+      </div>
+    </div>
+    <div class="panel"><div class="panel-head"><h2>Capture &amp; flywheel</h2></div>
+      <div style="padding:1rem 1.1rem">
+        <div class="lab" style="color:var(--muted);font-size:.82rem;margin-bottom:.6rem">Records prompts (redacted by default) for audit and DLP model training. Off by default.</div>
+        <label class="field"><span class="lab">Enable capture</span>
+          <input type="checkbox" id="cap-en" ${cap.enabled ? "checked" : ""} style="width:auto" /></label>
+        <label class="field"><span class="lab">Sample rate (0–1, incidents always captured)</span>
+          <input id="cap-rate" type="number" step="0.05" min="0" max="1" value="${cap.sample_rate ?? 0}" /></label>
+        <label class="field"><span class="lab">Redact stored bodies</span>
+          <input type="checkbox" id="cap-red" ${cap.redact ? "checked" : ""} style="width:auto" /></label>
+        <label class="field"><span class="lab">Retention (days)</span>
+          <input id="cap-ret" type="number" min="1" value="${cap.retention_days ?? 30}" /></label>
+        <div class="lab" style="color:var(--muted);font-size:.82rem;margin:.6rem 0 .3rem">Raw training window — stores a short-lived un-redacted copy so the flywheel scans aligned text. Stores real secrets (encrypted) until the TTL.</div>
+        <label class="field"><span class="lab">Enable raw training window</span>
+          <input type="checkbox" id="cap-raw" ${cap.raw_training ? "checked" : ""} style="width:auto" /></label>
+        <label class="field"><span class="lab">Raw copy TTL (hours)</span>
+          <input id="cap-rawttl" type="number" min="1" value="${cap.raw_ttl_hours ?? 24}" /></label>
+        <button class="btn" id="cap-save">Save capture</button>
       </div>
     </div>
     <div class="row" style="margin-bottom:1rem"><button class="btn sm" id="new-hook">New alert webhook</button></div>
@@ -890,6 +911,18 @@ async function adminDLP(c) {
       model_min_score: Number($("#dlp-mscore").value) || 0,
     });
     if (x.ok) toast("DLP policy saved");
+    else toast((x.data && x.data.error) || "Failed", "err");
+  });
+  $("#cap-save").addEventListener("click", async () => {
+    const x = await api("PUT", "/api/admin/capture", {
+      enabled: $("#cap-en").checked,
+      sample_rate: Number($("#cap-rate").value) || 0,
+      redact: $("#cap-red").checked,
+      retention_days: Number($("#cap-ret").value) || 30,
+      raw_training: $("#cap-raw").checked,
+      raw_ttl_hours: Number($("#cap-rawttl").value) || 24,
+    });
+    if (x.ok) toast("Capture config saved");
     else toast((x.data && x.data.error) || "Failed", "err");
   });
   $("#new-hook").addEventListener("click", () => editWebhook(c));

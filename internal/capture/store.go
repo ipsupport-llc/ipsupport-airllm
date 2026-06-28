@@ -27,6 +27,8 @@ type IndexRow struct {
 	CompletionTokens int64         `json:"completion_tokens"`
 	CostUSD          float64       `json:"cost_usd"`
 	BlobKey          string        `json:"blob_key"`
+	RawBlobKey       string        `json:"raw_blob_key"`
+	RawExpiresAt     *time.Time    `json:"raw_expires_at"`
 	Redacted         bool          `json:"redacted"`
 	ModelVersion     string        `json:"model_version"`
 	Detected         []dlp.Finding `json:"detected"`
@@ -71,13 +73,15 @@ func (p *PGInserter) Insert(ctx context.Context, row IndexRow) error {
 			provider_name, upstream_model, status,
 			prompt_tokens, completion_tokens, cost_usd,
 			blob_key, redacted, model_version,
-			detected, review_status, secondpass_status, secondpass_labels
+			detected, review_status, secondpass_status, secondpass_labels,
+			raw_blob_key, raw_expires_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6,
 			$7, $8, $9,
 			$10, $11, $12,
 			$13, $14, $15,
-			$16, $17, $18, $19
+			$16, $17, $18, $19,
+			$20, $21
 		)`,
 		row.ID, row.TS, nullStr(row.KeyID), nullStr(row.UserID),
 		row.IngressProtocol, row.Alias,
@@ -85,14 +89,17 @@ func (p *PGInserter) Insert(ctx context.Context, row IndexRow) error {
 		row.PromptTokens, row.CompletionTokens, row.CostUSD,
 		row.BlobKey, row.Redacted, row.ModelVersion,
 		string(detected), row.ReviewStatus, row.SecondpassStatus, string(labels),
+		row.RawBlobKey, row.RawExpiresAt,
 	)
 	return err
 }
 
-// ListExpired returns rows whose ts is before the cutoff time.
+// ListExpired returns rows whose ts is before the cutoff time. raw_blob_key is
+// included so the sweeper can also delete any un-redacted raw copy along with
+// the row (preventing orphaned raw blobs if the row expires before its raw TTL).
 func (p *PGInserter) ListExpired(ctx context.Context, before time.Time) ([]IndexRow, error) {
 	rows, err := p.PG.Query(ctx,
-		`SELECT id, ts, blob_key FROM capture_index WHERE ts < $1`, before)
+		`SELECT id, ts, blob_key, raw_blob_key FROM capture_index WHERE ts < $1`, before)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +107,7 @@ func (p *PGInserter) ListExpired(ctx context.Context, before time.Time) ([]Index
 	var out []IndexRow
 	for rows.Next() {
 		var r IndexRow
-		if err := rows.Scan(&r.ID, &r.TS, &r.BlobKey); err != nil {
+		if err := rows.Scan(&r.ID, &r.TS, &r.BlobKey, &r.RawBlobKey); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -111,6 +118,34 @@ func (p *PGInserter) ListExpired(ctx context.Context, before time.Time) ([]Index
 // DeleteByID removes a capture_index row by id.
 func (p *PGInserter) DeleteByID(ctx context.Context, id string) error {
 	_, err := p.PG.Exec(ctx, `DELETE FROM capture_index WHERE id = $1`, id)
+	return err
+}
+
+// ListExpiredRaw returns rows whose raw copy has passed its TTL and still has a
+// raw_blob_key. Only id and raw_blob_key are populated.
+func (p *PGInserter) ListExpiredRaw(ctx context.Context, before time.Time) ([]IndexRow, error) {
+	rows, err := p.PG.Query(ctx,
+		`SELECT id, raw_blob_key FROM capture_index
+		 WHERE raw_blob_key <> '' AND raw_expires_at IS NOT NULL AND raw_expires_at < $1`, before)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []IndexRow
+	for rows.Next() {
+		var r IndexRow
+		if err := rows.Scan(&r.ID, &r.RawBlobKey); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// ClearRaw blanks the raw-window pointers for a row after its blob is deleted.
+func (p *PGInserter) ClearRaw(ctx context.Context, id string) error {
+	_, err := p.PG.Exec(ctx,
+		`UPDATE capture_index SET raw_blob_key = '', raw_expires_at = NULL WHERE id = $1`, id)
 	return err
 }
 
@@ -134,7 +169,8 @@ func (p *PGInserter) List(ctx context.Context, f ListFilter) ([]IndexRow, error)
 		       provider_name, upstream_model, status,
 		       prompt_tokens, completion_tokens, cost_usd,
 		       blob_key, redacted, model_version,
-		       detected, review_status, secondpass_status, secondpass_labels, gold_labels
+		       detected, review_status, secondpass_status, secondpass_labels, gold_labels,
+		       raw_blob_key, raw_expires_at
 		FROM capture_index
 		WHERE ($1 = '' OR review_status = $1)
 		  AND ($2 = '' OR secondpass_status = $2)
@@ -157,7 +193,8 @@ func (p *PGInserter) Get(ctx context.Context, id string) (IndexRow, error) {
 		       provider_name, upstream_model, status,
 		       prompt_tokens, completion_tokens, cost_usd,
 		       blob_key, redacted, model_version,
-		       detected, review_status, secondpass_status, secondpass_labels, gold_labels
+		       detected, review_status, secondpass_status, secondpass_labels, gold_labels,
+		       raw_blob_key, raw_expires_at
 		FROM capture_index WHERE id = $1`, id)
 	if err != nil {
 		return IndexRow{}, err
@@ -211,7 +248,8 @@ func (p *PGInserter) ReviewQueue(ctx context.Context, limit int) ([]IndexRow, er
 		       provider_name, upstream_model, status,
 		       prompt_tokens, completion_tokens, cost_usd,
 		       blob_key, redacted, model_version,
-		       detected, review_status, secondpass_status, secondpass_labels, gold_labels
+		       detected, review_status, secondpass_status, secondpass_labels, gold_labels,
+		       raw_blob_key, raw_expires_at
 		FROM capture_index
 		WHERE review_status = 'unreviewed' OR secondpass_status IN ('false_negative','false_positive')
 		ORDER BY ts DESC
@@ -230,7 +268,7 @@ func (p *PGInserter) PendingForSecondPass(ctx context.Context, limit int) ([]Ind
 		limit = 50
 	}
 	rows, err := p.PG.Query(ctx, `
-		SELECT id, blob_key, detected, redacted
+		SELECT id, blob_key, detected, redacted, raw_blob_key, raw_expires_at
 		FROM capture_index
 		WHERE secondpass_status = 'pending'
 		ORDER BY ts ASC
@@ -243,7 +281,7 @@ func (p *PGInserter) PendingForSecondPass(ctx context.Context, limit int) ([]Ind
 	for rows.Next() {
 		var r IndexRow
 		var detectedRaw []byte
-		if err := rows.Scan(&r.ID, &r.BlobKey, &detectedRaw, &r.Redacted); err != nil {
+		if err := rows.Scan(&r.ID, &r.BlobKey, &detectedRaw, &r.Redacted, &r.RawBlobKey, &r.RawExpiresAt); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(detectedRaw, &r.Detected); err != nil {
@@ -277,10 +315,16 @@ func (p *PGInserter) SetReview(ctx context.Context, id string, reviewStatus stri
 	if err != nil {
 		gold = []byte("[]")
 	}
-	_, err = p.PG.Exec(ctx, `
+	tag, err := p.PG.Exec(ctx, `
 		UPDATE capture_index SET review_status = $1, gold_labels = $2 WHERE id = $3`,
 		reviewStatus, string(gold), id)
-	return err
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func scanRows(rows interface {
@@ -300,6 +344,7 @@ func scanRows(rows interface {
 			&r.PromptTokens, &r.CompletionTokens, &r.CostUSD,
 			&r.BlobKey, &r.Redacted, &r.ModelVersion,
 			&detectedRaw, &r.ReviewStatus, &r.SecondpassStatus, &secondpassRaw, &goldRaw,
+			&r.RawBlobKey, &r.RawExpiresAt,
 		); err != nil {
 			return nil, err
 		}

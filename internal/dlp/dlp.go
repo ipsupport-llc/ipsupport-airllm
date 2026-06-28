@@ -12,6 +12,12 @@ import (
 	"strings"
 )
 
+// DetectorVersion identifies the deterministic detection pipeline that
+// produced a set of weak labels. It is stamped onto each capture's
+// model_version so the flywheel/dataset can track which detector generation
+// labelled a row. Bump it when detection rules change materially.
+const DetectorVersion = "regex+entropy/v1"
+
 // Finding is one detected sensitive span (byte offsets into the scanned text).
 type Finding struct {
 	Label string `json:"label"`

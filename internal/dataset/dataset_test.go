@@ -8,6 +8,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/rromenskyi/ipsupport-airllm/internal/capture"
 	"github.com/rromenskyi/ipsupport-airllm/internal/dlp"
@@ -134,6 +135,92 @@ func TestExportEmitsCorrectJSONL(t *testing.T) {
 	// Sanity-check offset alignment: the span must be within the text.
 	if s.End > len(got.Text) {
 		t.Errorf("span.End %d exceeds text length %d", s.End, len(got.Text))
+	}
+}
+
+// TestExportPrefersRawBlob verifies that when an unexpired raw-window copy
+// exists, Export reads it (aligned spans) rather than the redacted main body.
+func TestExportPrefersRawBlob(t *testing.T) {
+	raw := "key: sk-raw-1234567890abcdefghijk"
+	finding := dlp.Finding{Label: "openai_key", Start: 5, End: len(raw)}
+	future := time.Now().Add(time.Hour)
+
+	store := &fakeStore{rows: []capture.IndexRow{
+		{
+			ID:           "c1",
+			BlobKey:      "captures/c1",
+			RawBlobKey:   "captures-raw/c1",
+			RawExpiresAt: &future,
+			ReviewStatus: "confirmed",
+			Detected:     []dlp.Finding{finding},
+		},
+	}}
+	writer := newFakeWriter()
+	readBody := func(_ context.Context, key string) ([]byte, error) {
+		switch key {
+		case "captures-raw/c1":
+			return makeBody(raw), nil
+		case "captures/c1":
+			// Redacted body is shorter; the original-offset span would not align.
+			return makeBody("[REDACTED:openai_key]"), nil
+		}
+		return nil, errors.New("not found: " + key)
+	}
+
+	artifactKey, count, err := Export(context.Background(), store, readBody, writer)
+	if err != nil {
+		t.Fatalf("Export returned error: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 line from raw blob, got %d", count)
+	}
+	lines, err := parseJSONL(writer.data[artifactKey])
+	if err != nil {
+		t.Fatalf("parseJSONL: %v", err)
+	}
+	if len(lines) != 1 || lines[0].Text != raw {
+		t.Fatalf("expected exported text from raw blob %q, got %+v", raw, lines)
+	}
+}
+
+// TestExportIgnoresExpiredRawBlob verifies that an expired raw window is ignored
+// and Export falls back to the durable main blob.
+func TestExportIgnoresExpiredRawBlob(t *testing.T) {
+	main := "key: sk-main-1234567890abcdefghijk"
+	finding := dlp.Finding{Label: "openai_key", Start: 5, End: len(main)}
+	past := time.Now().Add(-time.Hour)
+
+	store := &fakeStore{rows: []capture.IndexRow{
+		{
+			ID:           "c1",
+			BlobKey:      "captures/c1",
+			RawBlobKey:   "captures-raw/c1",
+			RawExpiresAt: &past,
+			ReviewStatus: "confirmed",
+			Detected:     []dlp.Finding{finding},
+		},
+	}}
+	writer := newFakeWriter()
+	readBody := func(_ context.Context, key string) ([]byte, error) {
+		if key == "captures/c1" {
+			return makeBody(main), nil
+		}
+		return nil, errors.New("expired raw blob must not be read: " + key)
+	}
+
+	artifactKey, count, err := Export(context.Background(), store, readBody, writer)
+	if err != nil {
+		t.Fatalf("Export returned error: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected fallback to main blob (count 1), got %d", count)
+	}
+	lines, err := parseJSONL(writer.data[artifactKey])
+	if err != nil {
+		t.Fatalf("parseJSONL: %v", err)
+	}
+	if len(lines) != 1 || lines[0].Text != main {
+		t.Fatalf("expected exported text from main blob %q, got %+v", main, lines)
 	}
 }
 

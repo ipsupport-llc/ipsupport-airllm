@@ -61,6 +61,20 @@ func (s *Server) enqueueCapture(
 	// longer than the redacted spans). Redact in captureBody only when the
 	// capture layer itself must apply redaction (action≠redact or no findings).
 	needRedact := capCfg.Redact && !dlpRes.AlreadyRedacted
+
+	// Raw training window: when enabled, attach an un-redacted copy so the
+	// flywheel can re-scan byte-aligned text. When DLP redacted in place, msgs
+	// are already masked, so use the originals preserved by dlpEnforce. The
+	// pipeline seals the raw copy separately; the sweeper deletes it after the TTL.
+	var rawBody []byte
+	if capCfg.RawTraining {
+		rawSource := msgs
+		if dlpRes.OriginalMessages != nil {
+			rawSource = dlpRes.OriginalMessages
+		}
+		rawBody = captureBody(rawSource, response, false, nil)
+	}
+
 	pl.Enqueue(capture.Record{
 		KeyID:            ak.KeyID,
 		UserID:           ak.UserID,
@@ -72,9 +86,11 @@ func (s *Server) enqueueCapture(
 		PromptTokens:     promptTokens,
 		CompletionTokens: completionTokens,
 		CostUSD:          costUSD,
+		ModelVersion:     dlp.DetectorVersion,
 		Detected:         dlpRes.Findings,
 		HadIncident:      dlpRes.HadIncident,
 		Body:             captureBody(msgs, response, needRedact, dlpRes.MsgFindings),
+		RawBody:          rawBody,
 		Redacted:         capCfg.Redact,
 	})
 }

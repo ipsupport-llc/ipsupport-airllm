@@ -25,6 +25,8 @@ type Config struct {
 	SampleRate    float64 // fraction of non-incident traffic to capture [0,1]
 	Redact        bool
 	RetentionDays int
+	RawTraining   bool // also store an un-redacted copy for the flywheel
+	RawTTLHours   int  // lifetime of the raw copy before the sweeper deletes it
 }
 
 // Record is a single request/response to be captured.
@@ -42,6 +44,7 @@ type Record struct {
 	ModelVersion     string
 	Detected         []dlp.Finding
 	Body             []byte // plain (possibly redacted) content
+	RawBody          []byte // un-redacted content; set only when raw_training is on
 	HadIncident      bool
 	Redacted         bool // snapshot of capture config Redact at enqueue time
 }
@@ -51,6 +54,11 @@ type Inserter interface {
 	Insert(ctx context.Context, row IndexRow) error
 	ListExpired(ctx context.Context, before time.Time) ([]IndexRow, error)
 	DeleteByID(ctx context.Context, id string) error
+	// ListExpiredRaw returns rows whose raw copy has passed raw_expires_at and
+	// still has a raw_blob_key (id + raw_blob_key populated).
+	ListExpiredRaw(ctx context.Context, before time.Time) ([]IndexRow, error)
+	// ClearRaw blanks raw_blob_key and raw_expires_at for the given row.
+	ClearRaw(ctx context.Context, id string) error
 }
 
 // Pipeline manages the worker pool and the buffered work channel.
@@ -107,6 +115,7 @@ func (p *Pipeline) Start(workers int) {
 					days = 30
 				}
 				p.sweep(context.Background(), t, days)
+				p.sweepRaw(context.Background(), t)
 			}
 		}
 	}()
@@ -176,6 +185,28 @@ func (p *Pipeline) process(r Record) {
 		return
 	}
 
+	// Raw training window: store an un-redacted copy with a TTL so the flywheel
+	// can re-scan byte-aligned text. Best-effort; failure leaves only the
+	// (redacted) main blob.
+	var rawBlobKey string
+	var rawExpiresAt *time.Time
+	if len(r.RawBody) > 0 {
+		ttl := p.cfg().RawTTLHours
+		if ttl <= 0 {
+			ttl = 24
+		}
+		rawKey := "captures-raw/" + id
+		if sealedRaw, serr := p.sealer.Seal(r.RawBody); serr != nil {
+			slog.Error("capture: seal raw body failed", "err", serr)
+		} else if perr := p.bs.Put(context.Background(), rawKey, sealedRaw); perr != nil {
+			slog.Error("capture: raw blob put failed", "err", perr, "key", rawKey)
+		} else {
+			exp := time.Now().UTC().Add(time.Duration(ttl) * time.Hour)
+			rawBlobKey = rawKey
+			rawExpiresAt = &exp
+		}
+	}
+
 	row := IndexRow{
 		ID:               id,
 		TS:               time.Now().UTC(),
@@ -190,6 +221,8 @@ func (p *Pipeline) process(r Record) {
 		CompletionTokens: int64(r.CompletionTokens),
 		CostUSD:          r.CostUSD,
 		BlobKey:          blobKey,
+		RawBlobKey:       rawBlobKey,
+		RawExpiresAt:     rawExpiresAt,
 		Redacted:         r.Redacted,
 		ModelVersion:     r.ModelVersion,
 		Detected:         r.Detected,
@@ -217,8 +250,35 @@ func (p *Pipeline) sweep(ctx context.Context, now time.Time, retentionDays int) 
 				slog.Warn("capture sweep: blob delete failed", "key", row.BlobKey, "err", err)
 			}
 		}
+		// Delete any un-redacted raw copy too, so the row's removal never leaves
+		// an orphaned secret blob behind.
+		if row.RawBlobKey != "" {
+			if err := p.bs.Delete(ctx, row.RawBlobKey); err != nil {
+				slog.Warn("capture sweep: raw blob delete failed", "key", row.RawBlobKey, "err", err)
+			}
+		}
 		if err := p.idx.DeleteByID(ctx, row.ID); err != nil {
 			slog.Error("capture sweep: index delete failed", "id", row.ID, "err", err)
+		}
+	}
+}
+
+// sweepRaw deletes raw-window blobs whose TTL has passed and clears their
+// pointer columns, leaving the (redacted) main capture row intact.
+func (p *Pipeline) sweepRaw(ctx context.Context, now time.Time) {
+	rows, err := p.idx.ListExpiredRaw(ctx, now)
+	if err != nil {
+		slog.Error("capture raw-sweep: list expired failed", "err", err)
+		return
+	}
+	for _, row := range rows {
+		if row.RawBlobKey != "" {
+			if err := p.bs.Delete(ctx, row.RawBlobKey); err != nil {
+				slog.Warn("capture raw-sweep: blob delete failed", "key", row.RawBlobKey, "err", err)
+			}
+		}
+		if err := p.idx.ClearRaw(ctx, row.ID); err != nil {
+			slog.Error("capture raw-sweep: clear failed", "id", row.ID, "err", err)
 		}
 	}
 }

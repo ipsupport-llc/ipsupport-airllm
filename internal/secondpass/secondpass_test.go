@@ -3,6 +3,7 @@ package secondpass
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/rromenskyi/ipsupport-airllm/internal/dlp"
 )
@@ -332,6 +333,66 @@ func TestJob_RedactedRow_NoFalsePositive(t *testing.T) {
 	}
 	if hookEvent == "dlp.alert_cleared" {
 		t.Fatal("dlp.alert_cleared must not fire for redacted rows")
+	}
+}
+
+// TestJob_RawWindow_AllowsFalsePositive verifies that when an un-redacted
+// raw-window copy is available (and unexpired), the second-pass scans aligned
+// text and may legitimately clear a false positive — the redacted-row downgrade
+// is skipped.
+func TestJob_RawWindow_AllowsFalsePositive(t *testing.T) {
+	future := time.Now().Add(time.Hour)
+	store := newFakeStore(PendingRow{
+		ID:           "id-raw",
+		BlobKey:      "k-red",
+		Detected:     []dlp.Finding{{Label: "key", Start: 0, End: 5}},
+		Redacted:     true,
+		RawBlobKey:   "k-raw",
+		RawExpiresAt: &future,
+	})
+	engine := &fakeEngine{findings: nil} // raw text is benign -> detection is a true FP
+
+	var hookEvent string
+	hook := WebhookSender(func(_ context.Context, event string, _ []byte) { hookEvent = event })
+
+	job := NewJob(store, fakeReadBody([]byte("totally benign text")), engine, hook, 10)
+	job.RunOnce(context.Background())
+
+	u, ok := store.updates["id-raw"]
+	if !ok {
+		t.Fatal("expected update for id-raw")
+	}
+	if u.status != "false_positive" {
+		t.Fatalf("raw-window row must allow false_positive, got %s", u.status)
+	}
+	if hookEvent != "dlp.alert_cleared" {
+		t.Fatalf("expected dlp.alert_cleared, got %q", hookEvent)
+	}
+}
+
+// TestJob_ExpiredRawWindow_StillDowngrades verifies that an expired raw copy is
+// ignored: the redacted main body is scanned and the FP downgrade still applies.
+func TestJob_ExpiredRawWindow_StillDowngrades(t *testing.T) {
+	past := time.Now().Add(-time.Hour)
+	store := newFakeStore(PendingRow{
+		ID:           "id-exp",
+		BlobKey:      "k-red",
+		Detected:     []dlp.Finding{{Label: "key", Start: 0, End: 5}},
+		Redacted:     true,
+		RawBlobKey:   "k-raw",
+		RawExpiresAt: &past,
+	})
+	engine := &fakeEngine{findings: nil}
+
+	job := NewJob(store, fakeReadBody([]byte("[REDACTED:key]")), engine, nil, 10)
+	job.RunOnce(context.Background())
+
+	u, ok := store.updates["id-exp"]
+	if !ok {
+		t.Fatal("expected update for id-exp")
+	}
+	if u.status != "confirmed" {
+		t.Fatalf("expired raw must fall back to redacted downgrade (confirmed), got %s", u.status)
 	}
 }
 

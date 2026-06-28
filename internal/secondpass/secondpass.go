@@ -81,10 +81,12 @@ func parseFindings(raw string, minScore float64) []dlp.Finding {
 
 // PendingRow is the subset of capture_index the Job needs.
 type PendingRow struct {
-	ID       string
-	BlobKey  string
-	Detected []dlp.Finding
-	Redacted bool // snapshot of capture config Redact at enqueue time
+	ID           string
+	BlobKey      string
+	Detected     []dlp.Finding
+	Redacted     bool       // snapshot of capture config Redact at enqueue time
+	RawBlobKey   string     // un-redacted training copy; "" when none
+	RawExpiresAt *time.Time // TTL of the raw copy; nil when none
 }
 
 // Store is the secondpass view of the capture index.
@@ -181,7 +183,17 @@ func (j *Job) RunOnce(ctx context.Context) {
 }
 
 func (j *Job) processOne(ctx context.Context, row PendingRow) {
-	body, err := j.readBody(ctx, row.BlobKey)
+	// Prefer the un-redacted raw-window copy when it exists and has not expired:
+	// its byte offsets align with the fast-layer detections, so false-positive
+	// clearing is accurate. Otherwise fall back to the (possibly redacted) main body.
+	key := row.BlobKey
+	usingRaw := false
+	if row.RawBlobKey != "" && row.RawExpiresAt != nil && row.RawExpiresAt.After(time.Now()) {
+		key = row.RawBlobKey
+		usingRaw = true
+	}
+
+	body, err := j.readBody(ctx, key)
 	if err != nil {
 		slog.Error("secondpass: read body failed", "id", row.ID, "err", err)
 		return // leave pending for retry
@@ -195,13 +207,12 @@ func (j *Job) processOne(ctx context.Context, row PendingRow) {
 
 	status, falsePositives, misses := diff(row.Detected, engineFindings)
 
-	// Confirm/clear (false_positive -> dlp.alert_cleared) requires a raw body:
-	// when the capture was redacted, the engine cannot re-find the masked secret,
+	// Confirm/clear (false_positive -> dlp.alert_cleared) requires aligned text:
+	// when we scanned a redacted body the engine cannot re-find the masked secret,
 	// so an apparent false_positive is actually a confirmed detection that can no
 	// longer be verified. Treat it as confirmed to avoid erasing valid alerts.
-	// Full flywheel accuracy (false_positive discrimination) requires
-	// raw-window captures (Redacted=false).
-	if row.Redacted && status == "false_positive" {
+	// This downgrade is skipped when a raw-window copy was used (usingRaw).
+	if row.Redacted && !usingRaw && status == "false_positive" {
 		status = "confirmed"
 		falsePositives = nil
 	}

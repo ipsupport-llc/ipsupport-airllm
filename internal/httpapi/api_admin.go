@@ -34,6 +34,10 @@ func (s *Server) adminRoutes() {
 	s.mux.HandleFunc("GET /api/admin/dlp", a(s.handleAdminGetDLP))
 	s.mux.HandleFunc("PUT /api/admin/dlp", a(s.handleAdminPutDLP))
 
+	// Capture: data-capture policy (sampling, redaction, retention, raw window).
+	s.mux.HandleFunc("GET /api/admin/capture", a(s.handleAdminGetCapture))
+	s.mux.HandleFunc("PUT /api/admin/capture", a(s.handleAdminPutCapture))
+
 	// Second-pass: background DLP re-scan config.
 	s.mux.HandleFunc("GET /api/admin/secondpass", a(s.handleAdminGetSecondpass))
 	s.mux.HandleFunc("PUT /api/admin/secondpass", a(s.handleAdminPutSecondpass))
