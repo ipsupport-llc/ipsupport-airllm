@@ -1,0 +1,15 @@
+/bin/
+/dist/
+/ipsupport-airouter
+*.test
+*.out
+.env
+.env.*
+!.env.example
+*.local
+.DS_Store
+
+# frontend
+/web/node_modules/
+/web/build/
+/web/.svelte-kit/
