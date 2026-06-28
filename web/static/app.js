@@ -35,6 +35,10 @@ function fmtTime(s) { return s ? new Date(s).toLocaleString() : "—"; }
 
 let me = null;
 
+// isAuditor returns true when the signed-in user holds the auditor or admin
+// role. Used to gate the Captures nav link and route.
+function isAuditor() { return me && (me.is_admin || me.is_auditor); }
+
 // ---------- bootstrap ----------
 async function init() {
   const r = await api("GET", "/api/me");
@@ -82,12 +86,14 @@ const ADMIN_TABS = ["users", "keys", "usage", "roles", "aliases", "providers", "
 
 function renderShell() {
   const adminLink = me.is_admin ? `<div class="sect">Admin</div><a href="#/admin/users" data-nav>Admin console</a>` : "";
+  const capturesLink = isAuditor() ? `<a href="#/captures" data-nav>Captures</a>` : "";
   app.innerHTML = `
     <div class="shell">
       <aside class="sidebar">
         <div class="brand">Air<span>LLM</span></div>
         <nav class="nav">
           ${NAV.map((n) => `<a href="${n.href}" data-nav>${n.label}</a>`).join("")}
+          ${capturesLink}
           ${adminLink}
         </nav>
         <div class="sidebar-foot">
@@ -120,6 +126,9 @@ function route() {
     if (!me.is_admin) { view.innerHTML = `<p class="err-text">Admin role required.</p>`; return; }
     const tab = hash.split("/")[2] || "users";
     viewAdmin(view, tab);
+  } else if (hash === "#/captures") {
+    if (!isAuditor()) { view.innerHTML = `<p class="err-text">Auditor role required.</p>`; return; }
+    viewCaptures(view);
   } else if (hash === "#/keys") viewKeys(view);
   else if (hash === "#/usage") viewUsage(view);
   else viewDashboard(view);
@@ -180,6 +189,166 @@ async function viewUsage(view) {
   const u = await api("GET", "/api/usage");
   $("#u").innerHTML = usageCards(u.data || {}) +
     `<p class="card-sub" style="color:var(--muted)">Rolling windows, enforced per API key. Limits are configured by your role policy.</p>`;
+}
+
+// ---------- captures (auditor view) ----------
+async function viewCaptures(view) {
+  view.innerHTML = `
+    <h1 class="page-title">Captures</h1>
+    <div class="panel">
+      <div class="panel-head"><h2>Filter</h2></div>
+      <div style="padding:.8rem 1.1rem">
+        <div class="row" style="flex-wrap:wrap;gap:.5rem">
+          <label class="field" style="flex:0 1 180px;margin:0">
+            <span class="lab">Review status</span>
+            <select id="cap-status">
+              <option value="">all</option>
+              <option value="unreviewed">unreviewed</option>
+              <option value="reviewed">reviewed</option>
+              <option value="confirmed">confirmed</option>
+              <option value="false_positive">false_positive</option>
+            </select>
+          </label>
+          <label class="field" style="flex:0 1 200px;margin:0">
+            <span class="lab">From (UTC)</span>
+            <input type="datetime-local" id="cap-from" />
+          </label>
+          <label class="field" style="flex:0 1 200px;margin:0">
+            <span class="lab">To (UTC)</span>
+            <input type="datetime-local" id="cap-to" />
+          </label>
+          <label class="field" style="flex:0 1 100px;margin:0">
+            <span class="lab">Limit</span>
+            <input type="number" id="cap-limit" value="50" min="1" max="1000" />
+          </label>
+          <div style="display:flex;align-items:flex-end">
+            <button class="btn" id="cap-search">Search</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="cap-results"></div>
+    <div id="cap-drawer"></div>`;
+  $("#cap-search").addEventListener("click", loadCaptures);
+  await loadCaptures();
+}
+
+async function loadCaptures() {
+  const status = ($("#cap-status") && $("#cap-status").value) || "";
+  const limit = ($("#cap-limit") && $("#cap-limit").value) || "50";
+  const fromEl = $("#cap-from");
+  const toEl = $("#cap-to");
+
+  const params = new URLSearchParams();
+  if (status) params.set("review_status", status);
+  if (limit) params.set("limit", limit);
+  if (fromEl && fromEl.value) params.set("from", new Date(fromEl.value).toISOString());
+  if (toEl && toEl.value) params.set("to", new Date(toEl.value).toISOString());
+
+  const r = await api("GET", "/api/audit/captures?" + params.toString());
+  const captures = (r.data && r.data.captures) || [];
+  const el = $("#cap-results");
+  if (!el) return;
+
+  const labelBadges = (findings) => {
+    if (!findings || !findings.length) return `<span class="badge neutral">clean</span>`;
+    return findings.map((f) => `<span class="badge revoked">${esc(f.label || f.Label || "")}</span>`).join(" ");
+  };
+
+  el.innerHTML = panelTable(
+    `${captures.length} capture${captures.length === 1 ? "" : "s"}`,
+    ["Time", "Ingress", "Alias", "Provider", "Status", "Redacted", "DLP labels", "Review"],
+    captures.map((c) => `<tr style="cursor:pointer" data-cid="${esc(c.ID || c.id)}">
+      <td>${fmtTime(c.TS || c.ts)}</td>
+      <td class="mono">${esc(c.IngressProtocol || c.ingress_protocol)}</td>
+      <td class="mono">${esc(c.Alias || c.alias) || "—"}</td>
+      <td>${esc(c.ProviderName || c.provider_name) || "—"}</td>
+      <td><span class="badge ${(c.Status || c.status) < 300 ? "active" : "revoked"}">${c.Status || c.status || "?"}</span></td>
+      <td>${(c.Redacted || c.redacted) ? `<span class="badge neutral">yes</span>` : "no"}</td>
+      <td>${labelBadges(c.Detected || c.detected)}</td>
+      <td><span class="badge neutral">${esc(c.ReviewStatus || c.review_status || "unreviewed")}</span></td>
+    </tr>`));
+
+  el.querySelectorAll("[data-cid]").forEach((row) =>
+    row.addEventListener("click", () => openCaptureDrawer(row.getAttribute("data-cid"))));
+}
+
+async function openCaptureDrawer(id) {
+  const drawer = $("#cap-drawer");
+  if (!drawer) return;
+  drawer.innerHTML = `<div class="panel" style="margin-top:1rem">
+    <div class="panel-head"><h2>Loading transcript…</h2><button class="btn ghost sm" id="cap-close">Close</button></div>
+    <div style="padding:1rem 1.1rem"><div class="empty">Fetching…</div></div>
+  </div>`;
+  $("#cap-close").addEventListener("click", () => { drawer.innerHTML = ""; });
+
+  const r = await api("GET", `/api/audit/captures/${encodeURIComponent(id)}`);
+  if (!r.ok) {
+    drawer.innerHTML = `<div class="panel" style="margin-top:1rem">
+      <div class="panel-head"><h2>Error</h2><button class="btn ghost sm" id="cap-close2">Close</button></div>
+      <div style="padding:1rem 1.1rem"><p class="err-text">${esc((r.data && r.data.error) || "Failed to load capture")}</p></div>
+    </div>`;
+    const c2 = $("#cap-close2");
+    if (c2) c2.addEventListener("click", () => { drawer.innerHTML = ""; });
+    return;
+  }
+
+  const cap = (r.data && r.data.capture) || {};
+  const body = (r.data && r.data.body) || "";
+
+  let bodyHtml = "";
+  if (body) {
+    try {
+      const parsed = JSON.parse(body);
+      const msgs = parsed.messages || [];
+      const resp = parsed.response || "";
+      const lines = msgs.map((m) =>
+        `<div class="cap-msg cap-${esc(m.role || m.Role || "")}" style="margin:.5rem 0;padding:.5rem .8rem;border-radius:6px;background:var(--bg-soft,#1e1e2e);border-left:3px solid ${(m.role || m.Role) === "user" ? "var(--accent,#7c3aed)" : "var(--rule,#333)"}">
+          <div class="mono" style="font-size:.75rem;opacity:.6;margin-bottom:.25rem">${esc(m.role || m.Role || "")}</div>
+          <div>${esc(m.content || m.Content || "")}</div>
+        </div>`);
+      if (resp) {
+        lines.push(`<div class="cap-msg cap-assistant" style="margin:.5rem 0;padding:.5rem .8rem;border-radius:6px;background:var(--bg-soft,#1e1e2e);border-left:3px solid var(--rule,#333)">
+          <div class="mono" style="font-size:.75rem;opacity:.6;margin-bottom:.25rem">assistant</div>
+          <div>${esc(resp)}</div>
+        </div>`);
+      }
+      bodyHtml = lines.join("") || `<div class="empty">No messages.</div>`;
+    } catch (_) {
+      bodyHtml = `<pre style="white-space:pre-wrap;font-size:.82rem;overflow-x:auto">${esc(body)}</pre>`;
+    }
+  } else {
+    bodyHtml = `<div class="empty">Body unavailable (blob missing or not configured).</div>`;
+  }
+
+  const meta = [
+    ["ID", cap.ID || cap.id || id],
+    ["Time", fmtTime(cap.TS || cap.ts)],
+    ["Ingress", cap.IngressProtocol || cap.ingress_protocol || "—"],
+    ["Model alias", cap.Alias || cap.alias || "—"],
+    ["Provider", cap.ProviderName || cap.provider_name || "—"],
+    ["Upstream model", cap.UpstreamModel || cap.upstream_model || "—"],
+    ["Status", String(cap.Status || cap.status || "—")],
+    ["Tokens in", String(cap.PromptTokens || cap.prompt_tokens || 0)],
+    ["Tokens out", String(cap.CompletionTokens || cap.completion_tokens || 0)],
+    ["Cost", fmtUSD(cap.CostUSD || cap.cost_usd)],
+    ["Redacted", (cap.Redacted || cap.redacted) ? "yes" : "no"],
+    ["Review status", cap.ReviewStatus || cap.review_status || "unreviewed"],
+  ];
+
+  drawer.innerHTML = `<div class="panel" style="margin-top:1rem">
+    <div class="panel-head"><h2>Capture ${esc(id)}</h2>
+      <button class="btn ghost sm" id="cap-close3">Close</button></div>
+    <div style="padding:0 1.1rem 1rem">
+      <table style="margin-bottom:1rem">
+        ${meta.map(([k, v]) => `<tr><td style="opacity:.6;padding-right:1rem">${esc(k)}</td><td class="mono">${esc(v)}</td></tr>`).join("")}
+      </table>
+      <div class="lab" style="margin-bottom:.4rem">Transcript</div>
+      ${bodyHtml}
+    </div>
+  </div>`;
+  $("#cap-close3").addEventListener("click", () => { drawer.innerHTML = ""; });
+  drawer.scrollIntoView({ behavior: "smooth" });
 }
 
 // ---------- keys ----------
