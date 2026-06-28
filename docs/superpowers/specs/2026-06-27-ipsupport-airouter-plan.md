@@ -41,10 +41,12 @@ English-only repo. No secrets in git.
 - [x] internal/seed: dev mock seed (user/role/provider/alias/fixed key)
 - [x] Verify: 401/400 paths; non-stream + SSE chat; tool-call stream (tooltest trigger); /v1/models; ledger rows; go test green (openai+providers+apikey)
 
-## Phase 2 — Anthropic ingress + passthrough
-- [ ] internal/gateway: POST /v1/messages (non-stream + SSE)
-- [ ] mock Anthropic-shaped responses; same-protocol passthrough path
-- [ ] Verify: curl /v1/messages (stream + non-stream); ledger rows; tests
+## Phase 2 — Anthropic ingress + passthrough  ✅ DONE (2026-06-27)
+- [x] internal/anthropic: codec (decode request→IR incl. system/blocks/tool_use/tool_result; encode IR→Anthropic resp) + SSE StreamWriter
+- [x] internal/gateway: POST /v1/messages (non-stream + SSE) via IR → mock; x-api-key supported
+- [x] Anthropic-shaped errors (writeProtocolError picks shape by path) for /v1/messages
+- [x] mock Anthropic-shaped responses through IR (true byte-passthrough is a real-provider concern → Phase 3)
+- [x] Verify: anthropic 401 shape; non-stream msg; SSE event sequence (message_start..message_stop); tool_use stream; ledger anthropic rows; go test (anthropic pkg) green
 
 ## Phase 3 — Routing + cross-protocol translation
 - [ ] internal/routing: alias catalog → ordered targets + fallback; explicit provider/model passthrough (policy-gated)

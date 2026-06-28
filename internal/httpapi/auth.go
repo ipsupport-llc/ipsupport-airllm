@@ -26,12 +26,12 @@ func (s *Server) requireAPIKey(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := bearerToken(r)
 		if token == "" {
-			writeAPIError(w, http.StatusUnauthorized, "authentication_error", "missing API key")
+			writeProtocolError(w, r, http.StatusUnauthorized, "authentication_error", "missing API key")
 			return
 		}
 		ak, err := s.lookupKey(r.Context(), token)
 		if err != nil {
-			writeAPIError(w, http.StatusUnauthorized, "authentication_error", "invalid API key")
+			writeProtocolError(w, r, http.StatusUnauthorized, "authentication_error", "invalid API key")
 			return
 		}
 		ctx := context.WithValue(r.Context(), keyCtxKey, ak)
@@ -84,4 +84,45 @@ type apiErrorBody struct {
 
 func writeAPIError(w http.ResponseWriter, code int, typ, msg string) {
 	writeJSON(w, code, apiError{Error: apiErrorBody{Message: msg, Type: typ}})
+}
+
+// anthropicError is the Anthropic error envelope.
+type anthropicError struct {
+	Type  string             `json:"type"` // "error"
+	Error anthropicErrorBody `json:"error"`
+}
+
+type anthropicErrorBody struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+}
+
+// writeProtocolError emits an error in the shape matching the ingress: the
+// Anthropic envelope for /v1/messages, the OpenAI envelope otherwise.
+func writeProtocolError(w http.ResponseWriter, r *http.Request, code int, openaiType, msg string) {
+	if strings.HasPrefix(r.URL.Path, "/v1/messages") {
+		writeJSON(w, code, anthropicError{
+			Type:  "error",
+			Error: anthropicErrorBody{Type: anthropicErrorType(code), Message: msg},
+		})
+		return
+	}
+	writeAPIError(w, code, openaiType, msg)
+}
+
+func anthropicErrorType(code int) string {
+	switch code {
+	case http.StatusBadRequest:
+		return "invalid_request_error"
+	case http.StatusUnauthorized:
+		return "authentication_error"
+	case http.StatusForbidden:
+		return "permission_error"
+	case http.StatusNotFound:
+		return "not_found_error"
+	case http.StatusTooManyRequests:
+		return "rate_limit_error"
+	default:
+		return "api_error"
+	}
 }

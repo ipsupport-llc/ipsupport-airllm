@@ -49,6 +49,7 @@ func (s *Server) routes() {
 	// Data-plane (API-key auth).
 	s.mux.HandleFunc("POST /v1/chat/completions", s.requireAPIKey(s.handleChatCompletions))
 	s.mux.HandleFunc("GET /v1/models", s.requireAPIKey(s.handleModels))
+	s.mux.HandleFunc("POST /v1/messages", s.requireAPIKey(s.handleMessages))
 }
 
 // resolve maps a client-requested model to a provider and upstream model.
