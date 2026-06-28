@@ -28,6 +28,13 @@ func Dev(ctx context.Context, st *store.Store) (string, error) {
 	}
 
 	if _, err := st.PG.Exec(ctx, `
+		INSERT INTO users (subject, email, display, roles)
+		VALUES ('dev-auditor', 'auditor@local', 'Dev Auditor', ARRAY['airllm_auditor'])
+		ON CONFLICT (subject) DO UPDATE SET updated_at = now()`); err != nil {
+		return "", fmt.Errorf("seed auditor user: %w", err)
+	}
+
+	if _, err := st.PG.Exec(ctx, `
 		INSERT INTO roles_policy (role, allowed_models, allow_passthrough, limits)
 		VALUES ('airllm_admin', ARRAY['*'], true, '{}'::jsonb)
 		ON CONFLICT (role) DO NOTHING`); err != nil {
@@ -42,6 +49,14 @@ func Dev(ctx context.Context, st *store.Store) (string, error) {
 		VALUES ('airllm_user', ARRAY['mock-gpt'], false, '{"tokens":{"24h":200000}}'::jsonb)
 		ON CONFLICT (role) DO NOTHING`); err != nil {
 		return "", fmt.Errorf("seed user role policy: %w", err)
+	}
+
+	// Auditor role: no data-plane access; the role gates audit endpoints only.
+	if _, err := st.PG.Exec(ctx, `
+		INSERT INTO roles_policy (role, allowed_models, allow_passthrough, limits)
+		VALUES ('airllm_auditor', ARRAY[]::text[], false, '{}'::jsonb)
+		ON CONFLICT (role) DO NOTHING`); err != nil {
+		return "", fmt.Errorf("seed auditor role policy: %w", err)
 	}
 
 	if _, err := st.PG.Exec(ctx, `

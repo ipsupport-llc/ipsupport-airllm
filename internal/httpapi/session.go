@@ -49,6 +49,18 @@ func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	})
 }
 
+// requireAuditor is requireSession plus an auditor-or-admin check.
+func (s *Server) requireAuditor(next http.HandlerFunc) http.HandlerFunc {
+	return s.requireSession(func(w http.ResponseWriter, r *http.Request) {
+		sess, _ := sessionFrom(r.Context())
+		if !sess.principal.IsAuditor() {
+			writeControlError(w, http.StatusForbidden, "auditor role required")
+			return
+		}
+		next(w, r)
+	})
+}
+
 func (s *Server) ensureUser(ctx context.Context, p auth.Principal) (string, error) {
 	var id string
 	err := s.st.PG.QueryRow(ctx, `

@@ -71,6 +71,25 @@ func TestMockSessionRoundTrip(t *testing.T) {
 	}
 }
 
+func TestIsAuditor(t *testing.T) {
+	admin := Principal{Roles: []string{AdminRole}}
+	if !admin.IsAuditor() {
+		t.Error("admin must pass IsAuditor")
+	}
+	auditor := Principal{Roles: []string{AuditorRole}}
+	if !auditor.IsAuditor() {
+		t.Error("auditor must pass IsAuditor")
+	}
+	user := Principal{Roles: []string{UserRole}}
+	if user.IsAuditor() {
+		t.Error("plain user must fail IsAuditor")
+	}
+	none := Principal{}
+	if none.IsAuditor() {
+		t.Error("no-role principal must fail IsAuditor")
+	}
+}
+
 func TestMockAuthenticateRejects(t *testing.T) {
 	m, _ := NewMock()
 
