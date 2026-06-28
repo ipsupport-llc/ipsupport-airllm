@@ -57,8 +57,15 @@ func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 	return s
 }
 
+// maxRequestBody caps request bodies to bound memory. It is generous enough
+// for large prompts but blocks pathological payloads.
+const maxRequestBody = 16 << 20 // 16 MiB
+
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+	}
 	s.mux.ServeHTTP(w, r)
 }
 

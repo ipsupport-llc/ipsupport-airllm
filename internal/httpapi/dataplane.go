@@ -103,8 +103,9 @@ func (s *Server) streamChatCompletions(w http.ResponseWriter, r *http.Request, r
 	s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, usage.PromptTokens, usage.CompletionTokens)
 }
 
-// handleModels lists the model aliases as OpenAI model objects.
+// handleModels lists the model aliases the calling key is permitted to use.
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+	ak, _ := keyFromContext(r.Context())
 	rows, err := s.st.PG.Query(r.Context(), `SELECT alias FROM model_aliases ORDER BY alias`)
 	if err != nil {
 		writeProtocolError(w, r, http.StatusInternalServerError, "internal_error", "failed to list models")
@@ -127,6 +128,9 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Scan(&alias); err != nil {
 			writeProtocolError(w, r, http.StatusInternalServerError, "internal_error", "failed to read models")
 			return
+		}
+		if !ak.Policy.Allows(alias) {
+			continue
 		}
 		out.Data = append(out.Data, model{ID: alias, Object: "model", OwnedBy: "airouter"})
 	}

@@ -83,14 +83,16 @@ English-only repo. No secrets in git.
 - [x] seed: demo role policy / aliases (mock-gpt + mock-fallback) / mock provider / pricing / fixed dev key — idempotent on boot (done in P5)
 - [x] Verify: `docker compose down -v` then `up --build` from clean state → app image builds (go:embed), boots/migrates/seeds, console served, login→create key→/v1 200→/v1/messages 200→usage. FULL STACK e2e green.
 
-## Phase 8 — Review gates (the "done" bar)
-- [ ] Readiness review 1/5 — everything ready?
-- [ ] Readiness review 2/5
-- [ ] Readiness review 3/5
-- [ ] Readiness review 4/5
-- [ ] Readiness review 5/5
-- [ ] Self code-review round 1/5 (correctness/bugs) + fixes
-- [ ] Self code-review round 2/5 (security: key handling, injection, authz) + fixes
-- [ ] Self code-review round 3/5 (simplification/reuse/altitude) + fixes
-- [ ] Self code-review round 4/5 (concurrency/streaming/resource leaks) + fixes
-- [ ] Self code-review round 5/5 (final pass, docs, no Cyrillic, no secrets) + fixes
+## Phase 8 — Review gates (the "done" bar)  ✅ DONE (2026-06-27)
+- [x] Readiness 1/5 — build/vet/test/gofmt green (7 pkgs)
+- [x] Readiness 2/5 — clean-state `compose down -v && up --build` full e2e
+- [x] Readiness 3/5 — repo hygiene: NO Cyrillic anywhere, no secrets, no artifacts committed, status clean
+- [x] Readiness 4/5 — spec coverage: dual ingress, routing/fallback/passthrough, policy, limits+metering, control-plane+RBAC, console (OIDC + real providers deferred to k8s by design)
+- [x] Readiness 5/5 — operability: README quickstart accurate, compose loopback-only
+- [x] Self review 1/5 (correctness) + fixes: /v1/models now filtered by key policy; seeded airouter_user role (restricted to mock-gpt) — verified role-based model gate (operator: mock-gpt 200, mock-fallback 403)
+- [x] Self review 2/5 (security) + fix: 16 MiB request-body cap (MaxBytesReader) — verified 17MB → 400, app survives; authz/RBAC + key-hash confirmed
+- [x] Self review 3/5 (simplification): code already DRY (chatEntry/usageWindows/panelTable/modalForm); no risky refactor (surgical)
+- [x] Self review 4/5 (concurrency/leaks): 13 Query ↔ 13 defer rows.Close(); single goroutine; pricing.Table RWMutex; fail-open limiter
+- [x] Self review 5/5 (final): hygiene re-scan clean; final smoke green (chat/stream/messages/401/404/body-limit)
+
+## DONE — full local mock complete + 5 readiness + 5 self-review rounds (2026-06-27)

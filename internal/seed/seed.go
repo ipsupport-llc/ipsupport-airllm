@@ -34,6 +34,16 @@ func Dev(ctx context.Context, st *store.Store) (string, error) {
 		return "", fmt.Errorf("seed role policy: %w", err)
 	}
 
+	// A restricted non-admin role: only mock-gpt, no passthrough, a modest
+	// cap. Demonstrates role-based model restriction and makes operator keys
+	// functional.
+	if _, err := st.PG.Exec(ctx, `
+		INSERT INTO roles_policy (role, allowed_models, allow_passthrough, limits)
+		VALUES ('airouter_user', ARRAY['mock-gpt'], false, '{"tokens":{"24h":200000}}'::jsonb)
+		ON CONFLICT (role) DO NOTHING`); err != nil {
+		return "", fmt.Errorf("seed user role policy: %w", err)
+	}
+
 	if _, err := st.PG.Exec(ctx, `
 		INSERT INTO providers (name, kind, base_url, enabled)
 		VALUES ('mock', 'mock', '', true)
