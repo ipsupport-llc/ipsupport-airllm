@@ -18,13 +18,16 @@ import (
 	"github.com/rromenskyi/ipsupport-airllm/internal/blob"
 	"github.com/rromenskyi/ipsupport-airllm/internal/capture"
 	"github.com/rromenskyi/ipsupport-airllm/internal/config"
+	"github.com/rromenskyi/ipsupport-airllm/internal/dlp"
 	"github.com/rromenskyi/ipsupport-airllm/internal/httpapi"
 	"github.com/rromenskyi/ipsupport-airllm/internal/limits"
 	"github.com/rromenskyi/ipsupport-airllm/internal/pricing"
 	"github.com/rromenskyi/ipsupport-airllm/internal/providers"
+	"github.com/rromenskyi/ipsupport-airllm/internal/secondpass"
 	"github.com/rromenskyi/ipsupport-airllm/internal/secrets"
 	"github.com/rromenskyi/ipsupport-airllm/internal/seed"
 	"github.com/rromenskyi/ipsupport-airllm/internal/store"
+	"github.com/rromenskyi/ipsupport-airllm/internal/webhook"
 )
 
 func main() {
@@ -134,6 +137,55 @@ func run() error {
 
 	apiSrv := httpapi.NewServer(cfg, st, deps)
 	apiSrvPtr.Store(apiSrv)
+
+	// Build and start the second-pass background job. It uses an atomic
+	// pointer for the config (same pattern as capturePipeline) so model /
+	// enabled changes via PUT /api/admin/secondpass take effect on the next
+	// RunOnce without a restart.
+	spStoreAdapter := &secondpassStoreAdapter{idx: pgIdx}
+	spBodyReader := func(blobCtx context.Context, blobKey string) ([]byte, error) {
+		sealed, err := blobStore.Get(blobCtx, blobKey)
+		if err != nil {
+			return nil, err
+		}
+		return sealer.Open(sealed)
+	}
+	spChatFn := func(chatCtx context.Context, prompt string) (string, error) {
+		srv := apiSrvPtr.Load()
+		if srv == nil {
+			return "", errors.New("secondpass: server not ready")
+		}
+		return srv.SecondpassChat(chatCtx, prompt)
+	}
+	spWebhookSender := secondpass.WebhookSender(func(hookCtx context.Context, event string, payload []byte) {
+		eps, err := st.WebhooksForEvent(hookCtx, event)
+		if err != nil || len(eps) == 0 {
+			return
+		}
+		endpoints := make([]webhook.Endpoint, 0, len(eps))
+		for _, e := range eps {
+			endpoints = append(endpoints, webhook.Endpoint{URL: e.URL, Secret: e.Secret})
+		}
+		webhook.Send(endpoints, payload)
+	})
+	spMinScore := func() float64 {
+		srv := apiSrvPtr.Load()
+		if srv == nil {
+			return 0.7
+		}
+		return srv.SecondpassCfg().MinScore
+	}
+	spEngine := &secondpass.LLMEngine{
+		Chat:     spChatFn,
+		MinScore: spMinScore(),
+	}
+	spJob := secondpass.NewJob(spStoreAdapter, spBodyReader, spEngine, spWebhookSender, 50)
+
+	spCfg := apiSrv.SecondpassCfg()
+	spInterval := time.Duration(spCfg.IntervalSec) * time.Second
+	spJob.Start(ctx, spInterval)
+	defer spJob.Stop()
+
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           apiSrv,
@@ -157,4 +209,25 @@ func run() error {
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)
 	}
+}
+
+// secondpassStoreAdapter adapts capture.PGInserter to secondpass.Store.
+type secondpassStoreAdapter struct {
+	idx *capture.PGInserter
+}
+
+func (a *secondpassStoreAdapter) PendingForSecondPass(ctx context.Context, limit int) ([]secondpass.PendingRow, error) {
+	rows, err := a.idx.PendingForSecondPass(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]secondpass.PendingRow, len(rows))
+	for i, r := range rows {
+		out[i] = secondpass.PendingRow{ID: r.ID, BlobKey: r.BlobKey, Detected: r.Detected}
+	}
+	return out, nil
+}
+
+func (a *secondpassStoreAdapter) UpdateSecondPass(ctx context.Context, id, status string, labels []dlp.Finding) error {
+	return a.idx.UpdateSecondPass(ctx, id, status, labels)
 }

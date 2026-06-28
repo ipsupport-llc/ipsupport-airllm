@@ -30,6 +30,10 @@ func (s *Server) adminRoutes() {
 	// DLP: config, incidents, alert webhooks.
 	s.mux.HandleFunc("GET /api/admin/dlp", a(s.handleAdminGetDLP))
 	s.mux.HandleFunc("PUT /api/admin/dlp", a(s.handleAdminPutDLP))
+
+	// Second-pass: background DLP re-scan config.
+	s.mux.HandleFunc("GET /api/admin/secondpass", a(s.handleAdminGetSecondpass))
+	s.mux.HandleFunc("PUT /api/admin/secondpass", a(s.handleAdminPutSecondpass))
 	s.mux.HandleFunc("GET /api/admin/dlp/incidents", a(s.handleAdminDLPIncidents))
 	s.mux.HandleFunc("GET /api/admin/webhooks", a(s.handleAdminWebhooks))
 	s.mux.HandleFunc("POST /api/admin/webhooks", a(s.handleAdminCreateWebhook))
