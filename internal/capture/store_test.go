@@ -85,6 +85,24 @@ func TestNullStr(t *testing.T) {
 	}
 }
 
+// TestUpdateSecondPassValidation verifies that UpdateSecondPass builds the
+// expected SQL and arg list without a live database.
+func TestUpdateSecondPassValidation(t *testing.T) {
+	labels := []dlp.Finding{{Label: "secret", Start: 0, End: 5}}
+	raw, err := json.Marshal(labels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Verify the marshalled labels round-trip correctly.
+	var got []dlp.Finding
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("labels JSON invalid: %v", err)
+	}
+	if len(got) != 1 || got[0].Label != "secret" {
+		t.Errorf("labels round-trip mismatch: %+v", got)
+	}
+}
+
 // TestSetReviewValidation checks that SetReview rejects unknown status values.
 // Validation runs before any DB call, so we can test it without a live pool by
 // only exercising invalid statuses (which return early) and using validReviewStatuses

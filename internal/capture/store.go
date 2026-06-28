@@ -221,6 +221,48 @@ func (p *PGInserter) ReviewQueue(ctx context.Context, limit int) ([]IndexRow, er
 	return scanRows(rows)
 }
 
+// PendingForSecondPass returns captures whose secondpass_status is 'pending',
+// ordered oldest-first, up to limit rows. limit <= 0 defaults to 50.
+func (p *PGInserter) PendingForSecondPass(ctx context.Context, limit int) ([]IndexRow, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := p.PG.Query(ctx, `
+		SELECT id, blob_key, detected
+		FROM capture_index
+		WHERE secondpass_status = 'pending'
+		ORDER BY ts ASC
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []IndexRow
+	for rows.Next() {
+		var r IndexRow
+		var detectedRaw []byte
+		if err := rows.Scan(&r.ID, &r.BlobKey, &detectedRaw); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(detectedRaw, &r.Detected)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// UpdateSecondPass sets secondpass_status and secondpass_labels for the given
+// capture row.
+func (p *PGInserter) UpdateSecondPass(ctx context.Context, id, status string, labels []dlp.Finding) error {
+	raw, err := json.Marshal(labels)
+	if err != nil {
+		raw = []byte("[]")
+	}
+	_, err = p.PG.Exec(ctx, `
+		UPDATE capture_index SET secondpass_status = $1, secondpass_labels = $2 WHERE id = $3`,
+		status, string(raw), id)
+	return err
+}
+
 // SetReview updates review_status and gold_labels for the given capture.
 // reviewStatus must be one of: confirmed, false_positive, false_negative, unreviewed.
 func (p *PGInserter) SetReview(ctx context.Context, id string, reviewStatus string, goldLabels []dlp.Finding) error {
