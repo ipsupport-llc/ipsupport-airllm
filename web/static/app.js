@@ -343,10 +343,11 @@ async function adminProviders(c) {
   const r = await api("GET", "/api/admin/providers");
   const ps = (r.data && r.data.providers) || [];
   c.innerHTML = `<div class="row" style="margin-bottom:1rem"><button class="btn sm" id="new-prov">New provider</button></div>` +
-    panelTable("Providers", ["Name", "Kind", "Base URL", "Key", "Enabled", ""],
+    panelTable("Providers", ["Name", "Kind", "Base URL", "Key", "Concurrency", "Enabled", ""],
       ps.map((p) => `<tr><td class="mono">${esc(p.name)}</td><td>${esc(p.kind)}</td>
         <td class="mono">${esc(p.base_url) || "—"}</td>
         <td>${p.has_credential ? `<span class="badge active">set</span>` : `<span class="badge neutral">none</span>`}</td>
+        <td>${p.max_concurrency > 0 ? p.max_concurrency : "∞"}</td>
         <td>${p.enabled ? "yes" : "no"}</td>
         <td style="text-align:right"><button class="btn ghost sm" data-edit='${esc(JSON.stringify(p))}'>Edit</button></td></tr>`));
   $("#new-prov").addEventListener("click", () => editProvider(c, {}));
@@ -360,10 +361,11 @@ function editProvider(c, p) {
     { name: "kind", label: "Kind", type: "select", options: ["mock", "openai", "openrouter", "xai", "ollama", "anthropic"], value: p.kind || "mock" },
     { name: "base_url", label: "Base URL (optional override)", value: p.base_url || "" },
     { name: "api_key", label: p.has_credential ? "API key (set — blank keeps current)" : "API key", type: "password", value: "", placeholder: p.has_credential ? "•••••• stored" : "" },
+    { name: "max_concurrency", label: "Max concurrency (0 = unlimited)", value: p.max_concurrency ?? 0 },
     { name: "enabled", label: "Enabled", type: "checkbox", value: p.enabled !== false },
   ], async (v) => {
     const x = await api("PUT", `/api/admin/providers/${encodeURIComponent(v.name)}`,
-      { kind: v.kind, base_url: v.base_url, enabled: v.enabled, api_key: v.api_key });
+      { kind: v.kind, base_url: v.base_url, enabled: v.enabled, api_key: v.api_key, max_concurrency: Number(v.max_concurrency) || 0 });
     if (x.ok) { toast("Provider saved"); adminProviders(c); return true; }
     toast((x.data && x.data.error) || "Failed", "err"); return false;
   });
@@ -398,9 +400,10 @@ async function adminAliases(c) {
   const r = await api("GET", "/api/admin/aliases");
   const al = (r.data && r.data.aliases) || [];
   c.innerHTML = `<div class="row" style="margin-bottom:1rem"><button class="btn sm" id="new-alias">New alias</button></div>` +
-    panelTable("Model aliases", ["Alias", "Protocol", "Targets", ""],
+    panelTable("Model aliases", ["Alias", "Protocol", "Strategy", "Targets", ""],
       al.map((a) => `<tr><td class="mono">${esc(a.alias)}</td><td>${esc(a.protocol)}</td>
-        <td class="mono">${(a.targets || []).map((t) => `${esc(t.provider)}/${esc(t.upstream_model)}`).join(" → ") || "—"}</td>
+        <td>${esc(a.strategy || "round_robin")}</td>
+        <td class="mono">${(a.targets || []).map((t) => `${esc(t.provider)}/${esc(t.upstream_model)} (p${t.priority})`).join(", ") || "—"}</td>
         <td style="text-align:right"><button class="btn ghost sm" data-edit='${esc(JSON.stringify(a))}'>Edit</button>
           <button class="btn danger sm" data-del="${esc(a.alias)}">Delete</button></td></tr>`));
   $("#new-alias").addEventListener("click", () => editAlias(c, {}));
@@ -433,7 +436,12 @@ async function editAlias(c, a) {
         <option ${a.protocol !== "anthropic" ? "selected" : ""}>openai</option>
         <option ${a.protocol === "anthropic" ? "selected" : ""}>anthropic</option>
       </select></label>
-    <div class="lab" style="color:var(--muted);font-size:.82rem;margin-bottom:.3rem">Targets (tried top to bottom; first that succeeds wins)</div>
+    <label class="field"><span class="lab">Balancing within a priority tier</span>
+      <select id="al-strategy">
+        <option value="round_robin" ${a.strategy !== "least_busy" ? "selected" : ""}>round_robin</option>
+        <option value="least_busy" ${a.strategy === "least_busy" ? "selected" : ""}>least_busy</option>
+      </select></label>
+    <div class="lab" style="color:var(--muted);font-size:.82rem;margin-bottom:.3rem">Targets: same priority = load-balanced tier; higher number = fallback tier</div>
     <div id="al-targets"></div>
     <button type="button" class="btn ghost sm" id="al-add" style="margin-top:.3rem">+ Add target</button>
     <div class="row" style="justify-content:flex-end;margin-top:1rem">
@@ -452,6 +460,7 @@ async function editAlias(c, a) {
     row.className = "row tgt";
     row.style.marginBottom = ".4rem";
     row.innerHTML = `
+      <input class="t-prio" type="number" min="0" value="${Number(t.priority) || 0}" title="priority / tier (same number = load-balanced)" style="width:64px" />
       <select class="t-prov" style="width:auto">${provOpts(t.provider)}</select>
       <input class="t-model" placeholder="upstream model" value="${esc(t.upstream_model || "")}" style="flex:1;min-width:120px" />
       <select class="t-proto" style="width:auto">
@@ -470,15 +479,15 @@ async function editAlias(c, a) {
   $("#al-save", bg).addEventListener("click", async () => {
     const alias = $("#al-alias", bg).value.trim();
     if (!alias) { toast("Alias is required", "err"); return; }
-    const tlist = [...tdiv.querySelectorAll(".tgt")].map((r, i) => ({
-      priority: i,
+    const tlist = [...tdiv.querySelectorAll(".tgt")].map((r) => ({
+      priority: Number(r.querySelector(".t-prio").value) || 0,
       provider: r.querySelector(".t-prov").value,
       upstream_model: r.querySelector(".t-model").value.trim(),
       upstream_protocol: r.querySelector(".t-proto").value,
     })).filter((t) => t.upstream_model);
     if (tlist.length === 0) { toast("Add at least one target with a model", "err"); return; }
     const x = await api("PUT", `/api/admin/aliases/${encodeURIComponent(alias)}`,
-      { protocol: $("#al-proto", bg).value, targets: tlist });
+      { protocol: $("#al-proto", bg).value, strategy: $("#al-strategy", bg).value, targets: tlist });
     if (x.ok) { toast("Alias saved"); close(); adminAliases(c); }
     else toast((x.data && x.data.error) || "Failed", "err");
   });

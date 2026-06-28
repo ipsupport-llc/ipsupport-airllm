@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/rromenskyi/ipsupport-airllm/internal/ledger"
 	"github.com/rromenskyi/ipsupport-airllm/internal/limits"
@@ -14,6 +15,33 @@ import (
 	"github.com/rromenskyi/ipsupport-airllm/internal/providers"
 	"github.com/rromenskyi/ipsupport-airllm/internal/routing"
 )
+
+// errAllBusy is returned when every target is at its concurrency cap.
+var errAllBusy = errors.New("all upstreams are at capacity")
+
+// Bounded wait when all targets are momentarily saturated.
+const (
+	busyRetries = 4
+	busyBackoff = 40 * time.Millisecond
+)
+
+// classifyUpstreamErr maps an executor error to an HTTP status: all-busy is a
+// 429 (back off and retry), anything else is a 502 upstream error.
+func classifyUpstreamErr(err error) (int, string) {
+	if errors.Is(err, errAllBusy) {
+		return http.StatusTooManyRequests, "rate_limit_error"
+	}
+	return http.StatusBadGateway, "upstream_error"
+}
+
+func (s *Server) freeFunc(reg *providers.Registry) func(string) int {
+	return func(name string) int {
+		if e, ok := reg.Get(name); ok {
+			return e.Free()
+		}
+		return -1
+	}
+}
 
 // limitDenied checks the key's usage limits. It returns a 429-ready message
 // and true when the request must be rejected. Redis errors fail open.
@@ -54,28 +82,48 @@ func (s *Server) finalizeUsage(ctx context.Context, entry ledger.Entry, keyID, u
 	}
 }
 
-// runChat tries targets in priority order, returning the first successful
-// response and the target that served it. A retryable provider error
-// advances to the next target; a non-retryable error aborts.
-func (s *Server) runChat(ctx context.Context, targets []routing.Target, req llm.ChatRequest) (llm.ChatResponse, routing.Target, error) {
+// runChat executes the plan: it walks the tiers (each ordered by the alias
+// strategy), acquiring a concurrency slot per attempt. A busy target is
+// skipped; a retryable error advances to the next target; if every target is
+// busy it waits briefly and retries, finally returning errAllBusy.
+func (s *Server) runChat(ctx context.Context, plan *routing.Plan, req llm.ChatRequest) (llm.ChatResponse, routing.Target, error) {
+	reg := s.reg()
+	free := s.freeFunc(reg)
 	var lastErr error
-	for _, t := range targets {
-		prov, ok := s.providers.Get(t.Provider)
-		if !ok {
-			lastErr = fmt.Errorf("provider %q not registered", t.Provider)
-			continue
+
+	for attempt := 0; attempt <= busyRetries; attempt++ {
+		anyBusy := false
+		for _, t := range plan.Ordered(s.router.NextRR(plan.Alias), free) {
+			e, ok := reg.Get(t.Provider)
+			if !ok {
+				lastErr = fmt.Errorf("provider %q not registered", t.Provider)
+				continue
+			}
+			if !e.Acquire() {
+				anyBusy = true
+				continue
+			}
+			resp, err := e.Provider.Chat(ctx, upstreamRequest(req, t.UpstreamModel))
+			e.Release()
+			if err == nil {
+				return resp, t, nil
+			}
+			lastErr = err
+			if !providers.IsRetryable(err) {
+				return llm.ChatResponse{}, t, err
+			}
 		}
-		resp, err := prov.Chat(ctx, upstreamRequest(req, t.UpstreamModel))
-		if err == nil {
-			return resp, t, nil
+		if !anyBusy {
+			break
 		}
-		lastErr = err
-		if !providers.IsRetryable(err) {
-			return llm.ChatResponse{}, t, err
+		select {
+		case <-ctx.Done():
+			return llm.ChatResponse{}, routing.Target{}, ctx.Err()
+		case <-time.After(busyBackoff):
 		}
 	}
 	if lastErr == nil {
-		lastErr = errors.New("no targets to try")
+		lastErr = errAllBusy
 	}
 	return llm.ChatResponse{}, routing.Target{}, lastErr
 }
@@ -88,45 +136,64 @@ type streamSink interface {
 	chunk(llm.StreamChunk) error
 }
 
-// runStream tries targets in order. Fallback is only possible before the
-// first chunk is emitted; once streaming starts, a later error is returned
-// with started=true and cannot be recovered. usage holds the last usage
-// reported by the served target.
-func (s *Server) runStream(ctx context.Context, targets []routing.Target, req llm.ChatRequest, sink streamSink) (served routing.Target, usage llm.Usage, started bool, err error) {
+// runStream executes the plan for a streaming request. Concurrency slots,
+// tier fallback, and the busy-retry wait mirror runChat; but once the first
+// chunk is emitted the response is committed and a later error cannot be
+// recovered (returned with started=true).
+func (s *Server) runStream(ctx context.Context, plan *routing.Plan, req llm.ChatRequest, sink streamSink) (served routing.Target, usage llm.Usage, started bool, err error) {
+	reg := s.reg()
+	free := s.freeFunc(reg)
 	var lastErr error
-	for _, t := range targets {
-		prov, ok := s.providers.Get(t.Provider)
-		if !ok {
-			lastErr = fmt.Errorf("provider %q not registered", t.Provider)
-			continue
-		}
 
-		attemptStarted := false
-		var attemptUsage llm.Usage
-		callErr := prov.ChatStream(ctx, upstreamRequest(req, t.UpstreamModel), func(c llm.StreamChunk) error {
-			if !attemptStarted {
-				sink.begin()
-				attemptStarted = true
+	for attempt := 0; attempt <= busyRetries; attempt++ {
+		anyBusy := false
+		for _, t := range plan.Ordered(s.router.NextRR(plan.Alias), free) {
+			e, ok := reg.Get(t.Provider)
+			if !ok {
+				lastErr = fmt.Errorf("provider %q not registered", t.Provider)
+				continue
 			}
-			if c.Usage != nil {
-				attemptUsage = *c.Usage
+			if !e.Acquire() {
+				anyBusy = true
+				continue
 			}
-			return sink.chunk(c)
-		})
 
-		if callErr == nil {
-			return t, attemptUsage, true, nil
+			attemptStarted := false
+			var attemptUsage llm.Usage
+			callErr := e.Provider.ChatStream(ctx, upstreamRequest(req, t.UpstreamModel), func(c llm.StreamChunk) error {
+				if !attemptStarted {
+					sink.begin()
+					attemptStarted = true
+				}
+				if c.Usage != nil {
+					attemptUsage = *c.Usage
+				}
+				return sink.chunk(c)
+			})
+			e.Release()
+
+			if callErr == nil {
+				return t, attemptUsage, true, nil
+			}
+			lastErr = callErr
+			if attemptStarted {
+				return t, attemptUsage, true, callErr
+			}
+			if !providers.IsRetryable(callErr) {
+				return t, llm.Usage{}, false, callErr
+			}
 		}
-		lastErr = callErr
-		if attemptStarted {
-			return t, attemptUsage, true, callErr
+		if !anyBusy {
+			break
 		}
-		if !providers.IsRetryable(callErr) {
-			return t, llm.Usage{}, false, callErr
+		select {
+		case <-ctx.Done():
+			return routing.Target{}, llm.Usage{}, false, ctx.Err()
+		case <-time.After(busyBackoff):
 		}
 	}
 	if lastErr == nil {
-		lastErr = errors.New("no targets to try")
+		lastErr = errAllBusy
 	}
 	return routing.Target{}, llm.Usage{}, false, lastErr
 }

@@ -38,6 +38,9 @@ func (m *Mock) Chat(_ context.Context, req llm.ChatRequest) (llm.ChatResponse, e
 	if strings.Contains(req.Model, "fail") {
 		return llm.ChatResponse{}, &Error{Status: 503, Retryable: true, Message: "mock upstream failure for model " + req.Model}
 	}
+	if strings.Contains(req.Model, "slow") {
+		time.Sleep(300 * time.Millisecond) // hold a concurrency slot, for testing saturation
+	}
 	prompt := approxTokens(joinMessages(req.Messages))
 	base := llm.ChatResponse{
 		ID:      "chatcmpl-mock-" + randID(),

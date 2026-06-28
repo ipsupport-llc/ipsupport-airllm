@@ -199,23 +199,24 @@ func (s *Server) handleAdminPutRole(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAdminProviders(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.st.PG.Query(r.Context(),
-		`SELECT name, kind, base_url, enabled, (cred_enc IS NOT NULL) FROM providers ORDER BY name`)
+		`SELECT name, kind, base_url, enabled, max_concurrency, (cred_enc IS NOT NULL) FROM providers ORDER BY name`)
 	if err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to list providers")
 		return
 	}
 	defer rows.Close()
 	type provider struct {
-		Name          string `json:"name"`
-		Kind          string `json:"kind"`
-		BaseURL       string `json:"base_url"`
-		Enabled       bool   `json:"enabled"`
-		HasCredential bool   `json:"has_credential"`
+		Name           string `json:"name"`
+		Kind           string `json:"kind"`
+		BaseURL        string `json:"base_url"`
+		Enabled        bool   `json:"enabled"`
+		MaxConcurrency int    `json:"max_concurrency"`
+		HasCredential  bool   `json:"has_credential"`
 	}
 	out := []provider{}
 	for rows.Next() {
 		var p provider
-		if err := rows.Scan(&p.Name, &p.Kind, &p.BaseURL, &p.Enabled, &p.HasCredential); err != nil {
+		if err := rows.Scan(&p.Name, &p.Kind, &p.BaseURL, &p.Enabled, &p.MaxConcurrency, &p.HasCredential); err != nil {
 			writeControlError(w, http.StatusInternalServerError, "failed to read providers")
 			return
 		}
@@ -228,10 +229,11 @@ func (s *Server) handleAdminPutProvider(w http.ResponseWriter, r *http.Request) 
 	sess, _ := sessionFrom(r.Context())
 	name := r.PathValue("name")
 	var body struct {
-		Kind    string `json:"kind"`
-		BaseURL string `json:"base_url"`
-		Enabled bool   `json:"enabled"`
-		APIKey  string `json:"api_key"` // blank = keep existing
+		Kind           string `json:"kind"`
+		BaseURL        string `json:"base_url"`
+		Enabled        bool   `json:"enabled"`
+		MaxConcurrency int    `json:"max_concurrency"`
+		APIKey         string `json:"api_key"` // blank = keep existing
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeControlError(w, http.StatusBadRequest, "invalid body")
@@ -241,6 +243,9 @@ func (s *Server) handleAdminPutProvider(w http.ResponseWriter, r *http.Request) 
 		writeControlError(w, http.StatusBadRequest, "kind is required")
 		return
 	}
+	if body.MaxConcurrency < 0 {
+		body.MaxConcurrency = 0
+	}
 
 	if body.APIKey != "" {
 		sealed, err := s.sealer.Seal([]byte(body.APIKey))
@@ -249,12 +254,12 @@ func (s *Server) handleAdminPutProvider(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		_, err = s.st.PG.Exec(r.Context(), `
-			INSERT INTO providers (name, kind, base_url, enabled, cred_enc)
-			VALUES ($1, $2, $3, $4, $5)
+			INSERT INTO providers (name, kind, base_url, enabled, max_concurrency, cred_enc)
+			VALUES ($1, $2, $3, $4, $5, $6)
 			ON CONFLICT (name) DO UPDATE SET
 				kind = EXCLUDED.kind, base_url = EXCLUDED.base_url, enabled = EXCLUDED.enabled,
-				cred_enc = EXCLUDED.cred_enc, updated_at = now()`,
-			name, body.Kind, body.BaseURL, body.Enabled, sealed)
+				max_concurrency = EXCLUDED.max_concurrency, cred_enc = EXCLUDED.cred_enc, updated_at = now()`,
+			name, body.Kind, body.BaseURL, body.Enabled, body.MaxConcurrency, sealed)
 		if err != nil {
 			writeControlError(w, http.StatusInternalServerError, "failed to save provider")
 			return
@@ -262,20 +267,27 @@ func (s *Server) handleAdminPutProvider(w http.ResponseWriter, r *http.Request) 
 	} else {
 		// No key supplied: leave any existing credential untouched.
 		_, err := s.st.PG.Exec(r.Context(), `
-			INSERT INTO providers (name, kind, base_url, enabled)
-			VALUES ($1, $2, $3, $4)
+			INSERT INTO providers (name, kind, base_url, enabled, max_concurrency)
+			VALUES ($1, $2, $3, $4, $5)
 			ON CONFLICT (name) DO UPDATE SET
-				kind = EXCLUDED.kind, base_url = EXCLUDED.base_url, enabled = EXCLUDED.enabled, updated_at = now()`,
-			name, body.Kind, body.BaseURL, body.Enabled)
+				kind = EXCLUDED.kind, base_url = EXCLUDED.base_url, enabled = EXCLUDED.enabled,
+				max_concurrency = EXCLUDED.max_concurrency, updated_at = now()`,
+			name, body.Kind, body.BaseURL, body.Enabled, body.MaxConcurrency)
 		if err != nil {
 			writeControlError(w, http.StatusInternalServerError, "failed to save provider")
 			return
 		}
 	}
 
+	// Apply immediately (rebuild the registry with new creds/limits/clients).
+	if err := s.reloadProviders(r.Context()); err != nil {
+		slog.Error("provider reload failed", "err", err)
+	}
+
 	// Audit without the secret.
 	s.audit(r.Context(), sess.principal.Subject, "provider.put", name, map[string]any{
-		"kind": body.Kind, "base_url": body.BaseURL, "enabled": body.Enabled, "has_key": body.APIKey != "",
+		"kind": body.Kind, "base_url": body.BaseURL, "enabled": body.Enabled,
+		"max_concurrency": body.MaxConcurrency, "has_key": body.APIKey != "",
 	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
 }
@@ -289,7 +301,7 @@ type aliasTarget struct {
 
 func (s *Server) handleAdminAliases(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.st.PG.Query(r.Context(), `
-		SELECT a.alias, a.protocol,
+		SELECT a.alias, a.protocol, a.strategy,
 			COALESCE(t.priority, 0), COALESCE(t.provider_name, ''),
 			COALESCE(t.upstream_model, ''), COALESCE(t.upstream_protocol, '')
 		FROM model_aliases a
@@ -303,20 +315,21 @@ func (s *Server) handleAdminAliases(w http.ResponseWriter, r *http.Request) {
 	type aliasView struct {
 		Alias    string        `json:"alias"`
 		Protocol string        `json:"protocol"`
+		Strategy string        `json:"strategy"`
 		Targets  []aliasTarget `json:"targets"`
 	}
 	byAlias := map[string]*aliasView{}
 	var order []string
 	for rows.Next() {
-		var alias, protocol, provider, upModel, upProto string
+		var alias, protocol, strategy, provider, upModel, upProto string
 		var priority int
-		if err := rows.Scan(&alias, &protocol, &priority, &provider, &upModel, &upProto); err != nil {
+		if err := rows.Scan(&alias, &protocol, &strategy, &priority, &provider, &upModel, &upProto); err != nil {
 			writeControlError(w, http.StatusInternalServerError, "failed to read aliases")
 			return
 		}
 		av, ok := byAlias[alias]
 		if !ok {
-			av = &aliasView{Alias: alias, Protocol: protocol, Targets: []aliasTarget{}}
+			av = &aliasView{Alias: alias, Protocol: protocol, Strategy: strategy, Targets: []aliasTarget{}}
 			byAlias[alias] = av
 			order = append(order, alias)
 		}
@@ -336,6 +349,7 @@ func (s *Server) handleAdminPutAlias(w http.ResponseWriter, r *http.Request) {
 	alias := r.PathValue("alias")
 	var body struct {
 		Protocol string        `json:"protocol"`
+		Strategy string        `json:"strategy"`
 		Targets  []aliasTarget `json:"targets"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
@@ -344,6 +358,9 @@ func (s *Server) handleAdminPutAlias(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Protocol == "" {
 		body.Protocol = "openai"
+	}
+	if body.Strategy != "least_busy" {
+		body.Strategy = "round_robin"
 	}
 
 	tx, err := s.st.PG.Begin(r.Context())
@@ -354,8 +371,9 @@ func (s *Server) handleAdminPutAlias(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 
 	if _, err := tx.Exec(r.Context(), `
-		INSERT INTO model_aliases (alias, protocol) VALUES ($1, $2)
-		ON CONFLICT (alias) DO UPDATE SET protocol = EXCLUDED.protocol`, alias, body.Protocol); err != nil {
+		INSERT INTO model_aliases (alias, protocol, strategy) VALUES ($1, $2, $3)
+		ON CONFLICT (alias) DO UPDATE SET protocol = EXCLUDED.protocol, strategy = EXCLUDED.strategy`,
+		alias, body.Protocol, body.Strategy); err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to save alias")
 		return
 	}

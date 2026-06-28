@@ -26,7 +26,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		writeProtocolError(w, r, http.StatusForbidden, "permission_error", "model not permitted for this key: "+req.Model)
 		return
 	}
-	targets, err := s.router.Resolve(r.Context(), req.Model, ak.Policy.AllowPassthrough)
+	plan, err := s.router.Resolve(r.Context(), req.Model, ak.Policy.AllowPassthrough)
 	if err != nil {
 		writeProtocolError(w, r, http.StatusNotFound, "invalid_request_error", err.Error())
 		return
@@ -37,17 +37,18 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Stream {
-		s.streamMessages(w, r, req, ak, start, targets)
+		s.streamMessages(w, r, req, ak, start, plan)
 		return
 	}
 
-	resp, target, callErr := s.runChat(r.Context(), targets, req)
+	resp, target, callErr := s.runChat(r.Context(), plan, req)
 	entry := chatEntry(ak, req.Model, target, "anthropic", start)
 	if callErr != nil {
-		entry.Status = http.StatusBadGateway
+		code, typ := classifyUpstreamErr(callErr)
+		entry.Status = code
 		entry.ErrorMsg = callErr.Error()
 		s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, 0, 0)
-		writeProtocolError(w, r, http.StatusBadGateway, "upstream_error", callErr.Error())
+		writeProtocolError(w, r, code, typ, callErr.Error())
 		return
 	}
 
@@ -65,7 +66,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
-func (s *Server) streamMessages(w http.ResponseWriter, r *http.Request, req llm.ChatRequest, ak authedKey, start time.Time, targets []routing.Target) {
+func (s *Server) streamMessages(w http.ResponseWriter, r *http.Request, req llm.ChatRequest, ak authedKey, start time.Time, plan *routing.Plan) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeProtocolError(w, r, http.StatusInternalServerError, "internal_error", "streaming unsupported")
@@ -78,15 +79,16 @@ func (s *Server) streamMessages(w http.ResponseWriter, r *http.Request, req llm.
 			"msg_"+newID(), req.Model, anthropic.EstimateInputTokens(req)),
 	}
 
-	target, usage, started, err := s.runStream(r.Context(), targets, req, sink)
+	target, usage, started, err := s.runStream(r.Context(), plan, req, sink)
 	entry := chatEntry(ak, req.Model, target, "anthropic", start)
 
 	if err != nil {
 		entry.ErrorMsg = err.Error()
 		if !started {
-			entry.Status = http.StatusBadGateway
+			code, typ := classifyUpstreamErr(err)
+			entry.Status = code
 			s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, 0, 0)
-			writeProtocolError(w, r, http.StatusBadGateway, "upstream_error", err.Error())
+			writeProtocolError(w, r, code, typ, err.Error())
 			return
 		}
 		entry.Status = http.StatusOK

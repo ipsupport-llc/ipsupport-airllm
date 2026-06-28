@@ -3,8 +3,10 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/rromenskyi/ipsupport-airllm/internal/auth"
 	"github.com/rromenskyi/ipsupport-airllm/internal/config"
@@ -29,36 +31,49 @@ type Deps struct {
 
 // Server is the top-level HTTP handler.
 type Server struct {
-	cfg       *config.Config
-	st        *store.Store
-	mux       *http.ServeMux
-	providers *providers.Registry
-	router    *routing.Router
-	limiter   *limits.Limiter
-	pricing   *pricing.Table
-	sealer    *secrets.Sealer
-	ledger    *ledger.Ledger
-	auth      auth.Authenticator
-	login     auth.LoginProvider
+	cfg     *config.Config
+	st      *store.Store
+	mux     *http.ServeMux
+	regPtr  atomic.Pointer[providers.Registry] // swapped on provider changes
+	router  *routing.Router
+	limiter *limits.Limiter
+	pricing *pricing.Table
+	sealer  *secrets.Sealer
+	ledger  *ledger.Ledger
+	auth    auth.Authenticator
+	login   auth.LoginProvider
 }
 
 // NewServer builds the routed handler.
 func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 	s := &Server{
-		cfg:       cfg,
-		st:        st,
-		mux:       http.NewServeMux(),
-		providers: deps.Providers,
-		router:    routing.NewRouter(st),
-		limiter:   deps.Limiter,
-		pricing:   deps.Pricing,
-		sealer:    deps.Sealer,
-		ledger:    ledger.New(st),
-		auth:      deps.Auth,
-		login:     deps.Login,
+		cfg:     cfg,
+		st:      st,
+		mux:     http.NewServeMux(),
+		router:  routing.NewRouter(st),
+		limiter: deps.Limiter,
+		pricing: deps.Pricing,
+		sealer:  deps.Sealer,
+		ledger:  ledger.New(st),
+		auth:    deps.Auth,
+		login:   deps.Login,
 	}
+	s.regPtr.Store(deps.Providers)
 	s.routes()
 	return s
+}
+
+// reg returns the current provider registry.
+func (s *Server) reg() *providers.Registry { return s.regPtr.Load() }
+
+// reloadProviders rebuilds the registry from the DB (after a provider change).
+func (s *Server) reloadProviders(ctx context.Context) error {
+	reg, err := providers.LoadFromStore(ctx, s.st, s.sealer)
+	if err != nil {
+		return err
+	}
+	s.regPtr.Store(reg)
+	return nil
 }
 
 // maxRequestBody caps request bodies to bound memory. It is generous enough

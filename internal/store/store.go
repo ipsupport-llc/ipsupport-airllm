@@ -44,20 +44,30 @@ func Open(ctx context.Context, cfg *config.Config) (*Store, error) {
 	return &Store{PG: pool, RDB: rdb}, nil
 }
 
-// ProviderNames returns the names of all enabled providers.
-func (s *Store) ProviderNames(ctx context.Context) ([]string, error) {
-	rows, err := s.PG.Query(ctx, `SELECT name FROM providers WHERE enabled = true ORDER BY name`)
+// ProviderRow is an enabled provider with the fields needed to build a client.
+type ProviderRow struct {
+	Name           string
+	Kind           string
+	BaseURL        string
+	CredEnc        []byte // AES-GCM sealed API key (nil if none)
+	MaxConcurrency int
+}
+
+// ListProvidersForRegistry returns all enabled providers for the registry.
+func (s *Store) ListProvidersForRegistry(ctx context.Context) ([]ProviderRow, error) {
+	rows, err := s.PG.Query(ctx,
+		`SELECT name, kind, base_url, cred_enc, max_concurrency FROM providers WHERE enabled = true ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []string
+	var out []ProviderRow
 	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
+		var p ProviderRow
+		if err := rows.Scan(&p.Name, &p.Kind, &p.BaseURL, &p.CredEnc, &p.MaxConcurrency); err != nil {
 			return nil, err
 		}
-		out = append(out, n)
+		out = append(out, p)
 	}
 	return out, rows.Err()
 }

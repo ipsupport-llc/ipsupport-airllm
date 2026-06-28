@@ -60,20 +60,6 @@ func run() error {
 		slog.Warn("dev mock seeded; using a fixed, non-secret API key", "token", token)
 	}
 
-	// Build the provider registry from the DB. All providers are mock-backed
-	// for the local mock; real provider kinds are wired on the k8s deploy.
-	names, err := st.ProviderNames(ctx)
-	if err != nil {
-		return err
-	}
-	reg := providers.NewRegistry()
-	for _, n := range names {
-		reg.Register(providers.NewMock(n))
-	}
-	if _, ok := reg.Get("mock"); !ok {
-		reg.Register(providers.NewMock("mock"))
-	}
-
 	priceTable, err := pricing.Load(ctx, st)
 	if err != nil {
 		return err
@@ -83,6 +69,13 @@ func run() error {
 		slog.Warn("AIRLLM_MASTER_KEY not set; using an insecure deterministic dev key (mock only)")
 	}
 	sealer, err := secrets.New(cfg.MasterKey)
+	if err != nil {
+		return err
+	}
+
+	// Build the provider registry from the DB (decrypting stored credentials,
+	// instantiating a client per kind). Reloaded when providers change.
+	reg, err := providers.LoadFromStore(ctx, st, sealer)
 	if err != nil {
 		return err
 	}
