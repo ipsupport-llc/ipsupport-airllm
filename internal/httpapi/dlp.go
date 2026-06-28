@@ -19,6 +19,11 @@ type dlpConfig struct {
 	Enabled       bool   `json:"enabled"`
 	Action        string `json:"action"` // off | flag | redact | block
 	ScanResponses bool   `json:"scan_responses"`
+
+	// Layer 2: optional BERT-NER sidecar for fuzzy/contextual PII.
+	ModelEnabled  bool    `json:"model_enabled"`
+	ModelURL      string  `json:"model_url"`
+	ModelMinScore float64 `json:"model_min_score"`
 }
 
 func defaultDLPConfig() dlpConfig {
@@ -70,6 +75,16 @@ func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, r
 			continue
 		}
 		findings := dlp.Scan(content)
+		if cfg.ModelEnabled && cfg.ModelURL != "" {
+			mctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			mf, err := dlp.ModelScan(mctx, s.httpc, cfg.ModelURL, cfg.ModelMinScore, content)
+			cancel()
+			if err != nil {
+				slog.Error("dlp model scan failed; deterministic layer only", "err", err)
+			} else if len(mf) > 0 {
+				findings = dlp.Merge(append(findings, mf...))
+			}
+		}
 		if len(findings) == 0 {
 			continue
 		}

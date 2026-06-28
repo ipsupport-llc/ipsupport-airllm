@@ -43,6 +43,7 @@ type Server struct {
 	ledger  *ledger.Ledger
 	auth    auth.Authenticator
 	login   auth.LoginProvider
+	httpc   *http.Client // shared client for the DLP model sidecar
 }
 
 // NewServer builds the routed handler.
@@ -58,6 +59,7 @@ func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 		ledger:  ledger.New(st),
 		auth:    deps.Auth,
 		login:   deps.Login,
+		httpc:   &http.Client{},
 	}
 	s.regPtr.Store(deps.Providers)
 	s.loadDLP(context.Background())

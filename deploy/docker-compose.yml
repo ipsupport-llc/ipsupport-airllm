@@ -49,5 +49,15 @@ services:
       redis:
         condition: service_healthy
 
+  # DLP BERT-NER sidecar (layer 2). Opt-in: `--profile bert`. Heavy image
+  # (torch + model weights). Set the gateway's DLP model_url to
+  # http://dlp-bert:8000 in the console. Loopback-only on the host.
+  dlp-bert:
+    build:
+      context: ./dlp-bert
+    profiles: ["bert"]
+    ports:
+      - "127.0.0.1:8000:8000"
+
 volumes:
   pgdata:

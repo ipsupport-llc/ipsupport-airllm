@@ -513,6 +513,13 @@ async function adminDLP(c) {
         <label class="field"><span class="lab">Action on detection</span>
           <select id="dlp-act">${["off", "flag", "redact", "block"].map((a) =>
             `<option ${a === d.action ? "selected" : ""}>${a}</option>`).join("")}</select></label>
+        <div class="lab" style="color:var(--muted);font-size:.82rem;margin:.6rem 0 .3rem">BERT NER sidecar (layer 2 — fuzzy/contextual PII)</div>
+        <label class="field"><span class="lab">Use model sidecar</span>
+          <input type="checkbox" id="dlp-men" ${d.model_enabled ? "checked" : ""} style="width:auto" /></label>
+        <label class="field"><span class="lab">Sidecar URL</span>
+          <input id="dlp-murl" value="${esc(d.model_url || "http://dlp-bert:8000")}" /></label>
+        <label class="field"><span class="lab">Min score (0–1)</span>
+          <input id="dlp-mscore" type="number" step="0.05" min="0" max="1" value="${d.model_min_score ?? 0.5}" /></label>
         <button class="btn" id="dlp-save">Save policy</button>
       </div>
     </div>
@@ -533,6 +540,8 @@ async function adminDLP(c) {
   $("#dlp-save").addEventListener("click", async () => {
     const x = await api("PUT", "/api/admin/dlp", {
       enabled: $("#dlp-en").checked, action: $("#dlp-act").value, scan_responses: false,
+      model_enabled: $("#dlp-men").checked, model_url: $("#dlp-murl").value.trim(),
+      model_min_score: Number($("#dlp-mscore").value) || 0,
     });
     if (x.ok) toast("DLP policy saved");
     else toast((x.data && x.data.error) || "Failed", "err");

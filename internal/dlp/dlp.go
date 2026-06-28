@@ -47,19 +47,57 @@ var entropyCandidate = regexp.MustCompile(`[A-Za-z0-9+/=_\-]{24,}`)
 const entropyThreshold = 3.6 // bits/char; random base64 is ~5-6, English ~2-3
 
 // Scan returns all sensitive spans found in s, merged and sorted by position.
+// Named rules take precedence: an entropy hit is only added when it does not
+// overlap a named finding (so "VAR=sk-..." reports openai_key, not a generic
+// high-entropy span that swallows the variable name).
 func Scan(s string) []Finding {
-	var found []Finding
+	var named []Finding
 	for _, r := range rules {
 		for _, loc := range r.re.FindAllStringIndex(s, -1) {
-			found = append(found, Finding{Label: r.label, Start: loc[0], End: loc[1]})
+			named = append(named, Finding{Label: r.label, Start: loc[0], End: loc[1]})
 		}
 	}
+	named = Merge(named)
+
+	all := append([]Finding(nil), named...)
 	for _, loc := range entropyCandidate.FindAllStringIndex(s, -1) {
-		if shannon(s[loc[0]:loc[1]]) >= entropyThreshold {
-			found = append(found, Finding{Label: "high_entropy", Start: loc[0], End: loc[1]})
+		tok := s[loc[0]:loc[1]]
+		// Require mixed character classes so hex digests, git SHAs, and UUIDs
+		// (single-case) don't trip the entropy detector; real secret tokens
+		// are almost always upper+lower+digit.
+		if !mixedClasses(tok) || shannon(tok) < entropyThreshold {
+			continue
+		}
+		if overlapsAny(loc[0], loc[1], named) {
+			continue
+		}
+		all = append(all, Finding{Label: "high_entropy", Start: loc[0], End: loc[1]})
+	}
+	return Merge(all)
+}
+
+func overlapsAny(start, end int, fs []Finding) bool {
+	for _, f := range fs {
+		if start < f.End && f.Start < end {
+			return true
 		}
 	}
-	return merge(found)
+	return false
+}
+
+func mixedClasses(s string) bool {
+	var up, lo, dig bool
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c >= 'A' && c <= 'Z':
+			up = true
+		case c >= 'a' && c <= 'z':
+			lo = true
+		case c >= '0' && c <= '9':
+			dig = true
+		}
+	}
+	return up && lo && dig
 }
 
 // Redact replaces every finding with a [REDACTED:label] marker.
@@ -95,9 +133,10 @@ func Labels(findings []Finding) []string {
 	return out
 }
 
-// merge sorts findings by start and drops any that overlap an earlier one, so
+// Merge sorts findings by start and drops any that overlap an earlier one, so
 // redaction offsets never collide. The earliest (most specific) rule wins.
-func merge(in []Finding) []Finding {
+// It is used to combine the regex layer with the model layer.
+func Merge(in []Finding) []Finding {
 	if len(in) <= 1 {
 		return in
 	}
