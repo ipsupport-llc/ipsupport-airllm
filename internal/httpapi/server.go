@@ -35,6 +35,7 @@ type Server struct {
 	st      *store.Store
 	mux     *http.ServeMux
 	regPtr  atomic.Pointer[providers.Registry] // swapped on provider changes
+	dlpPtr  atomic.Pointer[dlpConfig]          // swapped on DLP config changes
 	router  *routing.Router
 	limiter *limits.Limiter
 	pricing *pricing.Table
@@ -59,6 +60,7 @@ func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 		login:   deps.Login,
 	}
 	s.regPtr.Store(deps.Providers)
+	s.loadDLP(context.Background())
 	s.routes()
 	return s
 }

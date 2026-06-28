@@ -78,7 +78,7 @@ const NAV = [
   { href: "#/keys", label: "API Keys" },
   { href: "#/usage", label: "Usage" },
 ];
-const ADMIN_TABS = ["users", "keys", "usage", "roles", "aliases", "providers", "pricing", "audit"];
+const ADMIN_TABS = ["users", "keys", "usage", "roles", "aliases", "providers", "pricing", "dlp", "audit"];
 
 function renderShell() {
   const adminLink = me.is_admin ? `<div class="sect">Admin</div><a href="#/admin/users" data-nav>Admin console</a>` : "";
@@ -262,7 +262,8 @@ function viewAdmin(view, tab) {
   const c = $("#atab");
   ({
     users: adminUsers, keys: adminKeys, usage: adminUsage, roles: adminRoles,
-    aliases: adminAliases, providers: adminProviders, pricing: adminPricing, audit: adminAudit,
+    aliases: adminAliases, providers: adminProviders, pricing: adminPricing,
+    dlp: adminDLP, audit: adminAudit,
   }[tab] || adminUsers)(c);
 }
 
@@ -490,6 +491,73 @@ async function editAlias(c, a) {
       { protocol: $("#al-proto", bg).value, strategy: $("#al-strategy", bg).value, targets: tlist });
     if (x.ok) { toast("Alias saved"); close(); adminAliases(c); }
     else toast((x.data && x.data.error) || "Failed", "err");
+  });
+}
+
+async function adminDLP(c) {
+  const [cfgR, incR, whR] = await Promise.all([
+    api("GET", "/api/admin/dlp"),
+    api("GET", "/api/admin/dlp/incidents"),
+    api("GET", "/api/admin/webhooks"),
+  ]);
+  const d = cfgR.data || { enabled: false, action: "off" };
+  const incidents = (incR.data && incR.data.incidents) || [];
+  const hooks = (whR.data && whR.data.webhooks) || [];
+  const actBadge = (a) => a === "blocked" ? "revoked" : (a === "redacted" ? "admin" : "neutral");
+
+  c.innerHTML = `
+    <div class="panel"><div class="panel-head"><h2>DLP policy</h2></div>
+      <div style="padding:1rem 1.1rem">
+        <label class="field"><span class="lab">Scan requests for secrets / tokens</span>
+          <input type="checkbox" id="dlp-en" ${d.enabled ? "checked" : ""} style="width:auto" /></label>
+        <label class="field"><span class="lab">Action on detection</span>
+          <select id="dlp-act">${["off", "flag", "redact", "block"].map((a) =>
+            `<option ${a === d.action ? "selected" : ""}>${a}</option>`).join("")}</select></label>
+        <button class="btn" id="dlp-save">Save policy</button>
+      </div>
+    </div>
+    <div class="row" style="margin-bottom:1rem"><button class="btn sm" id="new-hook">New alert webhook</button></div>
+    ${panelTable("Alert webhooks", ["Name", "URL", "Events", "Secret", "Enabled", ""],
+      hooks.map((h) => `<tr><td>${esc(h.name) || "—"}</td><td class="mono">${esc(h.url)}</td>
+        <td>${(h.events || []).join(", ")}</td>
+        <td>${h.has_secret ? `<span class="badge active">set</span>` : `<span class="badge neutral">none</span>`}</td>
+        <td>${h.enabled ? "yes" : "no"}</td>
+        <td style="text-align:right"><button class="btn danger sm" data-delhook="${h.id}">Delete</button></td></tr>`))}
+    ${panelTable("Recent incidents", ["Time", "User", "Ingress", "Model", "Action", "Labels", "Matches", "Sample"],
+      incidents.map((i) => `<tr><td>${fmtTime(i.ts)}</td><td>${esc(i.user) || "—"}</td><td>${esc(i.ingress)}</td>
+        <td class="mono">${esc(i.alias)}</td>
+        <td><span class="badge ${actBadge(i.action)}">${esc(i.action)}</span></td>
+        <td>${(i.labels || []).map(esc).join(", ")}</td><td>${i.match_count}</td>
+        <td class="mono" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(i.sample)}</td></tr>`))}
+  `;
+  $("#dlp-save").addEventListener("click", async () => {
+    const x = await api("PUT", "/api/admin/dlp", {
+      enabled: $("#dlp-en").checked, action: $("#dlp-act").value, scan_responses: false,
+    });
+    if (x.ok) toast("DLP policy saved");
+    else toast((x.data && x.data.error) || "Failed", "err");
+  });
+  $("#new-hook").addEventListener("click", () => editWebhook(c));
+  document.querySelectorAll("[data-delhook]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("Delete this webhook?")) return;
+    const x = await api("DELETE", `/api/admin/webhooks/${b.getAttribute("data-delhook")}`);
+    if (x.ok) { toast("Deleted"); adminDLP(c); } else toast("Failed", "err");
+  }));
+}
+
+function editWebhook(c) {
+  modalForm("New alert webhook", [
+    { name: "name", label: "Name", value: "" },
+    { name: "url", label: "URL", value: "" },
+    { name: "secret", label: "Signing secret (HMAC, optional)", type: "password", value: "" },
+    { name: "enabled", label: "Enabled", type: "checkbox", value: true },
+  ], async (v) => {
+    if (!v.url) { toast("URL is required", "err"); return false; }
+    const x = await api("POST", "/api/admin/webhooks", {
+      name: v.name, url: v.url, secret: v.secret, enabled: v.enabled, events: ["dlp.incident"],
+    });
+    if (x.ok) { toast("Webhook created"); adminDLP(c); return true; }
+    toast((x.data && x.data.error) || "Failed", "err"); return false;
   });
 }
 

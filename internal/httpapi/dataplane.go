@@ -38,6 +38,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeProtocolError(w, r, http.StatusTooManyRequests, "rate_limit_error", msg)
 		return
 	}
+	if blocked, msg := s.dlpEnforce(r.Context(), ak, "openai", &req); blocked {
+		writeProtocolError(w, r, http.StatusBadRequest, "invalid_request_error", msg)
+		return
+	}
 
 	if req.Stream {
 		s.streamChatCompletions(w, r, req, ak, start, plan)
