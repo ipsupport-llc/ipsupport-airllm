@@ -37,7 +37,7 @@ function fmtLimits(lim) {
   const parts = [];
   for (const [dim, windows] of Object.entries(lim || {})) {
     for (const [win, val] of Object.entries(windows || {})) {
-      parts.push(dim === "usd" ? `$${fmtNum(val)}/${esc(win)}` : `${fmtNum(val)} ${esc(dim)}/${esc(win)}`);
+      parts.push(dim === "cost_usd" ? `$${fmtNum(val)}/${esc(win)}` : `${fmtNum(val)} ${esc(dim)}/${esc(win)}`);
     }
   }
   return parts.length ? parts.join(", ") : "—";

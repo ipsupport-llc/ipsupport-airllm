@@ -1,0 +1,80 @@
+# Operations
+
+## Build, test, run
+
+```sh
+make build        # build ./bin/ipsupport-airllm
+make test         # unit tests (go test ./...)
+make test-race    # unit tests under the race detector
+make vet          # go vet ./...
+make fmt          # gofmt -w .
+make tidy         # go mod tidy
+
+make run          # go run against your DATABASE_URL / REDIS_URL
+make compose-up   # build + run postgres, redis, and the gateway (loopback)
+make compose-down # stop and delete the compose volumes
+```
+
+CI should run `go build ./...`, `go vet ./...`, `gofmt -l` (must be empty), and
+`go test -race ./...`. The web console is plain HTML/CSS/JS embedded with
+`go:embed`; there is no separate front-end build step.
+
+## Migrations
+
+SQL migrations live in `migrations/` and are **embedded and applied
+automatically on boot**, in lexicographic order, inside `store.Migrate`. To add
+one, drop a new `NNNN_name.sql` file with the next number; do not edit applied
+migrations. A clean re-bootstrap is `make compose-down && make compose-up`.
+
+## Security posture
+
+- **Bind to loopback.** On a host with a public IP, never publish the gateway on
+  `0.0.0.0` and never expose Postgres or Redis (Redis has no auth). Compose binds
+  all three to `127.0.0.1` and offsets the datastore ports; reach a remote box
+  via an SSH tunnel or `kubectl port-forward`. Override the gateway's host
+  binding with `APP_BIND` only to a specific private interface.
+- **Master key.** `AIRLLM_MASTER_KEY` (base64, 32 bytes) seals provider
+  credentials and capture bodies. It is **required in `prod`**; `dev` derives a
+  deterministic insecure key for convenience. Generate one with
+  `openssl rand -base64 32` and deliver it out of band — never commit it.
+- **Secrets stay out of git.** The repository is written public-grade: no
+  secrets, English-only. `deploy/.env` is git-ignored; use
+  [`deploy/.env.example`](../deploy/.env.example) as the template.
+- **Redacted by default.** Capture redacts stored bodies regardless of the DLP
+  action. The raw training window is the only path that stores un-redacted
+  secrets, and only encrypted and TTL-bounded — see
+  [DLP, capture & audit](dlp-capture-audit.md#the-raw-training-window).
+- **Least privilege.** The container runs as a non-root user (`uid 10001`).
+
+## Datastores & backups
+
+- **Postgres** is the source of truth — back it up. It holds identity, keys,
+  sealed provider credentials, the usage ledger, DLP incidents, the capture
+  index, and runtime settings.
+- **Redis** holds only ephemeral rolling-usage counters; it can be rebuilt and
+  does not require backup.
+- **Blob store** holds sealed capture bodies. In dev it is `CAPTURE_BLOB_DIR` on
+  the filesystem; back it with a volume or object store on deploy. Capture
+  retention and the raw-window TTL bound its growth.
+
+## Deploy notes (kubernetes)
+
+The local mock substitutes two things that change on a real deploy:
+
+- **Auth:** set `AUTH_MODE=oidc` and wire generic OIDC (configurable roles-claim
+  path; Zitadel/Okta/etc. by configuration). The mock password login is dev-only.
+- **Providers:** add real providers (OpenAI, OpenRouter, xAI, Anthropic) with
+  credentials entered through the console; they are sealed with the master key
+  before storage and never returned or logged.
+
+In kubernetes the app listens on `0.0.0.0:8080` behind the ingress (the
+loopback rule is about not exposing an unauthenticated port directly on a host).
+Run a single writer for the migration step or rely on the idempotent,
+ordered-on-boot migrator.
+
+## Observability
+
+- `GET /healthz` — liveness. `GET /readyz` — readiness (datastore reachability).
+- Logs are structured JSON (`slog`). The mock login credentials are logged at
+  `WARN` on boot in dev; treat any log containing credentials as dev-only.
+- The capture pipeline exposes a dropped-records counter for overload visibility.
