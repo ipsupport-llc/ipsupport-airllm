@@ -1,0 +1,11 @@
+{
+  "name": "airllm-e2e",
+  "private": true,
+  "description": "Playwright click-through of the AirLLM console (uses system Chrome).",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0"
+  }
+}
