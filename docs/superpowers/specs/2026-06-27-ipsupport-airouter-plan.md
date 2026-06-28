@@ -31,16 +31,15 @@ English-only repo. No secrets in git.
 - [x] cmd/ipsupport-airouter/main.go: wire config+store+http server; /healthz, /readyz
 - [x] Verify: go build/vet/gofmt clean; app boots against compose; migration applied; /healthz 200; /readyz 200
 
-## Phase 1 — Data-plane MVP (OpenAI ingress → mock upstream)  🟦 non-stream DONE (2026-06-27)
+## Phase 1 — Data-plane MVP (OpenAI ingress → mock upstream)  ✅ DONE (2026-06-27)
 - [x] internal/apikey: generate/hash(sha256); prefix + last4 (+ unit tests)
-- [x] internal/providers: Provider interface + mock provider (canned + usage)  — streaming + tool-call emission pending
-- [x] internal/llm: provider-neutral IR; internal/openai: request/response codec
-- [x] internal/gateway: POST /v1/chat/completions (non-stream), GET /v1/models
+- [x] internal/providers: Provider interface + mock provider (content + usage + streaming + tool-calls)
+- [x] internal/llm: provider-neutral IR (+ StreamChunk); internal/openai: request/response + SSE codec
+- [x] internal/gateway: POST /v1/chat/completions (non-stream + SSE stream), GET /v1/models
 - [x] key-auth middleware (Bearer/x-api-key → key lookup → key on context)
-- [x] internal/ledger: write one usage row per request (best-effort)
+- [x] internal/ledger: write one usage row per request (best-effort), incl. streaming
 - [x] internal/seed: dev mock seed (user/role/provider/alias/fixed key)
-- [x] Verify: 401/400 paths; chat returns mock output; /v1/models; ledger row written; go test green
-- [ ] PENDING: SSE streaming for /v1/chat/completions + mock tool-call emission (next iteration)
+- [x] Verify: 401/400 paths; non-stream + SSE chat; tool-call stream (tooltest trigger); /v1/models; ledger rows; go test green (openai+providers+apikey)
 
 ## Phase 2 — Anthropic ingress + passthrough
 - [ ] internal/gateway: POST /v1/messages (non-stream + SSE)

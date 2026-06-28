@@ -1,6 +1,9 @@
 package httpapi
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -24,7 +27,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Stream {
-		writeAPIError(w, http.StatusBadRequest, "invalid_request_error", "streaming is not implemented yet")
+		s.streamChatCompletions(w, r, req, ak, start)
 		return
 	}
 
@@ -106,4 +109,78 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// streamChatCompletions serves the OpenAI Server-Sent Events stream for a
+// chat completion. Once the 200 + first byte are written, errors can no
+// longer be signalled to the client, so partial streams are only recorded
+// to the ledger.
+func (s *Server) streamChatCompletions(w http.ResponseWriter, r *http.Request, req llm.ChatRequest, ak authedKey, start time.Time) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeAPIError(w, http.StatusInternalServerError, "internal_error", "streaming unsupported")
+		return
+	}
+
+	prov, upstreamModel := s.resolve(req.Model)
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	meta := openai.StreamMeta{ID: "chatcmpl-" + newID(), Model: req.Model, Created: time.Now().Unix()}
+
+	var usage llm.Usage
+	streamErr := prov.ChatStream(r.Context(), llm.ChatRequest{
+		Model:       upstreamModel,
+		Messages:    req.Messages,
+		Tools:       req.Tools,
+		ToolChoice:  req.ToolChoice,
+		Temperature: req.Temperature,
+		MaxTokens:   req.MaxTokens,
+		Stream:      true,
+	}, func(c llm.StreamChunk) error {
+		if c.Usage != nil {
+			usage = *c.Usage
+		}
+		b, err := openai.MarshalStreamChunk(meta, c)
+		if err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	})
+
+	entry := ledger.Entry{
+		KeyID:            ak.KeyID,
+		UserID:           ak.UserID,
+		Alias:            req.Model,
+		ProviderName:     prov.Name(),
+		UpstreamModel:    upstreamModel,
+		IngressProtocol:  "openai",
+		UpstreamProtocol: prov.Protocol(),
+		PromptTokens:     usage.PromptTokens,
+		CompletionTokens: usage.CompletionTokens,
+		LatencyMS:        time.Since(start).Milliseconds(),
+		Status:           http.StatusOK,
+	}
+	if streamErr != nil {
+		entry.ErrorMsg = streamErr.Error()
+		s.ledger.Record(r.Context(), entry)
+		return
+	}
+
+	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	flusher.Flush()
+	s.ledger.Record(r.Context(), entry)
+}
+
+func newID() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }

@@ -20,6 +20,10 @@ type Provider interface {
 	Protocol() string
 	// Chat performs a non-streaming chat completion.
 	Chat(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error)
+	// ChatStream performs a streaming chat completion, invoking yield for
+	// each chunk in order. If yield returns an error (e.g. the client
+	// disconnected), streaming stops and that error is returned.
+	ChatStream(ctx context.Context, req llm.ChatRequest, yield func(llm.StreamChunk) error) error
 }
 
 // Registry holds providers by name.

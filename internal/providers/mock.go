@@ -12,9 +12,14 @@ import (
 )
 
 // Mock is an in-process provider that simulates an OpenAI-shaped upstream:
-// it echoes the last user turn, reports plausible token usage, and (when
-// tools are offered) can emit a tool call. It lets the whole pipeline run
+// it echoes the last user turn, reports plausible token usage, and supports
+// both non-streaming and streaming responses. It lets the whole pipeline run
 // locally without real provider credentials or spend.
+//
+// Tool calls: to keep the mock usable by real coding agents (which always
+// send tools), it returns normal content by default and emits a tool call
+// only when tools are present AND the last user message contains the trigger
+// substring "tooltest".
 type Mock struct {
 	name string
 }
@@ -28,28 +33,88 @@ func (m *Mock) Protocol() string { return "openai" }
 
 // Chat returns a deterministic mock completion for req.
 func (m *Mock) Chat(_ context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
-	content := fmt.Sprintf(
-		"Mock response from provider %q (model %q). You said: %s",
-		m.name, req.Model, lastUserText(req.Messages))
-
 	prompt := approxTokens(joinMessages(req.Messages))
-	completion := approxTokens(content)
-
-	return llm.ChatResponse{
+	base := llm.ChatResponse{
 		ID:      "chatcmpl-mock-" + randID(),
 		Model:   req.Model,
 		Created: time.Now().Unix(),
-		Choices: []llm.Choice{{
+	}
+
+	if m.wantsToolCall(req) {
+		tc := m.toolCall(req)
+		base.Choices = []llm.Choice{{
 			Index:        0,
-			Message:      llm.Message{Role: "assistant", Content: content},
-			FinishReason: "stop",
-		}},
-		Usage: llm.Usage{
-			PromptTokens:     prompt,
-			CompletionTokens: completion,
-			TotalTokens:      prompt + completion,
+			Message:      llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{tc}},
+			FinishReason: "tool_calls",
+		}}
+		completion := approxTokens(tc.Function.Name + tc.Function.Arguments)
+		base.Usage = llm.Usage{PromptTokens: prompt, CompletionTokens: completion, TotalTokens: prompt + completion}
+		return base, nil
+	}
+
+	content := m.content(req)
+	base.Choices = []llm.Choice{{
+		Index:        0,
+		Message:      llm.Message{Role: "assistant", Content: content},
+		FinishReason: "stop",
+	}}
+	completion := approxTokens(content)
+	base.Usage = llm.Usage{PromptTokens: prompt, CompletionTokens: completion, TotalTokens: prompt + completion}
+	return base, nil
+}
+
+// ChatStream emits the same logical response as Chat, chunk by chunk.
+func (m *Mock) ChatStream(_ context.Context, req llm.ChatRequest, yield func(llm.StreamChunk) error) error {
+	if err := yield(llm.StreamChunk{Role: "assistant"}); err != nil {
+		return err
+	}
+	prompt := approxTokens(joinMessages(req.Messages))
+
+	if m.wantsToolCall(req) {
+		tc := m.toolCall(req)
+		if err := yield(llm.StreamChunk{ToolCalls: []llm.ToolCall{tc}}); err != nil {
+			return err
+		}
+		if err := yield(llm.StreamChunk{FinishReason: "tool_calls"}); err != nil {
+			return err
+		}
+		completion := approxTokens(tc.Function.Name + tc.Function.Arguments)
+		return yield(llm.StreamChunk{Usage: &llm.Usage{PromptTokens: prompt, CompletionTokens: completion, TotalTokens: prompt + completion}})
+	}
+
+	content := m.content(req)
+	for _, piece := range splitForStream(content) {
+		if err := yield(llm.StreamChunk{Content: piece}); err != nil {
+			return err
+		}
+	}
+	if err := yield(llm.StreamChunk{FinishReason: "stop"}); err != nil {
+		return err
+	}
+	completion := approxTokens(content)
+	return yield(llm.StreamChunk{Usage: &llm.Usage{PromptTokens: prompt, CompletionTokens: completion, TotalTokens: prompt + completion}})
+}
+
+func (m *Mock) content(req llm.ChatRequest) string {
+	return fmt.Sprintf(
+		"Mock response from provider %q (model %q). You said: %s",
+		m.name, req.Model, lastUserText(req.Messages))
+}
+
+func (m *Mock) wantsToolCall(req llm.ChatRequest) bool {
+	return len(req.Tools) > 0 &&
+		strings.Contains(strings.ToLower(lastUserText(req.Messages)), "tooltest")
+}
+
+func (m *Mock) toolCall(req llm.ChatRequest) llm.ToolCall {
+	return llm.ToolCall{
+		ID:   "call_mock_" + randID(),
+		Type: "function",
+		Function: llm.FunctionCall{
+			Name:      req.Tools[0].Function.Name,
+			Arguments: "{}",
 		},
-	}, nil
+	}
 }
 
 func lastUserText(msgs []llm.Message) string {
@@ -68,6 +133,20 @@ func joinMessages(msgs []llm.Message) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+// splitForStream breaks text into word-sized pieces (trailing space kept)
+// to simulate token-by-token streaming.
+func splitForStream(s string) []string {
+	words := strings.Fields(s)
+	out := make([]string, 0, len(words))
+	for i, w := range words {
+		if i < len(words)-1 {
+			w += " "
+		}
+		out = append(out, w)
+	}
+	return out
 }
 
 // approxTokens is a crude rune/4 token estimate, used only by the mock.

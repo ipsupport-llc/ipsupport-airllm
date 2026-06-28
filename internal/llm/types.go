@@ -74,3 +74,15 @@ type ChatResponse struct {
 	Choices []Choice
 	Usage   Usage
 }
+
+// StreamChunk is one incremental piece of a streamed completion. A provider
+// emits a sequence: an optional role chunk, content and/or tool-call deltas,
+// a finish-reason chunk, and finally a usage chunk (Usage set, all else
+// zero). Egress codecs translate these into the client's stream format.
+type StreamChunk struct {
+	Role         string     // set on the first chunk only
+	Content      string     // incremental text
+	ToolCalls    []ToolCall // incremental tool calls (the mock emits whole)
+	FinishReason string     // "stop" | "tool_calls" on the final delta chunk
+	Usage        *Usage     // set on the terminal usage chunk only
+}
