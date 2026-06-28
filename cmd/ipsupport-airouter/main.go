@@ -14,6 +14,7 @@ import (
 
 	"github.com/rromenskyi/ipsupport-airouter/internal/config"
 	"github.com/rromenskyi/ipsupport-airouter/internal/httpapi"
+	"github.com/rromenskyi/ipsupport-airouter/internal/providers"
 	"github.com/rromenskyi/ipsupport-airouter/internal/seed"
 	"github.com/rromenskyi/ipsupport-airouter/internal/store"
 )
@@ -55,9 +56,23 @@ func run() error {
 		slog.Warn("dev mock seeded; using a fixed, non-secret API key", "token", token)
 	}
 
+	// Build the provider registry from the DB. All providers are mock-backed
+	// for the local mock; real provider kinds are wired on the k8s deploy.
+	names, err := st.ProviderNames(ctx)
+	if err != nil {
+		return err
+	}
+	reg := providers.NewRegistry()
+	for _, n := range names {
+		reg.Register(providers.NewMock(n))
+	}
+	if _, ok := reg.Get("mock"); !ok {
+		reg.Register(providers.NewMock("mock"))
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.NewServer(cfg, st),
+		Handler:           httpapi.NewServer(cfg, st, reg),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

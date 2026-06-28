@@ -10,57 +10,46 @@ import (
 	"github.com/rromenskyi/ipsupport-airouter/internal/ledger"
 	"github.com/rromenskyi/ipsupport-airouter/internal/llm"
 	"github.com/rromenskyi/ipsupport-airouter/internal/openai"
+	"github.com/rromenskyi/ipsupport-airouter/internal/routing"
 )
 
 // handleChatCompletions implements the OpenAI POST /v1/chat/completions
-// ingress against a resolved provider, recording usage to the ledger.
-//
-// Phase 1: non-streaming only; routing is a stub (always the mock
-// provider). Streaming and real routing land in later phases.
+// ingress: policy gate, route resolution, provider call with fallback, and
+// usage accounting.
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	ak, _ := keyFromContext(r.Context())
 	start := time.Now()
 
 	req, err := openai.DecodeChatRequest(r.Body)
 	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		writeProtocolError(w, r, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
+	if !ak.Policy.Allows(req.Model) {
+		writeProtocolError(w, r, http.StatusForbidden, "permission_error", "model not permitted for this key: "+req.Model)
+		return
+	}
+	targets, err := s.router.Resolve(r.Context(), req.Model, ak.Policy.AllowPassthrough)
+	if err != nil {
+		writeProtocolError(w, r, http.StatusNotFound, "invalid_request_error", err.Error())
+		return
+	}
+
 	if req.Stream {
-		s.streamChatCompletions(w, r, req, ak, start)
+		s.streamChatCompletions(w, r, req, ak, start, targets)
 		return
 	}
 
-	prov, upstreamModel := s.resolve(req.Model)
-
-	resp, callErr := prov.Chat(r.Context(), llm.ChatRequest{
-		Model:       upstreamModel,
-		Messages:    req.Messages,
-		Tools:       req.Tools,
-		ToolChoice:  req.ToolChoice,
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
-	})
-
-	entry := ledger.Entry{
-		KeyID:            ak.KeyID,
-		UserID:           ak.UserID,
-		Alias:            req.Model,
-		ProviderName:     prov.Name(),
-		UpstreamModel:    upstreamModel,
-		IngressProtocol:  "openai",
-		UpstreamProtocol: prov.Protocol(),
-		LatencyMS:        time.Since(start).Milliseconds(),
-	}
+	resp, target, callErr := s.runChat(r.Context(), targets, req)
+	entry := chatEntry(ak, req.Model, target, "openai", start)
 	if callErr != nil {
 		entry.Status = http.StatusBadGateway
 		entry.ErrorMsg = callErr.Error()
 		s.ledger.Record(r.Context(), entry)
-		writeAPIError(w, http.StatusBadGateway, "upstream_error", callErr.Error())
+		writeProtocolError(w, r, http.StatusBadGateway, "upstream_error", callErr.Error())
 		return
 	}
 
-	// Present the client-facing alias as the model name in the response.
 	resp.Model = req.Model
 	entry.Status = http.StatusOK
 	entry.PromptTokens = resp.Usage.PromptTokens
@@ -69,7 +58,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	body, err := openai.MarshalChatResponse(resp)
 	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, "internal_error", "failed to encode response")
+		writeProtocolError(w, r, http.StatusInternalServerError, "internal_error", "failed to encode response")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -77,11 +66,48 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
+func (s *Server) streamChatCompletions(w http.ResponseWriter, r *http.Request, req llm.ChatRequest, ak authedKey, start time.Time, targets []routing.Target) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeProtocolError(w, r, http.StatusInternalServerError, "internal_error", "streaming unsupported")
+		return
+	}
+
+	sink := &openaiSink{
+		w:     w,
+		flush: flusher.Flush,
+		meta:  openai.StreamMeta{ID: "chatcmpl-" + newID(), Model: req.Model, Created: time.Now().Unix()},
+	}
+
+	target, usage, started, err := s.runStream(r.Context(), targets, req, sink)
+	entry := chatEntry(ak, req.Model, target, "openai", start)
+	entry.PromptTokens = usage.PromptTokens
+	entry.CompletionTokens = usage.CompletionTokens
+
+	if err != nil {
+		entry.ErrorMsg = err.Error()
+		if !started {
+			entry.Status = http.StatusBadGateway
+			s.ledger.Record(r.Context(), entry)
+			writeProtocolError(w, r, http.StatusBadGateway, "upstream_error", err.Error())
+			return
+		}
+		entry.Status = http.StatusOK // headers already sent; cannot signal failure
+		s.ledger.Record(r.Context(), entry)
+		return
+	}
+
+	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	flusher.Flush()
+	entry.Status = http.StatusOK
+	s.ledger.Record(r.Context(), entry)
+}
+
 // handleModels lists the model aliases as OpenAI model objects.
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.st.PG.Query(r.Context(), `SELECT alias FROM model_aliases ORDER BY alias`)
 	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, "internal_error", "failed to list models")
+		writeProtocolError(w, r, http.StatusInternalServerError, "internal_error", "failed to list models")
 		return
 	}
 	defer rows.Close()
@@ -99,84 +125,30 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var alias string
 		if err := rows.Scan(&alias); err != nil {
-			writeAPIError(w, http.StatusInternalServerError, "internal_error", "failed to read models")
+			writeProtocolError(w, r, http.StatusInternalServerError, "internal_error", "failed to read models")
 			return
 		}
 		out.Data = append(out.Data, model{ID: alias, Object: "model", OwnedBy: "airouter"})
 	}
 	if err := rows.Err(); err != nil {
-		writeAPIError(w, http.StatusInternalServerError, "internal_error", "failed to read models")
+		writeProtocolError(w, r, http.StatusInternalServerError, "internal_error", "failed to read models")
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
-// streamChatCompletions serves the OpenAI Server-Sent Events stream for a
-// chat completion. Once the 200 + first byte are written, errors can no
-// longer be signalled to the client, so partial streams are only recorded
-// to the ledger.
-func (s *Server) streamChatCompletions(w http.ResponseWriter, r *http.Request, req llm.ChatRequest, ak authedKey, start time.Time) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeAPIError(w, http.StatusInternalServerError, "internal_error", "streaming unsupported")
-		return
-	}
-
-	prov, upstreamModel := s.resolve(req.Model)
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-
-	meta := openai.StreamMeta{ID: "chatcmpl-" + newID(), Model: req.Model, Created: time.Now().Unix()}
-
-	var usage llm.Usage
-	streamErr := prov.ChatStream(r.Context(), llm.ChatRequest{
-		Model:       upstreamModel,
-		Messages:    req.Messages,
-		Tools:       req.Tools,
-		ToolChoice:  req.ToolChoice,
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
-		Stream:      true,
-	}, func(c llm.StreamChunk) error {
-		if c.Usage != nil {
-			usage = *c.Usage
-		}
-		b, err := openai.MarshalStreamChunk(meta, c)
-		if err != nil {
-			return err
-		}
-		if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {
-			return err
-		}
-		flusher.Flush()
-		return nil
-	})
-
-	entry := ledger.Entry{
+// chatEntry seeds a ledger entry common to the chat and messages paths.
+func chatEntry(ak authedKey, alias string, t routing.Target, ingress string, start time.Time) ledger.Entry {
+	return ledger.Entry{
 		KeyID:            ak.KeyID,
 		UserID:           ak.UserID,
-		Alias:            req.Model,
-		ProviderName:     prov.Name(),
-		UpstreamModel:    upstreamModel,
-		IngressProtocol:  "openai",
-		UpstreamProtocol: prov.Protocol(),
-		PromptTokens:     usage.PromptTokens,
-		CompletionTokens: usage.CompletionTokens,
+		Alias:            alias,
+		ProviderName:     t.Provider,
+		UpstreamModel:    t.UpstreamModel,
+		IngressProtocol:  ingress,
+		UpstreamProtocol: t.UpstreamProtocol,
 		LatencyMS:        time.Since(start).Milliseconds(),
-		Status:           http.StatusOK,
 	}
-	if streamErr != nil {
-		entry.ErrorMsg = streamErr.Error()
-		s.ledger.Record(r.Context(), entry)
-		return
-	}
-
-	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
-	flusher.Flush()
-	s.ledger.Record(r.Context(), entry)
 }
 
 func newID() string {

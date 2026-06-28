@@ -5,13 +5,14 @@ import (
 	"time"
 
 	"github.com/rromenskyi/ipsupport-airouter/internal/anthropic"
-	"github.com/rromenskyi/ipsupport-airouter/internal/ledger"
 	"github.com/rromenskyi/ipsupport-airouter/internal/llm"
+	"github.com/rromenskyi/ipsupport-airouter/internal/routing"
 )
 
-// handleMessages implements the Anthropic POST /v1/messages ingress. The
-// request is decoded into the IR, routed to a provider, and the IR response
-// is encoded back into Anthropic shape.
+// handleMessages implements the Anthropic POST /v1/messages ingress: policy
+// gate, route resolution, provider call with fallback, and usage accounting.
+// The request is decoded into the IR and the IR response is encoded back into
+// Anthropic shape.
 func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	ak, _ := keyFromContext(r.Context())
 	start := time.Now()
@@ -21,24 +22,23 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		writeProtocolError(w, r, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	if req.Stream {
-		s.streamMessages(w, r, req, ak, start)
+	if !ak.Policy.Allows(req.Model) {
+		writeProtocolError(w, r, http.StatusForbidden, "permission_error", "model not permitted for this key: "+req.Model)
+		return
+	}
+	targets, err := s.router.Resolve(r.Context(), req.Model, ak.Policy.AllowPassthrough)
+	if err != nil {
+		writeProtocolError(w, r, http.StatusNotFound, "invalid_request_error", err.Error())
 		return
 	}
 
-	prov, upstreamModel := s.resolve(req.Model)
-	resp, callErr := prov.Chat(r.Context(), upstreamRequest(req, upstreamModel))
-
-	entry := ledger.Entry{
-		KeyID:            ak.KeyID,
-		UserID:           ak.UserID,
-		Alias:            req.Model,
-		ProviderName:     prov.Name(),
-		UpstreamModel:    upstreamModel,
-		IngressProtocol:  "anthropic",
-		UpstreamProtocol: prov.Protocol(),
-		LatencyMS:        time.Since(start).Milliseconds(),
+	if req.Stream {
+		s.streamMessages(w, r, req, ak, start, targets)
+		return
 	}
+
+	resp, target, callErr := s.runChat(r.Context(), targets, req)
+	entry := chatEntry(ak, req.Model, target, "anthropic", start)
 	if callErr != nil {
 		entry.Status = http.StatusBadGateway
 		entry.ErrorMsg = callErr.Error()
@@ -63,54 +63,51 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
-// streamMessages serves the Anthropic Messages SSE event stream.
-func (s *Server) streamMessages(w http.ResponseWriter, r *http.Request, req llm.ChatRequest, ak authedKey, start time.Time) {
+func (s *Server) streamMessages(w http.ResponseWriter, r *http.Request, req llm.ChatRequest, ak authedKey, start time.Time, targets []routing.Target) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeProtocolError(w, r, http.StatusInternalServerError, "internal_error", "streaming unsupported")
 		return
 	}
 
-	prov, upstreamModel := s.resolve(req.Model)
+	sink := &anthropicSink{
+		w: w,
+		sw: anthropic.NewStreamWriter(w, flusher.Flush,
+			"msg_"+newID(), req.Model, anthropic.EstimateInputTokens(req)),
+	}
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
+	target, usage, started, err := s.runStream(r.Context(), targets, req, sink)
+	entry := chatEntry(ak, req.Model, target, "anthropic", start)
+	entry.PromptTokens = usage.PromptTokens
+	entry.CompletionTokens = usage.CompletionTokens
 
-	sw := anthropic.NewStreamWriter(w, flusher.Flush, "msg_"+newID(), req.Model, anthropic.EstimateInputTokens(req))
-
-	var usage llm.Usage
-	streamErr := prov.ChatStream(r.Context(), upstreamRequest(req, upstreamModel), func(c llm.StreamChunk) error {
-		if c.Usage != nil {
-			usage = *c.Usage
+	if err != nil {
+		entry.ErrorMsg = err.Error()
+		if !started {
+			entry.Status = http.StatusBadGateway
+			s.ledger.Record(r.Context(), entry)
+			writeProtocolError(w, r, http.StatusBadGateway, "upstream_error", err.Error())
+			return
 		}
-		return sw.Chunk(c)
-	})
+		entry.Status = http.StatusOK
+		s.ledger.Record(r.Context(), entry)
+		return
+	}
 
-	entry := ledger.Entry{
-		KeyID:            ak.KeyID,
-		UserID:           ak.UserID,
-		Alias:            req.Model,
-		ProviderName:     prov.Name(),
-		UpstreamModel:    upstreamModel,
-		IngressProtocol:  "anthropic",
-		UpstreamProtocol: prov.Protocol(),
-		PromptTokens:     usage.PromptTokens,
-		CompletionTokens: usage.CompletionTokens,
-		LatencyMS:        time.Since(start).Milliseconds(),
-		Status:           http.StatusOK,
-	}
-	if streamErr != nil {
-		entry.ErrorMsg = streamErr.Error()
-	}
+	entry.Status = http.StatusOK
 	s.ledger.Record(r.Context(), entry)
 }
 
-// upstreamRequest builds the provider-facing request with the resolved
-// upstream model name substituted in.
-func upstreamRequest(req llm.ChatRequest, upstreamModel string) llm.ChatRequest {
-	out := req
-	out.Model = upstreamModel
-	return out
+// anthropicSink streams Anthropic Messages SSE events via a StreamWriter.
+type anthropicSink struct {
+	w  http.ResponseWriter
+	sw *anthropic.StreamWriter
+}
+
+func (a *anthropicSink) begin() {
+	writeSSEHeaders(a.w)
+}
+
+func (a *anthropicSink) chunk(c llm.StreamChunk) error {
+	return a.sw.Chunk(c)
 }

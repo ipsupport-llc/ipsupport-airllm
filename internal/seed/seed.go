@@ -55,11 +55,33 @@ func Dev(ctx context.Context, st *store.Store) (string, error) {
 		return "", fmt.Errorf("seed alias target: %w", err)
 	}
 
+	// A fallback alias whose primary target fails (model contains "fail")
+	// so routing fallback can be exercised end-to-end.
+	if _, err := st.PG.Exec(ctx, `
+		INSERT INTO model_aliases (alias, protocol)
+		VALUES ('mock-fallback', 'openai')
+		ON CONFLICT (alias) DO NOTHING`); err != nil {
+		return "", fmt.Errorf("seed fallback alias: %w", err)
+	}
+	for _, t := range []struct {
+		priority int
+		model    string
+	}{{0, "mock-fail"}, {1, "mock-model-1"}} {
+		if _, err := st.PG.Exec(ctx, `
+			INSERT INTO alias_targets (alias, priority, provider_name, upstream_model, upstream_protocol)
+			SELECT 'mock-fallback', $1, 'mock', $2, 'openai'
+			WHERE NOT EXISTS (SELECT 1 FROM alias_targets WHERE alias = 'mock-fallback' AND priority = $1)`,
+			t.priority, t.model); err != nil {
+			return "", fmt.Errorf("seed fallback target: %w", err)
+		}
+	}
+
 	k := apikey.Describe(DevToken)
 	if _, err := st.PG.Exec(ctx, `
 		INSERT INTO api_keys (user_id, name, hash, prefix, last4, policy_snapshot, status)
-		VALUES ($1, 'dev demo key', $2, $3, $4, '{}'::jsonb, 'active')
-		ON CONFLICT (hash) DO NOTHING`,
+		VALUES ($1, 'dev demo key', $2, $3, $4,
+			'{"allowed_models":["*"],"allow_passthrough":true,"limits":{}}'::jsonb, 'active')
+		ON CONFLICT (hash) DO UPDATE SET policy_snapshot = EXCLUDED.policy_snapshot, status = 'active'`,
 		userID, k.Hash, k.Prefix, k.Last4); err != nil {
 		return "", fmt.Errorf("seed api key: %w", err)
 	}

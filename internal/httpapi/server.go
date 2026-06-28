@@ -9,6 +9,7 @@ import (
 	"github.com/rromenskyi/ipsupport-airouter/internal/config"
 	"github.com/rromenskyi/ipsupport-airouter/internal/ledger"
 	"github.com/rromenskyi/ipsupport-airouter/internal/providers"
+	"github.com/rromenskyi/ipsupport-airouter/internal/routing"
 	"github.com/rromenskyi/ipsupport-airouter/internal/store"
 )
 
@@ -18,19 +19,19 @@ type Server struct {
 	st        *store.Store
 	mux       *http.ServeMux
 	providers *providers.Registry
+	router    *routing.Router
 	ledger    *ledger.Ledger
 }
 
-// NewServer builds the routed handler with a provider registry and ledger.
-func NewServer(cfg *config.Config, st *store.Store) *Server {
-	reg := providers.NewRegistry()
-	reg.Register(providers.NewMock("mock"))
-
+// NewServer builds the routed handler with a provider registry, router, and
+// ledger.
+func NewServer(cfg *config.Config, st *store.Store, reg *providers.Registry) *Server {
 	s := &Server{
 		cfg:       cfg,
 		st:        st,
 		mux:       http.NewServeMux(),
 		providers: reg,
+		router:    routing.NewRouter(st),
 		ledger:    ledger.New(st),
 	}
 	s.routes()
@@ -50,16 +51,6 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/chat/completions", s.requireAPIKey(s.handleChatCompletions))
 	s.mux.HandleFunc("GET /v1/models", s.requireAPIKey(s.handleModels))
 	s.mux.HandleFunc("POST /v1/messages", s.requireAPIKey(s.handleMessages))
-}
-
-// resolve maps a client-requested model to a provider and upstream model.
-//
-// Phase 1 stub: always the mock provider, with the requested model passed
-// through as the upstream model. Alias-catalog routing with fallback lands
-// in phase 3.
-func (s *Server) resolve(model string) (providers.Provider, string) {
-	p, _ := s.providers.Get("mock")
-	return p, model
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

@@ -2,11 +2,11 @@ package httpapi
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strings"
 
 	"github.com/rromenskyi/ipsupport-airouter/internal/apikey"
+	"github.com/rromenskyi/ipsupport-airouter/internal/policy"
 )
 
 type ctxKey int
@@ -17,7 +17,7 @@ const keyCtxKey ctxKey = iota
 type authedKey struct {
 	KeyID  string
 	UserID string
-	Policy json.RawMessage
+	Policy policy.KeyPolicy
 }
 
 // requireAPIKey authenticates a Bearer API key and stores the resolved key
@@ -41,15 +41,17 @@ func (s *Server) requireAPIKey(next http.HandlerFunc) http.HandlerFunc {
 
 func (s *Server) lookupKey(ctx context.Context, token string) (authedKey, error) {
 	var ak authedKey
+	var raw []byte
 	err := s.st.PG.QueryRow(ctx, `
 		SELECT id::text, user_id::text, policy_snapshot
 		FROM api_keys
 		WHERE hash = $1 AND status = 'active'`,
 		apikey.Hash(token),
-	).Scan(&ak.KeyID, &ak.UserID, &ak.Policy)
+	).Scan(&ak.KeyID, &ak.UserID, &raw)
 	if err != nil {
 		return authedKey{}, err
 	}
+	ak.Policy = policy.Parse(raw)
 	// Best-effort last-used stamp; ignore failures.
 	_, _ = s.st.PG.Exec(ctx, `UPDATE api_keys SET last_used_at = now() WHERE id = $1`, ak.KeyID)
 	return ak, nil

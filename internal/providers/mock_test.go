@@ -95,6 +95,28 @@ func TestMockChatStreamSequence(t *testing.T) {
 	}
 }
 
+func TestMockFailRetryable(t *testing.T) {
+	m := NewMock("mock")
+	_, err := m.Chat(context.Background(), userReq("x"))
+	if err != nil {
+		t.Fatalf("non-fail model should succeed: %v", err)
+	}
+
+	failReq := llm.ChatRequest{Model: "mock-fail", Messages: []llm.Message{{Role: "user", Content: "x"}}}
+	_, err = m.Chat(context.Background(), failReq)
+	if !IsRetryable(err) {
+		t.Errorf("Chat fail model: expected retryable error, got %v", err)
+	}
+
+	err = m.ChatStream(context.Background(), failReq, func(llm.StreamChunk) error {
+		t.Fatal("fail model must not yield any chunk")
+		return nil
+	})
+	if !IsRetryable(err) {
+		t.Errorf("ChatStream fail model: expected retryable error, got %v", err)
+	}
+}
+
 func TestMockChatStreamYieldError(t *testing.T) {
 	m := NewMock("mock")
 	sentinel := context.Canceled

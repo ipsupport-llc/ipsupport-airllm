@@ -44,6 +44,24 @@ func Open(ctx context.Context, cfg *config.Config) (*Store, error) {
 	return &Store{PG: pool, RDB: rdb}, nil
 }
 
+// ProviderNames returns the names of all enabled providers.
+func (s *Store) ProviderNames(ctx context.Context) ([]string, error) {
+	rows, err := s.PG.Query(ctx, `SELECT name FROM providers WHERE enabled = true ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
 // Close releases both backends.
 func (s *Store) Close() {
 	if s.PG != nil {

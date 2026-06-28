@@ -48,10 +48,13 @@ English-only repo. No secrets in git.
 - [x] mock Anthropic-shaped responses through IR (true byte-passthrough is a real-provider concern → Phase 3)
 - [x] Verify: anthropic 401 shape; non-stream msg; SSE event sequence (message_start..message_stop); tool_use stream; ledger anthropic rows; go test (anthropic pkg) green
 
-## Phase 3 — Routing + cross-protocol translation
-- [ ] internal/routing: alias catalog → ordered targets + fallback; explicit provider/model passthrough (policy-gated)
-- [ ] internal/translate: Anthropic<->OpenAI (messages/system/tools/tool_choice/stream-deltas/stop-reason/usage); document caveats
-- [ ] Verify: alias resolves + fails over to next target on simulated error; cross-protocol translation round-trips in tests
+## Phase 3 — Routing + cross-protocol translation  ✅ DONE (2026-06-27)
+- [x] internal/routing: alias catalog → ordered targets + fallback; explicit provider/model passthrough (policy-gated)
+- [x] internal/policy: KeyPolicy (allowed_models + allow_passthrough); per-key model gate (403) in both ingresses
+- [x] providers.Error (retryable) + mock fail trigger ("fail" model); fallback executor (runChat/runStream, lazy-header so stream falls back pre-first-byte)
+- [x] registry built from DB providers (mock-backed); ProviderNames in store
+- [x] translation = IR codecs (no redundant translate pkg); caveats documented in docs/translation.md (router prefers same-protocol target)
+- [x] Verify e2e: normal alias 200; fallback alias served by secondary (ledger=mock-model-1); explicit passthrough 200; unknown model/provider 404; streaming fallback recovers; go test (policy+providers) green
 
 ## Phase 4 — Limits + metering
 - [ ] internal/limits: Redis rolling buckets per key×window×unit (5h/24h/7d), tokens + USD

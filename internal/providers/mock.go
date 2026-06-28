@@ -31,8 +31,13 @@ func (m *Mock) Name() string     { return m.name }
 func (m *Mock) Kind() string     { return "mock" }
 func (m *Mock) Protocol() string { return "openai" }
 
-// Chat returns a deterministic mock completion for req.
+// Chat returns a deterministic mock completion for req. An upstream model
+// containing "fail" yields a retryable error, used to exercise routing
+// fallback.
 func (m *Mock) Chat(_ context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
+	if strings.Contains(req.Model, "fail") {
+		return llm.ChatResponse{}, &Error{Status: 503, Retryable: true, Message: "mock upstream failure for model " + req.Model}
+	}
 	prompt := approxTokens(joinMessages(req.Messages))
 	base := llm.ChatResponse{
 		ID:      "chatcmpl-mock-" + randID(),
@@ -63,8 +68,13 @@ func (m *Mock) Chat(_ context.Context, req llm.ChatRequest) (llm.ChatResponse, e
 	return base, nil
 }
 
-// ChatStream emits the same logical response as Chat, chunk by chunk.
+// ChatStream emits the same logical response as Chat, chunk by chunk. It
+// fails (before yielding anything) for "fail" models so the router can fall
+// back to the next target.
 func (m *Mock) ChatStream(_ context.Context, req llm.ChatRequest, yield func(llm.StreamChunk) error) error {
+	if strings.Contains(req.Model, "fail") {
+		return &Error{Status: 503, Retryable: true, Message: "mock upstream failure for model " + req.Model}
+	}
 	if err := yield(llm.StreamChunk{Role: "assistant"}); err != nil {
 		return err
 	}
