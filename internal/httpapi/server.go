@@ -13,6 +13,7 @@ import (
 	"github.com/rromenskyi/ipsupport-airllm/internal/pricing"
 	"github.com/rromenskyi/ipsupport-airllm/internal/providers"
 	"github.com/rromenskyi/ipsupport-airllm/internal/routing"
+	"github.com/rromenskyi/ipsupport-airllm/internal/secrets"
 	"github.com/rromenskyi/ipsupport-airllm/internal/store"
 )
 
@@ -21,6 +22,7 @@ type Deps struct {
 	Providers *providers.Registry
 	Limiter   *limits.Limiter
 	Pricing   *pricing.Table
+	Sealer    *secrets.Sealer
 	Auth      auth.Authenticator
 	Login     auth.LoginProvider // nil when not using password login (e.g. OIDC)
 }
@@ -34,6 +36,7 @@ type Server struct {
 	router    *routing.Router
 	limiter   *limits.Limiter
 	pricing   *pricing.Table
+	sealer    *secrets.Sealer
 	ledger    *ledger.Ledger
 	auth      auth.Authenticator
 	login     auth.LoginProvider
@@ -49,6 +52,7 @@ func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 		router:    routing.NewRouter(st),
 		limiter:   deps.Limiter,
 		pricing:   deps.Pricing,
+		sealer:    deps.Sealer,
 		ledger:    ledger.New(st),
 		auth:      deps.Auth,
 		login:     deps.Login,

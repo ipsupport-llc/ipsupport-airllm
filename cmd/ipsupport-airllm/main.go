@@ -18,6 +18,7 @@ import (
 	"github.com/rromenskyi/ipsupport-airllm/internal/limits"
 	"github.com/rromenskyi/ipsupport-airllm/internal/pricing"
 	"github.com/rromenskyi/ipsupport-airllm/internal/providers"
+	"github.com/rromenskyi/ipsupport-airllm/internal/secrets"
 	"github.com/rromenskyi/ipsupport-airllm/internal/seed"
 	"github.com/rromenskyi/ipsupport-airllm/internal/store"
 )
@@ -78,10 +79,19 @@ func run() error {
 		return err
 	}
 
+	if cfg.MasterKeyDev {
+		slog.Warn("AIRLLM_MASTER_KEY not set; using an insecure deterministic dev key (mock only)")
+	}
+	sealer, err := secrets.New(cfg.MasterKey)
+	if err != nil {
+		return err
+	}
+
 	deps := httpapi.Deps{
 		Providers: reg,
 		Limiter:   limits.New(st.RDB),
 		Pricing:   priceTable,
+		Sealer:    sealer,
 	}
 
 	// Control-plane auth. The local mock uses password login with random

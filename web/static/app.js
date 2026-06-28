@@ -343,9 +343,11 @@ async function adminProviders(c) {
   const r = await api("GET", "/api/admin/providers");
   const ps = (r.data && r.data.providers) || [];
   c.innerHTML = `<div class="row" style="margin-bottom:1rem"><button class="btn sm" id="new-prov">New provider</button></div>` +
-    panelTable("Providers", ["Name", "Kind", "Base URL", "Enabled", ""],
+    panelTable("Providers", ["Name", "Kind", "Base URL", "Key", "Enabled", ""],
       ps.map((p) => `<tr><td class="mono">${esc(p.name)}</td><td>${esc(p.kind)}</td>
-        <td class="mono">${esc(p.base_url) || "—"}</td><td>${p.enabled ? "yes" : "no"}</td>
+        <td class="mono">${esc(p.base_url) || "—"}</td>
+        <td>${p.has_credential ? `<span class="badge active">set</span>` : `<span class="badge neutral">none</span>`}</td>
+        <td>${p.enabled ? "yes" : "no"}</td>
         <td style="text-align:right"><button class="btn ghost sm" data-edit='${esc(JSON.stringify(p))}'>Edit</button></td></tr>`));
   $("#new-prov").addEventListener("click", () => editProvider(c, {}));
   document.querySelectorAll("[data-edit]").forEach((b) =>
@@ -357,10 +359,11 @@ function editProvider(c, p) {
     { name: "name", label: "Name", value: p.name || "", disabled: !!p.name },
     { name: "kind", label: "Kind", type: "select", options: ["mock", "openai", "openrouter", "xai", "ollama", "anthropic"], value: p.kind || "mock" },
     { name: "base_url", label: "Base URL (optional override)", value: p.base_url || "" },
+    { name: "api_key", label: p.has_credential ? "API key (set — blank keeps current)" : "API key", type: "password", value: "", placeholder: p.has_credential ? "•••••• stored" : "" },
     { name: "enabled", label: "Enabled", type: "checkbox", value: p.enabled !== false },
   ], async (v) => {
     const x = await api("PUT", `/api/admin/providers/${encodeURIComponent(v.name)}`,
-      { kind: v.kind, base_url: v.base_url, enabled: v.enabled });
+      { kind: v.kind, base_url: v.base_url, enabled: v.enabled, api_key: v.api_key });
     if (x.ok) { toast("Provider saved"); adminProviders(c); return true; }
     toast((x.data && x.data.error) || "Failed", "err"); return false;
   });
@@ -508,6 +511,11 @@ function modalForm(title, fields, onSubmit) {
         return `<label class="field"><span class="lab">${esc(f.label)}</span>
           <select name="${f.name}" ${f.disabled ? "disabled" : ""}>${(f.options || []).map((o) =>
             `<option value="${esc(o)}" ${o === f.value ? "selected" : ""}>${esc(o)}</option>`).join("")}</select></label>`;
+      }
+      if (f.type === "password") {
+        return `<label class="field"><span class="lab">${esc(f.label)}</span>
+          <input type="password" name="${f.name}" value="${esc(f.value)}" autocomplete="new-password"
+            placeholder="${esc(f.placeholder || "")}" /></label>`;
       }
       return `<label class="field"><span class="lab">${esc(f.label)}</span>
         <input name="${f.name}" value="${esc(f.value)}" ${f.disabled ? "disabled" : ""} /></label>`;

@@ -199,22 +199,23 @@ func (s *Server) handleAdminPutRole(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAdminProviders(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.st.PG.Query(r.Context(),
-		`SELECT name, kind, base_url, enabled FROM providers ORDER BY name`)
+		`SELECT name, kind, base_url, enabled, (cred_enc IS NOT NULL) FROM providers ORDER BY name`)
 	if err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to list providers")
 		return
 	}
 	defer rows.Close()
 	type provider struct {
-		Name    string `json:"name"`
-		Kind    string `json:"kind"`
-		BaseURL string `json:"base_url"`
-		Enabled bool   `json:"enabled"`
+		Name          string `json:"name"`
+		Kind          string `json:"kind"`
+		BaseURL       string `json:"base_url"`
+		Enabled       bool   `json:"enabled"`
+		HasCredential bool   `json:"has_credential"`
 	}
 	out := []provider{}
 	for rows.Next() {
 		var p provider
-		if err := rows.Scan(&p.Name, &p.Kind, &p.BaseURL, &p.Enabled); err != nil {
+		if err := rows.Scan(&p.Name, &p.Kind, &p.BaseURL, &p.Enabled, &p.HasCredential); err != nil {
 			writeControlError(w, http.StatusInternalServerError, "failed to read providers")
 			return
 		}
@@ -230,6 +231,7 @@ func (s *Server) handleAdminPutProvider(w http.ResponseWriter, r *http.Request) 
 		Kind    string `json:"kind"`
 		BaseURL string `json:"base_url"`
 		Enabled bool   `json:"enabled"`
+		APIKey  string `json:"api_key"` // blank = keep existing
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeControlError(w, http.StatusBadRequest, "invalid body")
@@ -239,18 +241,42 @@ func (s *Server) handleAdminPutProvider(w http.ResponseWriter, r *http.Request) 
 		writeControlError(w, http.StatusBadRequest, "kind is required")
 		return
 	}
-	// Credentials are not handled here yet (encrypted storage is pending).
-	_, err := s.st.PG.Exec(r.Context(), `
-		INSERT INTO providers (name, kind, base_url, enabled)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (name) DO UPDATE SET
-			kind = EXCLUDED.kind, base_url = EXCLUDED.base_url, enabled = EXCLUDED.enabled, updated_at = now()`,
-		name, body.Kind, body.BaseURL, body.Enabled)
-	if err != nil {
-		writeControlError(w, http.StatusInternalServerError, "failed to save provider")
-		return
+
+	if body.APIKey != "" {
+		sealed, err := s.sealer.Seal([]byte(body.APIKey))
+		if err != nil {
+			writeControlError(w, http.StatusInternalServerError, "failed to seal credential")
+			return
+		}
+		_, err = s.st.PG.Exec(r.Context(), `
+			INSERT INTO providers (name, kind, base_url, enabled, cred_enc)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (name) DO UPDATE SET
+				kind = EXCLUDED.kind, base_url = EXCLUDED.base_url, enabled = EXCLUDED.enabled,
+				cred_enc = EXCLUDED.cred_enc, updated_at = now()`,
+			name, body.Kind, body.BaseURL, body.Enabled, sealed)
+		if err != nil {
+			writeControlError(w, http.StatusInternalServerError, "failed to save provider")
+			return
+		}
+	} else {
+		// No key supplied: leave any existing credential untouched.
+		_, err := s.st.PG.Exec(r.Context(), `
+			INSERT INTO providers (name, kind, base_url, enabled)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (name) DO UPDATE SET
+				kind = EXCLUDED.kind, base_url = EXCLUDED.base_url, enabled = EXCLUDED.enabled, updated_at = now()`,
+			name, body.Kind, body.BaseURL, body.Enabled)
+		if err != nil {
+			writeControlError(w, http.StatusInternalServerError, "failed to save provider")
+			return
+		}
 	}
-	s.audit(r.Context(), sess.principal.Subject, "provider.put", name, body)
+
+	// Audit without the secret.
+	s.audit(r.Context(), sess.principal.Subject, "provider.put", name, map[string]any{
+		"kind": body.Kind, "base_url": body.BaseURL, "enabled": body.Enabled, "has_key": body.APIKey != "",
+	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
 }
 
