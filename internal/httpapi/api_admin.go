@@ -476,8 +476,13 @@ func (s *Server) handleAdminPutPricing(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
 }
 
-// audit records a control-plane mutation. Best-effort.
+// audit records a control-plane mutation. Best-effort. When auditHook is set
+// (e.g. in tests) it is called instead of writing to the database.
 func (s *Server) audit(ctx context.Context, actor, action, target string, detail any) {
+	if s.auditHook != nil {
+		s.auditHook(ctx, actor, action, target, detail)
+		return
+	}
 	b, err := json.Marshal(detail)
 	if err != nil || len(b) == 0 || string(b) == "null" {
 		b = []byte("{}")

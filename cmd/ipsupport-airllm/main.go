@@ -118,6 +118,7 @@ func run() error {
 		Pricing:   priceTable,
 		Sealer:    sealer,
 		Capture:   capturePipeline,
+		Blob:      blobStore,
 	}
 
 	// Control-plane auth. The local mock uses password login with random

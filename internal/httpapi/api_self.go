@@ -15,10 +15,11 @@ import (
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	sess, _ := sessionFrom(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
-		"subject":  sess.principal.Subject,
-		"email":    sess.principal.Email,
-		"roles":    sess.principal.Roles,
-		"is_admin": sess.principal.IsAdmin(),
+		"subject":    sess.principal.Subject,
+		"email":      sess.principal.Email,
+		"roles":      sess.principal.Roles,
+		"is_admin":   sess.principal.IsAdmin(),
+		"is_auditor": sess.principal.IsAuditor(),
 	})
 }
 

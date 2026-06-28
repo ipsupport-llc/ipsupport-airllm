@@ -116,6 +116,8 @@ func (p *PGInserter) DeleteByID(ctx context.Context, id string) error {
 type ListFilter struct {
 	ReviewStatus     string
 	SecondpassStatus string
+	From             *time.Time // inclusive lower bound on ts; nil = no lower bound
+	To               *time.Time // inclusive upper bound on ts; nil = no upper bound
 	Limit            int
 }
 
@@ -134,9 +136,11 @@ func (p *PGInserter) List(ctx context.Context, f ListFilter) ([]IndexRow, error)
 		FROM capture_index
 		WHERE ($1 = '' OR review_status = $1)
 		  AND ($2 = '' OR secondpass_status = $2)
+		  AND ($3::timestamptz IS NULL OR ts >= $3::timestamptz)
+		  AND ($4::timestamptz IS NULL OR ts <= $4::timestamptz)
 		ORDER BY ts DESC
-		LIMIT $3`,
-		f.ReviewStatus, f.SecondpassStatus, limit)
+		LIMIT $5`,
+		f.ReviewStatus, f.SecondpassStatus, f.From, f.To, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -162,22 +166,18 @@ func (p *PGInserter) Get(ctx context.Context, id string) (IndexRow, error) {
 		return IndexRow{}, err
 	}
 	if len(out) == 0 {
-		return IndexRow{}, pgxNotFound()
+		return IndexRow{}, ErrNotFound
 	}
 	return out[0], nil
 }
 
-// pgxNotFound returns a sentinel error for missing rows.
-func pgxNotFound() error {
-	return errNotFound
-}
-
+// notFoundError is the type for ErrNotFound.
 type notFoundError struct{}
 
 func (notFoundError) Error() string { return "capture: not found" }
 
 // ErrNotFound is returned by Get when no row matches.
-var errNotFound = notFoundError{}
+var ErrNotFound = notFoundError{}
 
 func scanRows(rows interface {
 	Next() bool

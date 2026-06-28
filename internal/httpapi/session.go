@@ -27,7 +27,11 @@ func (s *Server) requireSession(next http.HandlerFunc) http.HandlerFunc {
 			writeControlError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		uid, err := s.ensureUser(r.Context(), p)
+		ensureUser := s.ensureUser
+		if s.ensureUserFn != nil {
+			ensureUser = s.ensureUserFn
+		}
+		uid, err := ensureUser(r.Context(), p)
 		if err != nil {
 			writeControlError(w, http.StatusInternalServerError, "failed to load user")
 			return

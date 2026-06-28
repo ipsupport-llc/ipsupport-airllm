@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 
 	"github.com/rromenskyi/ipsupport-airllm/internal/auth"
+	"github.com/rromenskyi/ipsupport-airllm/internal/blob"
 	"github.com/rromenskyi/ipsupport-airllm/internal/capture"
 	"github.com/rromenskyi/ipsupport-airllm/internal/config"
 	"github.com/rromenskyi/ipsupport-airllm/internal/ledger"
@@ -29,6 +30,7 @@ type Deps struct {
 	Auth      auth.Authenticator
 	Login     auth.LoginProvider // nil when not using password login (e.g. OIDC)
 	Capture   *capture.Pipeline  // nil disables capture
+	Blob      blob.Store         // for audit transcript reads; nil disables body fetch
 }
 
 // Server is the top-level HTTP handler.
@@ -48,6 +50,12 @@ type Server struct {
 	login      auth.LoginProvider
 	httpc      *http.Client      // shared client for the DLP model sidecar
 	capturePl  *capture.Pipeline // nil when capture is not configured
+	blobStore  blob.Store        // nil when blob store is not configured
+	captureIdx captureReader     // nil until first audit route access (set in NewServer)
+
+	// Test hooks: non-nil values replace the real implementations in tests.
+	auditHook    func(ctx context.Context, actor, action, target string, detail any)
+	ensureUserFn func(ctx context.Context, p auth.Principal) (string, error)
 }
 
 // NewServer builds the routed handler.
@@ -71,6 +79,10 @@ func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 	if deps.Capture != nil {
 		s.capturePl = deps.Capture
 	}
+	if deps.Blob != nil {
+		s.blobStore = deps.Blob
+	}
+	s.captureIdx = &captureIndex{pg: st.PG}
 	s.routes()
 	return s
 }
@@ -123,6 +135,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/usage", s.requireSession(s.handleUsage))
 
 	s.adminRoutes()
+	s.auditRoutes()
 
 	// Static SPA (catch-all GET; API prefixes excluded inside).
 	s.registerSPA()
