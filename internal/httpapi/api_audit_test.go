@@ -41,10 +41,19 @@ type fakeReviewCall struct {
 	goldLabels   []dlp.Finding
 }
 
-func (f *fakeCaptureStore) List(_ context.Context, _ capture.ListFilter) ([]capture.IndexRow, error) {
+func (f *fakeCaptureStore) List(_ context.Context, filter capture.ListFilter) ([]capture.IndexRow, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.rows, nil
+	if filter.ReviewStatus == "" {
+		return f.rows, nil
+	}
+	var out []capture.IndexRow
+	for _, r := range f.rows {
+		if r.ReviewStatus == filter.ReviewStatus {
+			out = append(out, r)
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeCaptureStore) Get(_ context.Context, id string) (capture.IndexRow, error) {

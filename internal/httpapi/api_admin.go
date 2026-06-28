@@ -27,6 +27,9 @@ func (s *Server) adminRoutes() {
 	s.mux.HandleFunc("GET /api/admin/pricing", a(s.handleAdminPricing))
 	s.mux.HandleFunc("PUT /api/admin/pricing/{model}", a(s.handleAdminPutPricing))
 
+	// Dataset export for DLP model fine-tuning.
+	s.mux.HandleFunc("POST /api/admin/dataset/export", a(s.handleAdminDatasetExport))
+
 	// DLP: config, incidents, alert webhooks.
 	s.mux.HandleFunc("GET /api/admin/dlp", a(s.handleAdminGetDLP))
 	s.mux.HandleFunc("PUT /api/admin/dlp", a(s.handleAdminPutDLP))
