@@ -70,7 +70,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	s.enqueueCapture(ak, "openai", req.Model, target.Provider, target.UpstreamModel,
 		http.StatusOK, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, entry.CostUSD,
-		dlpRes, captureBody(req.Messages, responseText))
+		dlpRes, req.Messages, responseText)
 
 	body, err := openai.MarshalChatResponse(resp)
 	if err != nil {
@@ -111,7 +111,7 @@ func (s *Server) streamChatCompletions(w http.ResponseWriter, r *http.Request, r
 		s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, usage.PromptTokens, usage.CompletionTokens)
 		s.enqueueCapture(ak, "openai", req.Model, target.Provider, target.UpstreamModel,
 			http.StatusOK, usage.PromptTokens, usage.CompletionTokens, entry.CostUSD,
-			dlpRes, captureBody(req.Messages, sink.assembled()))
+			dlpRes, req.Messages, sink.assembled())
 		return
 	}
 
@@ -121,7 +121,7 @@ func (s *Server) streamChatCompletions(w http.ResponseWriter, r *http.Request, r
 	s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, usage.PromptTokens, usage.CompletionTokens)
 	s.enqueueCapture(ak, "openai", req.Model, target.Provider, target.UpstreamModel,
 		http.StatusOK, usage.PromptTokens, usage.CompletionTokens, entry.CostUSD,
-		dlpRes, captureBody(req.Messages, sink.assembled()))
+		dlpRes, req.Messages, sink.assembled())
 }
 
 // handleModels lists the model aliases the calling key is permitted to use.

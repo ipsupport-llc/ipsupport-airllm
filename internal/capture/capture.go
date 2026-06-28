@@ -43,6 +43,7 @@ type Record struct {
 	Detected         []dlp.Finding
 	Body             []byte // plain (possibly redacted) content
 	HadIncident      bool
+	Redacted         bool // snapshot of capture config Redact at enqueue time
 }
 
 // Inserter writes and queries the capture_index.
@@ -60,6 +61,7 @@ type Pipeline struct {
 	cfg     func() Config
 	ch      chan Record
 	dropped atomic.Int64
+	stopped atomic.Bool
 	wg      sync.WaitGroup
 	sweepWG sync.WaitGroup
 	stopCh  chan struct{}
@@ -109,8 +111,10 @@ func (p *Pipeline) Start(workers int) {
 	}()
 }
 
-// Stop drains the work channel and waits for all workers to finish.
+// Stop signals the sweeper, drains the work channel, and waits for all
+// goroutines to finish. After Stop returns, Enqueue is a safe no-op.
 func (p *Pipeline) Stop() {
+	p.stopped.Store(true) // must happen before close(p.ch) to guard Enqueue
 	close(p.stopCh)
 	close(p.ch)
 	p.wg.Wait()
@@ -118,8 +122,12 @@ func (p *Pipeline) Stop() {
 }
 
 // Enqueue submits a record for capture. It never blocks; if the buffer is
-// full the record is dropped and the dropped counter is incremented.
+// full the record is dropped and the dropped counter is incremented. Enqueue
+// is a safe no-op after Stop.
 func (p *Pipeline) Enqueue(r Record) {
+	if p.stopped.Load() {
+		return
+	}
 	cfg := p.cfg()
 	if !cfg.Enabled {
 		return
@@ -166,7 +174,7 @@ func (p *Pipeline) process(r Record) {
 		CompletionTokens: int64(r.CompletionTokens),
 		CostUSD:          r.CostUSD,
 		BlobKey:          blobKey,
-		Redacted:         p.cfg().Redact,
+		Redacted:         r.Redacted,
 		ModelVersion:     r.ModelVersion,
 		Detected:         r.Detected,
 		ReviewStatus:     "unreviewed",

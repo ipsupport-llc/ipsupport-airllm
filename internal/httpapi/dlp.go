@@ -59,7 +59,8 @@ func (s *Server) dlpCfg() dlpConfig {
 
 // dlpResult carries the outcome of a DLP scan for use by the capture pipeline.
 type dlpResult struct {
-	Findings    []dlp.Finding
+	Findings    []dlp.Finding   // flat list (per-message offsets; for HadIncident / index)
+	MsgFindings [][]dlp.Finding // per-message findings, indexed parallel to req.Messages
 	HadIncident bool
 }
 
@@ -78,6 +79,7 @@ func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, r
 	total := 0
 	sample := ""
 	var allFindings []dlp.Finding
+	perMsg := make([][]dlp.Finding, len(req.Messages))
 	for i := range req.Messages {
 		content := req.Messages[i].Content
 		if content == "" {
@@ -97,6 +99,7 @@ func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, r
 		if len(findings) == 0 {
 			continue
 		}
+		perMsg[i] = findings
 		allFindings = append(allFindings, findings...)
 		total += len(findings)
 		for _, l := range dlp.Labels(findings) {
@@ -119,7 +122,7 @@ func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, r
 	if cfg.Action == "block" {
 		return true, "request blocked: sensitive content detected (" + strings.Join(labels, ", ") + ")", dlpResult{}
 	}
-	return false, "", dlpResult{Findings: allFindings, HadIncident: true}
+	return false, "", dlpResult{Findings: allFindings, MsgFindings: perMsg, HadIncident: true}
 }
 
 func (s *Server) recordDLP(ctx context.Context, ak authedKey, ingress, alias, action string, labels []string, count int, sample string) {

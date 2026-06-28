@@ -68,7 +68,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	s.enqueueCapture(ak, "anthropic", req.Model, target.Provider, target.UpstreamModel,
 		http.StatusOK, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, entry.CostUSD,
-		dlpRes, captureBody(req.Messages, responseText))
+		dlpRes, req.Messages, responseText)
 
 	body, err := anthropic.MarshalMessagesResponse(resp)
 	if err != nil {
@@ -109,7 +109,7 @@ func (s *Server) streamMessages(w http.ResponseWriter, r *http.Request, req llm.
 		s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, usage.PromptTokens, usage.CompletionTokens)
 		s.enqueueCapture(ak, "anthropic", req.Model, target.Provider, target.UpstreamModel,
 			http.StatusOK, usage.PromptTokens, usage.CompletionTokens, entry.CostUSD,
-			dlpRes, captureBody(req.Messages, sink.assembled()))
+			dlpRes, req.Messages, sink.assembled())
 		return
 	}
 
@@ -117,7 +117,7 @@ func (s *Server) streamMessages(w http.ResponseWriter, r *http.Request, req llm.
 	s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, usage.PromptTokens, usage.CompletionTokens)
 	s.enqueueCapture(ak, "anthropic", req.Model, target.Provider, target.UpstreamModel,
 		http.StatusOK, usage.PromptTokens, usage.CompletionTokens, entry.CostUSD,
-		dlpRes, captureBody(req.Messages, sink.assembled()))
+		dlpRes, req.Messages, sink.assembled())
 }
 
 // anthropicSink streams Anthropic Messages SSE events via a StreamWriter and

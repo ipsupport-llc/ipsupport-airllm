@@ -194,6 +194,23 @@ func TestPipelineDropCounter(t *testing.T) {
 	}
 }
 
+// TestEnqueueAfterStop verifies that Enqueue after Stop is a safe no-op and
+// does not panic with "send on closed channel".
+func TestEnqueueAfterStop(t *testing.T) {
+	bs := newMemBlob()
+	idx := &fakeInserter{}
+	p := NewPipeline(bs, idx, testSealer(t), func() Config {
+		return Config{Enabled: true, SampleRate: 1}
+	})
+	p.Start(1)
+	p.Stop()
+	// Must not panic; the stopped guard must catch it before reaching the channel.
+	p.Enqueue(Record{Body: []byte("after-stop")})
+	if p.Dropped() != 0 {
+		t.Error("post-stop Enqueue must not count as a drop (early return)")
+	}
+}
+
 // TestSweepDeletesExpiredRows verifies sweep removes expired rows + their blobs.
 func TestSweepDeletesExpiredRows(t *testing.T) {
 	bs := newMemBlob()

@@ -17,10 +17,10 @@ CREATE TABLE capture_index (
     blob_key            text NOT NULL DEFAULT '',
     redacted            bool NOT NULL DEFAULT true,
     model_version       text NOT NULL DEFAULT '',
-    detected            jsonb NOT NULL DEFAULT '{}',
+    detected            jsonb NOT NULL DEFAULT '[]',
     review_status       text NOT NULL DEFAULT 'unreviewed',
     secondpass_status   text NOT NULL DEFAULT 'pending',
-    secondpass_labels   jsonb NOT NULL DEFAULT '{}'
+    secondpass_labels   jsonb NOT NULL DEFAULT '[]'
 );
 
 CREATE INDEX idx_capture_index_ts ON capture_index(ts DESC);

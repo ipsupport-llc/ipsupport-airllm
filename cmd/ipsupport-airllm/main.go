@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -96,15 +97,17 @@ func run() error {
 	}
 	pgIdx := &capture.PGInserter{PG: st.PG}
 
-	// The pipeline's cfg function is a closure over apiSrv, which is set
-	// after NewServer returns. Workers only call cfg() on Enqueue, which
-	// happens via HTTP handlers — after apiSrv is assigned. Safe.
-	var apiSrv *httpapi.Server
+	// The pipeline's cfg function is a closure over apiSrvPtr, which is
+	// stored after NewServer returns. The sweeper goroutine calls cfg() on a
+	// ticker — use an atomic pointer so there is no data race between the
+	// goroutine reading it and the main goroutine writing it.
+	var apiSrvPtr atomic.Pointer[httpapi.Server]
 	capturePipeline := capture.NewPipeline(blobStore, pgIdx, sealer, func() capture.Config {
-		if apiSrv == nil {
+		srv := apiSrvPtr.Load()
+		if srv == nil {
 			return capture.Config{Enabled: false}
 		}
-		return apiSrv.CaptureCfg()
+		return srv.CaptureCfg()
 	})
 	capturePipeline.Start(4)
 	defer capturePipeline.Stop()
@@ -128,7 +131,8 @@ func run() error {
 		}
 	}
 
-	apiSrv = httpapi.NewServer(cfg, st, deps)
+	apiSrv := httpapi.NewServer(cfg, st, deps)
+	apiSrvPtr.Store(apiSrv)
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           apiSrv,

@@ -61,7 +61,7 @@ func (p *PGInserter) Insert(ctx context.Context, row IndexRow) error {
 	}
 	labels, err := json.Marshal(row.SecondpassLabels)
 	if err != nil {
-		labels = []byte("{}")
+		labels = []byte("[]")
 	}
 	_, err = p.PG.Exec(ctx, `
 		INSERT INTO capture_index (
