@@ -85,6 +85,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/usage", s.requireSession(s.handleUsage))
 
 	s.adminRoutes()
+
+	// Static SPA (catch-all GET; API prefixes excluded inside).
+	s.registerSPA()
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

@@ -71,11 +71,11 @@ English-only repo. No secrets in git.
 - [x] Verify e2e: 401 unauth; admin login→cookie→create key→use on /v1 (200); usage; operator 403 vs admin 200; PUT role + audit; auth unit tests green
 - NOTE: provider credential (encrypted) admin CRUD still deferred (creds storage pending); aliases/providers/pricing CRUD present
 
-## Phase 6 — Frontend SPA
-- [ ] web/ SvelteKit (adapter-static); reuse dash design tokens + ConfirmDialog/Toasts/LiveDot/QuickSearch
-- [ ] pages: Login(mock), My Dashboard, Keys, Usage, Admin(policies/aliases/providers/users/usage/audit)
-- [ ] Go serves built SPA (go:embed) and /api
-- [ ] Verify: `npm run build`; app serves SPA; click-through against the mock works
+## Phase 6 — Frontend SPA  ✅ DONE (2026-06-27)
+- [x] web/static SPA — DEVIATION: vanilla HTML/CSS/JS (not SvelteKit) for the mock: robust go:embed (always builds, no node stage / no npm-before-go-build), clean repo (no node_modules/artifacts), faster in the loop. Same architecture intent (SPA, talks only to /api, served by Go). Dash design tokens (stone/indigo dark). SvelteKit swappable later.
+- [x] pages: Login (mock pw), Dashboard (usage cards + key count), API Keys (create show-once/list/revoke), Usage, Admin (users/keys/usage/roles/aliases/providers/pricing/audit) with edit modals + RBAC-aware nav
+- [x] web/embed.go (go:embed) + httpapi/spa.go: catch-all GET "/" serves SPA with index fallback; /api,/v1,/auth excluded → JSON 404
+- [x] Verify: served / (html), /app.css, /app.js (correct content-types); /api/me→401 JSON, /v1/*→404 JSON, deep routes→SPA fallback; API endpoints wired to Phase-5 control-plane. Browser click-through = operator's manual test (login pw in logs).
 
 ## Phase 7 — Hardening + docs
 - [ ] audit log writes on control-plane mutations
