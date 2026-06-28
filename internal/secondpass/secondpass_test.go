@@ -105,7 +105,7 @@ func TestLLMEngine_Scan_Valid(t *testing.T) {
 		Chat: func(_ context.Context, _ string) (string, error) {
 			return `[{"label":"api_key","start":5,"end":15,"score":0.95}]`, nil
 		},
-		MinScore: 0.5,
+		MinScore: func() float64 { return 0.5 },
 	}
 	got, err := e.Scan(context.Background(), "test text")
 	if err != nil {
@@ -121,7 +121,7 @@ func TestLLMEngine_Scan_MalformedOutputNoError(t *testing.T) {
 		Chat: func(_ context.Context, _ string) (string, error) {
 			return "Sorry, I found a key at position 5.", nil
 		},
-		MinScore: 0.5,
+		MinScore: func() float64 { return 0.5 },
 	}
 	got, err := e.Scan(context.Background(), "text")
 	if err != nil {
@@ -181,12 +181,13 @@ func TestDiff_BothFPandFN_PreferFN(t *testing.T) {
 
 func TestDiff_OverlapConfirms(t *testing.T) {
 	// Engine span overlaps but doesn't match exactly: still confirmed.
+	// detected=[0,20), engine=[5,15): mutual overlap → confirmed (not clean,
+	// not FP, not FN). "confirmed" is the only reachable status here.
 	d := []dlp.Finding{{Label: "key", Start: 0, End: 20}}
 	e := []dlp.Finding{{Label: "key", Start: 5, End: 15}} // subset
 	status, _, _ := diff(d, e)
-	if status != "clean" && status != "confirmed" {
-		// engine finding is covered by detected, detected is confirmed by engine
-		t.Fatalf("overlap: got status=%s", status)
+	if status != "confirmed" {
+		t.Fatalf("overlap: expected confirmed, got %s", status)
 	}
 }
 
@@ -306,7 +307,7 @@ func TestJob_MalformedEngineOutput_NoCrash(t *testing.T) {
 	// LLMEngine returning malformed JSON: no crash, no findings.
 	engine := &LLMEngine{
 		Chat:     func(_ context.Context, _ string) (string, error) { return "not-json!", nil },
-		MinScore: 0.5,
+		MinScore: func() float64 { return 0.5 },
 	}
 	job := NewJob(store, fakeReadBody([]byte("hello")), engine, nil, 10)
 	job.RunOnce(context.Background()) // must not panic
@@ -336,6 +337,21 @@ func TestJob_ReadBodyError_LeavePending(t *testing.T) {
 	// Body read error -> row left pending (no update).
 	if _, ok := store.updates["id6"]; ok {
 		t.Fatal("row should remain pending when body read fails")
+	}
+}
+
+func TestJob_EngineScanError_LeavePending(t *testing.T) {
+	store := newFakeStore(PendingRow{
+		ID:      "id-scan-err",
+		BlobKey: "k-scan-err",
+	})
+	engine := &fakeEngine{err: errStr("scan failed")}
+	job := NewJob(store, fakeReadBody([]byte("hello")), engine, nil, 10)
+	job.RunOnce(context.Background())
+
+	// Engine error -> row left pending (no update).
+	if _, ok := store.updates["id-scan-err"]; ok {
+		t.Fatal("row should remain pending when engine scan fails")
 	}
 }
 

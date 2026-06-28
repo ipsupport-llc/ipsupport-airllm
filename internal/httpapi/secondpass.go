@@ -65,6 +65,9 @@ func (s *Server) SecondpassEnabled() bool { return s.secondpassCfg().Enabled }
 // or the provider call fails.
 func (s *Server) SecondpassChat(ctx context.Context, prompt string) (string, error) {
 	cfg := s.secondpassCfg()
+	if !cfg.Enabled {
+		return "", errors.New("secondpass: disabled")
+	}
 	if cfg.Model == "" {
 		return "", errors.New("secondpass: no model configured")
 	}

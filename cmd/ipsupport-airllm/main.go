@@ -177,7 +177,7 @@ func run() error {
 	}
 	spEngine := &secondpass.LLMEngine{
 		Chat:     spChatFn,
-		MinScore: spMinScore(),
+		MinScore: spMinScore,
 	}
 	spJob := secondpass.NewJob(spStoreAdapter, spBodyReader, spEngine, spWebhookSender, 50)
 

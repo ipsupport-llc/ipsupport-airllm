@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/rromenskyi/ipsupport-airllm/internal/dlp"
@@ -31,8 +32,10 @@ type llmFinding struct {
 // provider dependencies.
 type LLMEngine struct {
 	// Chat calls an LLM with the given prompt and returns raw text (expected JSON).
-	Chat     func(ctx context.Context, prompt string) (rawJSON string, err error)
-	MinScore float64
+	Chat func(ctx context.Context, prompt string) (rawJSON string, err error)
+	// MinScore is called on each Scan to read the current threshold, so a
+	// config change via PUT /api/admin/secondpass takes effect without restart.
+	MinScore func() float64
 }
 
 // scanInstruction is prepended to the user text before calling Chat.
@@ -51,7 +54,7 @@ func (e *LLMEngine) Scan(ctx context.Context, text string) ([]dlp.Finding, error
 	if err != nil {
 		return nil, err
 	}
-	return parseFindings(raw, e.MinScore), nil
+	return parseFindings(raw, e.MinScore()), nil
 }
 
 // parseFindings extracts dlp.Finding values from an LLM JSON array, filtering
@@ -101,8 +104,10 @@ type Job struct {
 	sendHook  WebhookSender // nil = no webhooks
 	batchSize int
 
-	stopCh chan struct{}
-	doneCh chan struct{}
+	stopCh    chan struct{}
+	doneCh    chan struct{}
+	startOnce sync.Once
+	stopOnce  sync.Once
 }
 
 // NewJob creates a Job. batchSize <= 0 defaults to 50.
@@ -128,31 +133,37 @@ func NewJob(
 }
 
 // Start launches the background ticker. interval <= 0 defaults to 5 minutes.
+// Calling Start more than once is a no-op (guarded by sync.Once).
 func (j *Job) Start(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = 5 * time.Minute
 	}
-	go func() {
-		defer close(j.doneCh)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-j.stopCh:
-				return
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				j.RunOnce(ctx)
+	j.startOnce.Do(func() {
+		go func() {
+			defer close(j.doneCh)
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-j.stopCh:
+					return
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					j.RunOnce(ctx)
+				}
 			}
-		}
-	}()
+		}()
+	})
 }
 
 // Stop signals the background goroutine and waits for it to exit.
+// Calling Stop more than once is a no-op (guarded by sync.Once).
 func (j *Job) Stop() {
-	close(j.stopCh)
-	<-j.doneCh
+	j.stopOnce.Do(func() {
+		close(j.stopCh)
+		<-j.doneCh
+	})
 }
 
 // RunOnce processes one batch of pending captures. It is also called directly
