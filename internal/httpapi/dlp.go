@@ -57,18 +57,27 @@ func (s *Server) dlpCfg() dlpConfig {
 	return defaultDLPConfig()
 }
 
+// dlpResult carries the outcome of a DLP scan for use by the capture pipeline.
+type dlpResult struct {
+	Findings    []dlp.Finding
+	HadIncident bool
+}
+
 // dlpEnforce scans the request messages. On "redact" it masks secrets in place;
 // on "block" it returns blocked=true with a client message. Detections are
 // recorded and alerted regardless of action (except "off").
-func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, req *llm.ChatRequest) (blocked bool, message string) {
+// It also returns a dlpResult for the capture pipeline (findings are collected
+// across all messages; offsets are per-message and meaningful only in context).
+func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, req *llm.ChatRequest) (blocked bool, message string, result dlpResult) {
 	cfg := s.dlpCfg()
 	if !cfg.Enabled || cfg.Action == "off" {
-		return false, ""
+		return false, "", dlpResult{}
 	}
 
 	labelSet := map[string]bool{}
 	total := 0
 	sample := ""
+	var allFindings []dlp.Finding
 	for i := range req.Messages {
 		content := req.Messages[i].Content
 		if content == "" {
@@ -88,6 +97,7 @@ func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, r
 		if len(findings) == 0 {
 			continue
 		}
+		allFindings = append(allFindings, findings...)
 		total += len(findings)
 		for _, l := range dlp.Labels(findings) {
 			labelSet[l] = true
@@ -100,16 +110,16 @@ func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, r
 		}
 	}
 	if total == 0 {
-		return false, ""
+		return false, "", dlpResult{}
 	}
 
 	labels := sortedKeys(labelSet)
 	s.recordDLP(ctx, ak, ingress, req.Model, actionPast(cfg.Action), labels, total, sample)
 
 	if cfg.Action == "block" {
-		return true, "request blocked: sensitive content detected (" + strings.Join(labels, ", ") + ")"
+		return true, "request blocked: sensitive content detected (" + strings.Join(labels, ", ") + ")", dlpResult{}
 	}
-	return false, ""
+	return false, "", dlpResult{Findings: allFindings, HadIncident: true}
 }
 
 func (s *Server) recordDLP(ctx context.Context, ak authedKey, ingress, alias, action string, labels []string, count int, sample string) {

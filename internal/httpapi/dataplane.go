@@ -38,13 +38,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeProtocolError(w, r, http.StatusTooManyRequests, "rate_limit_error", msg)
 		return
 	}
-	if blocked, msg := s.dlpEnforce(r.Context(), ak, "openai", &req); blocked {
+	blocked, msg, dlpRes := s.dlpEnforce(r.Context(), ak, "openai", &req)
+	if blocked {
 		writeProtocolError(w, r, http.StatusBadRequest, "invalid_request_error", msg)
 		return
 	}
 
 	if req.Stream {
-		s.streamChatCompletions(w, r, req, ak, start, plan)
+		s.streamChatCompletions(w, r, req, ak, start, plan, dlpRes)
 		return
 	}
 
@@ -63,6 +64,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	entry.Status = http.StatusOK
 	s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 
+	var responseText string
+	if len(resp.Choices) > 0 {
+		responseText = resp.Choices[0].Message.Content
+	}
+	s.enqueueCapture(ak, "openai", req.Model, target.Provider, target.UpstreamModel,
+		http.StatusOK, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, entry.CostUSD,
+		dlpRes, captureBody(req.Messages, responseText))
+
 	body, err := openai.MarshalChatResponse(resp)
 	if err != nil {
 		writeProtocolError(w, r, http.StatusInternalServerError, "internal_error", "failed to encode response")
@@ -73,7 +82,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
-func (s *Server) streamChatCompletions(w http.ResponseWriter, r *http.Request, req llm.ChatRequest, ak authedKey, start time.Time, plan *routing.Plan) {
+func (s *Server) streamChatCompletions(w http.ResponseWriter, r *http.Request, req llm.ChatRequest, ak authedKey, start time.Time, plan *routing.Plan, dlpRes dlpResult) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeProtocolError(w, r, http.StatusInternalServerError, "internal_error", "streaming unsupported")
@@ -100,6 +109,9 @@ func (s *Server) streamChatCompletions(w http.ResponseWriter, r *http.Request, r
 		}
 		entry.Status = http.StatusOK // headers already sent; cannot signal failure
 		s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, usage.PromptTokens, usage.CompletionTokens)
+		s.enqueueCapture(ak, "openai", req.Model, target.Provider, target.UpstreamModel,
+			http.StatusOK, usage.PromptTokens, usage.CompletionTokens, entry.CostUSD,
+			dlpRes, captureBody(req.Messages, sink.assembled()))
 		return
 	}
 
@@ -107,6 +119,9 @@ func (s *Server) streamChatCompletions(w http.ResponseWriter, r *http.Request, r
 	flusher.Flush()
 	entry.Status = http.StatusOK
 	s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, usage.PromptTokens, usage.CompletionTokens)
+	s.enqueueCapture(ak, "openai", req.Model, target.Provider, target.UpstreamModel,
+		http.StatusOK, usage.PromptTokens, usage.CompletionTokens, entry.CostUSD,
+		dlpRes, captureBody(req.Messages, sink.assembled()))
 }
 
 // handleModels lists the model aliases the calling key is permitted to use.

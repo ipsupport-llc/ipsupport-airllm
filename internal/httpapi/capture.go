@@ -3,6 +3,8 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+
+	"github.com/rromenskyi/ipsupport-airllm/internal/capture"
 )
 
 // captureConfig is the global capture policy.
@@ -52,4 +54,16 @@ func (s *Server) captureCfg() captureConfig {
 		return *c
 	}
 	return defaultCaptureConfig()
+}
+
+// CaptureCfg returns the current capture config as a capture.Config, for use
+// by the capture pipeline's cfg function in main.
+func (s *Server) CaptureCfg() capture.Config {
+	c := s.captureCfg()
+	return capture.Config{
+		Enabled:       c.Enabled,
+		SampleRate:    c.SampleRate,
+		Redact:        c.Redact,
+		RetentionDays: c.RetentionDays,
+	}
 }

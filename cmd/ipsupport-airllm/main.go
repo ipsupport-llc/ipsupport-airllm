@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	"github.com/rromenskyi/ipsupport-airllm/internal/auth"
+	"github.com/rromenskyi/ipsupport-airllm/internal/blob"
+	"github.com/rromenskyi/ipsupport-airllm/internal/capture"
 	"github.com/rromenskyi/ipsupport-airllm/internal/config"
 	"github.com/rromenskyi/ipsupport-airllm/internal/httpapi"
 	"github.com/rromenskyi/ipsupport-airllm/internal/limits"
@@ -80,11 +83,38 @@ func run() error {
 		return err
 	}
 
+	// Build the capture pipeline. CAPTURE_BLOB_DIR env controls where blobs
+	// land (default: ./capture-blobs for dev). Capture is off by default; the
+	// pipeline is always wired so the config can be enabled at runtime.
+	captureBlobDir := os.Getenv("CAPTURE_BLOB_DIR")
+	if captureBlobDir == "" {
+		captureBlobDir = "capture-blobs"
+	}
+	blobStore, err := blob.NewFS(captureBlobDir)
+	if err != nil {
+		return fmt.Errorf("capture blob store: %w", err)
+	}
+	pgIdx := &capture.PGInserter{PG: st.PG}
+
+	// The pipeline's cfg function is a closure over apiSrv, which is set
+	// after NewServer returns. Workers only call cfg() on Enqueue, which
+	// happens via HTTP handlers — after apiSrv is assigned. Safe.
+	var apiSrv *httpapi.Server
+	capturePipeline := capture.NewPipeline(blobStore, pgIdx, sealer, func() capture.Config {
+		if apiSrv == nil {
+			return capture.Config{Enabled: false}
+		}
+		return apiSrv.CaptureCfg()
+	})
+	capturePipeline.Start(4)
+	defer capturePipeline.Stop()
+
 	deps := httpapi.Deps{
 		Providers: reg,
 		Limiter:   limits.New(st.RDB),
 		Pricing:   priceTable,
 		Sealer:    sealer,
+		Capture:   capturePipeline,
 	}
 
 	// Control-plane auth. The local mock uses password login with random
@@ -98,9 +128,10 @@ func run() error {
 		}
 	}
 
+	apiSrv = httpapi.NewServer(cfg, st, deps)
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.NewServer(cfg, st, deps),
+		Handler:           apiSrv,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
