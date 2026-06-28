@@ -4,10 +4,34 @@ import (
 	"encoding/json"
 	"net/http"
 	"time"
+
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/dlp"
 )
 
 func (s *Server) handleAdminGetDLP(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.dlpCfg())
+}
+
+// handleAdminDLPPatterns returns the catalog of toggleable detection patterns
+// (built-ins + the model-based PII toggles) so the console can render the
+// Sensitive Info Detection panel.
+func (s *Server) handleAdminDLPPatterns(w http.ResponseWriter, _ *http.Request) {
+	type info struct {
+		Label     string `json:"label"`
+		Category  string `json:"category"`
+		DefaultOn bool   `json:"default_on"`
+		Model     bool   `json:"model"` // requires the BERT sidecar; adds latency
+	}
+	out := []info{}
+	for _, p := range dlp.BuiltinPatterns() {
+		out = append(out, info{p.Label, p.Category, p.DefaultOn, false})
+	}
+	out = append(out,
+		info{"person_name", "pii", false, true},
+		info{"address", "pii", false, true},
+		info{"organization", "pii", false, true},
+	)
+	writeJSON(w, http.StatusOK, map[string]any{"patterns": out})
 }
 
 func (s *Server) handleAdminPutDLP(w http.ResponseWriter, r *http.Request) {
@@ -19,6 +43,14 @@ func (s *Server) handleAdminPutDLP(w http.ResponseWriter, r *http.Request) {
 	}
 	if !validDLPAction(body.Action) {
 		writeControlError(w, http.StatusBadRequest, "action must be off | flag | redact | block")
+		return
+	}
+	if err := validatePatternLabels(body.Patterns); err != nil {
+		writeControlError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if _, err := compileCustomPatterns(body.CustomPatterns); err != nil {
+		writeControlError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	raw, _ := json.Marshal(body)

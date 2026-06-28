@@ -72,7 +72,8 @@ than failing.
 | `GET`/`PUT`/`DELETE` | `/api/admin/aliases` · `/api/admin/aliases/{alias}` | Model alias catalog (targets, strategy, fallback tiers) |
 | `GET`/`PUT` | `/api/admin/providers` · `/api/admin/providers/{name}` | Providers (kind, base URL, sealed credential, max concurrency, enabled) |
 | `GET`/`PUT` | `/api/admin/pricing` · `/api/admin/pricing/{model}` | Per-model input/output pricing (USD per 1M tokens) |
-| `GET`/`PUT` | `/api/admin/dlp` | DLP policy |
+| `GET`/`PUT` | `/api/admin/dlp` | DLP policy (incl. Sensitive Info Detection patterns + custom patterns) |
+| `GET` | `/api/admin/dlp/patterns` | Catalog of toggleable detection patterns (built-ins + model toggles) |
 | `GET` | `/api/admin/dlp/incidents` | Recent DLP incidents (secret-free samples) |
 | `GET`/`PUT` | `/api/admin/capture` | Capture policy |
 | `GET`/`PUT` | `/api/admin/secondpass` | Second-pass (flywheel) policy |

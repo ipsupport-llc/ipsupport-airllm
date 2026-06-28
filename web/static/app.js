@@ -841,17 +841,37 @@ async function editAlias(c, a) {
 }
 
 async function adminDLP(c) {
-  const [cfgR, incR, whR, capR] = await Promise.all([
+  const [cfgR, incR, whR, capR, patR] = await Promise.all([
     api("GET", "/api/admin/dlp"),
     api("GET", "/api/admin/dlp/incidents"),
     api("GET", "/api/admin/webhooks"),
     api("GET", "/api/admin/capture"),
+    api("GET", "/api/admin/dlp/patterns"),
   ]);
   const d = cfgR.data || { enabled: false, action: "off" };
   const incidents = (incR.data && incR.data.incidents) || [];
   const hooks = (whR.data && whR.data.webhooks) || [];
   const cap = capR.data || { enabled: false, sample_rate: 0, redact: true, retention_days: 30, raw_training: false, raw_ttl_hours: 24 };
   const actBadge = (a) => a === "blocked" ? "revoked" : (a === "redacted" ? "admin" : "neutral");
+
+  // Sensitive Info Detection (guardrails): build grouped pattern toggles.
+  const catalog = (patR.data && patR.data.patterns) || [];
+  const curPat = d.patterns || {};
+  const patOn = (p) => (p.label in curPat) ? curPat[p.label] : p.default_on;
+  const togRow = (p) => `<label class="field" style="display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem">
+      <input type="checkbox" class="pat-tog" data-label="${esc(p.label)}" ${patOn(p) ? "checked" : ""} style="width:auto" />
+      <span class="mono" style="font-size:.85rem">${esc(p.label)}${p.model ? ` <span style="color:var(--muted)">· adds latency</span>` : ""}</span></label>`;
+  const group = (title, items) => items.length ? `<div class="lab" style="color:var(--muted);font-size:.78rem;text-transform:uppercase;margin:.7rem 0 .35rem">${title}</div>${items.map(togRow).join("")}` : "";
+  const patGroups =
+    group("Secrets", catalog.filter((p) => p.category === "secret")) +
+    group("PII", catalog.filter((p) => p.category === "pii" && !p.model)) +
+    group("Model (BERT sidecar)", catalog.filter((p) => p.model));
+  const customRow = (cp) => `<div class="custom-row" style="display:flex;gap:.5rem;margin-bottom:.4rem;align-items:center">
+      <input class="cp-label" placeholder="label" value="${esc(cp.label || "")}" style="max-width:150px" />
+      <input class="cp-regex mono" placeholder="regex" value="${esc(cp.regex || "")}" style="flex:1" />
+      <label style="display:flex;align-items:center;gap:.3rem;font-size:.8rem;color:var(--muted)"><input type="checkbox" class="cp-en" ${cp.enabled ? "checked" : ""} style="width:auto" />on</label>
+      <button class="btn danger sm cp-del" type="button">×</button></div>`;
+  const customRows = ((d.custom_patterns) || []).map(customRow).join("");
 
   c.innerHTML = `
     <div class="panel"><div class="panel-head"><h2>DLP policy</h2></div>
@@ -869,6 +889,17 @@ async function adminDLP(c) {
         <label class="field"><span class="lab">Min score (0–1)</span>
           <input id="dlp-mscore" type="number" step="0.05" min="0" max="1" value="${d.model_min_score ?? 0.5}" /></label>
         <button class="btn" id="dlp-save">Save policy</button>
+      </div>
+    </div>
+    <div class="panel"><div class="panel-head"><h2>Sensitive Info Detection</h2>
+      <button class="btn ghost sm" id="pat-all" type="button">Enable all</button></div>
+      <div style="padding:1rem 1.1rem">
+        <div class="lab" style="color:var(--muted);font-size:.82rem;margin-bottom:.6rem">Choose which patterns are detected. Secrets are on by default; PII is opt-in. Model patterns need the BERT sidecar enabled above.</div>
+        ${patGroups}
+        <div class="lab" style="color:var(--muted);font-size:.78rem;text-transform:uppercase;margin:.9rem 0 .35rem">Custom patterns (regex)</div>
+        <div id="custom-rows">${customRows}</div>
+        <button class="btn ghost sm" id="add-custom" type="button" style="margin-top:.3rem">Add pattern</button>
+        <div style="margin-top:1rem"><button class="btn" id="pat-save">Save detection</button></div>
       </div>
     </div>
     <div class="panel"><div class="panel-head"><h2>Capture &amp; flywheel</h2></div>
@@ -904,14 +935,54 @@ async function adminDLP(c) {
         <td>${(i.labels || []).map(esc).join(", ")}</td><td>${i.match_count}</td>
         <td class="mono" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(i.sample)}</td></tr>`))}
   `;
-  $("#dlp-save").addEventListener("click", async () => {
-    const x = await api("PUT", "/api/admin/dlp", {
+  // PUT /api/admin/dlp replaces the whole config, so every save gathers ALL
+  // fields on screen (policy + patterns + custom) to avoid clobbering the other
+  // panel's settings.
+  const gatherDLP = () => {
+    const body = {
       enabled: $("#dlp-en").checked, action: $("#dlp-act").value, scan_responses: false,
       model_enabled: $("#dlp-men").checked, model_url: $("#dlp-murl").value.trim(),
       model_min_score: Number($("#dlp-mscore").value) || 0,
-    });
-    if (x.ok) toast("DLP policy saved");
+    };
+    // Only send patterns/custom when the panel actually rendered, so a failed
+    // catalog fetch can't silently wipe the operator's toggles on save.
+    const togs = document.querySelectorAll(".pat-tog");
+    if (togs.length) {
+      const patterns = {};
+      togs.forEach((t) => { patterns[t.getAttribute("data-label")] = t.checked; });
+      body.patterns = patterns;
+      const custom_patterns = [];
+      document.querySelectorAll(".custom-row").forEach((r) => {
+        const label = r.querySelector(".cp-label").value.trim();
+        const regex = r.querySelector(".cp-regex").value;
+        if (label || regex) custom_patterns.push({ label, regex, enabled: r.querySelector(".cp-en").checked });
+      });
+      body.custom_patterns = custom_patterns;
+    }
+    return body;
+  };
+  const saveDLP = async (okMsg) => {
+    const x = await api("PUT", "/api/admin/dlp", gatherDLP());
+    if (x.ok) toast(okMsg);
     else toast((x.data && x.data.error) || "Failed", "err");
+  };
+  $("#dlp-save").addEventListener("click", () => saveDLP("DLP policy saved"));
+  $("#pat-save").addEventListener("click", () => saveDLP("Detection settings saved"));
+  $("#pat-all").addEventListener("click", () => {
+    document.querySelectorAll(".pat-tog").forEach((t) => { t.checked = true; });
+  });
+  const wireDel = (btn) => btn.addEventListener("click", () => btn.closest(".custom-row").remove());
+  document.querySelectorAll(".cp-del").forEach(wireDel);
+  $("#add-custom").addEventListener("click", () => {
+    const wrap = document.createElement("div");
+    wrap.innerHTML = `<div class="custom-row" style="display:flex;gap:.5rem;margin-bottom:.4rem;align-items:center">
+      <input class="cp-label" placeholder="label" style="max-width:150px" />
+      <input class="cp-regex mono" placeholder="regex" style="flex:1" />
+      <label style="display:flex;align-items:center;gap:.3rem;font-size:.8rem;color:var(--muted)"><input type="checkbox" class="cp-en" checked style="width:auto" />on</label>
+      <button class="btn danger sm cp-del" type="button">×</button></div>`;
+    const row = wrap.firstElementChild;
+    $("#custom-rows").appendChild(row);
+    wireDel(row.querySelector(".cp-del"));
   });
   $("#cap-save").addEventListener("click", async () => {
     const x = await api("PUT", "/api/admin/capture", {

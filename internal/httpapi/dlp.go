@@ -3,7 +3,9 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -28,6 +30,145 @@ type dlpConfig struct {
 	ModelEnabled  bool    `json:"model_enabled"`
 	ModelURL      string  `json:"model_url"`
 	ModelMinScore float64 `json:"model_min_score"`
+
+	// Sensitive Info Detection (guardrails). Patterns maps a built-in pattern
+	// label (including the model toggles person_name/address/organization and
+	// high_entropy) to on/off; a label absent from the map uses its default, so
+	// a nil/partial map keeps legacy behavior. CustomPatterns are operator-defined.
+	Patterns       map[string]bool `json:"patterns,omitempty"`
+	CustomPatterns []customPattern `json:"custom_patterns,omitempty"`
+
+	// compiledCustom holds the enabled CustomPatterns compiled once at load. Not
+	// serialized; rebuilt by loadDLP.
+	compiledCustom []dlp.CustomPattern
+}
+
+// customPattern is an operator-defined detection rule stored as a regex string.
+type customPattern struct {
+	Label   string `json:"label"`
+	Regex   string `json:"regex"`
+	Enabled bool   `json:"enabled"`
+}
+
+const (
+	maxCustomPatterns = 50
+	maxCustomRegexLen = 512
+	maxCustomLabelLen = 64
+)
+
+// validateCustom checks one enabled custom pattern and returns its compiled
+// regex. A regex that matches the empty string is rejected: it would emit a
+// zero-width finding at every position and corrupt the redacted prompt.
+func validateCustom(c customPattern) (*regexp.Regexp, error) {
+	if strings.TrimSpace(c.Label) == "" {
+		return nil, fmt.Errorf("custom pattern label is required")
+	}
+	if len(c.Label) > maxCustomLabelLen {
+		return nil, fmt.Errorf("custom pattern label too long (max %d)", maxCustomLabelLen)
+	}
+	if len(c.Regex) == 0 || len(c.Regex) > maxCustomRegexLen {
+		return nil, fmt.Errorf("custom pattern %q regex must be 1..%d chars", c.Label, maxCustomRegexLen)
+	}
+	re, err := regexp.Compile(c.Regex)
+	if err != nil {
+		return nil, fmt.Errorf("custom pattern %q: %w", c.Label, err)
+	}
+	if re.MatchString("") {
+		return nil, fmt.Errorf("custom pattern %q must not match the empty string", c.Label)
+	}
+	return re, nil
+}
+
+// compileCustomPatterns validates and compiles the ENABLED custom patterns. It
+// returns the compiled valid ones plus the first validation error (if any), so
+// PUT can reject an invalid set while loadDLP keeps every valid pattern even if
+// a hand-edited settings row contains a bad one. Go's RE2 engine is linear-time,
+// so operator regexes cannot cause catastrophic backtracking.
+func compileCustomPatterns(cps []customPattern) ([]dlp.CustomPattern, error) {
+	if len(cps) > maxCustomPatterns {
+		return nil, fmt.Errorf("too many custom patterns (max %d)", maxCustomPatterns)
+	}
+	var out []dlp.CustomPattern
+	var firstErr error
+	for _, c := range cps {
+		if !c.Enabled {
+			continue
+		}
+		re, err := validateCustom(c)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		out = append(out, dlp.CustomPattern{Label: c.Label, Re: re})
+	}
+	return out, firstErr
+}
+
+// dlpToggle reads a pattern toggle, falling back to def when unset.
+func dlpToggle(enabled map[string]bool, label string, def bool) bool {
+	if enabled != nil {
+		if v, ok := enabled[label]; ok {
+			return v
+		}
+	}
+	return def
+}
+
+// modelToggleLabel maps a model entity label ("pii:<ENTITY>") to its toggle,
+// normalizing the common NER vocabularies (abbreviated and full, any case) so
+// the toggle works whether the sidecar emits PER or PERSON, LOC or LOCATION/GPE,
+// ORG or ORGANIZATION. An unrecognized entity returns "" (kept, untoggled).
+func modelToggleLabel(label string) string {
+	switch strings.ToUpper(strings.TrimPrefix(label, "pii:")) {
+	case "PER", "PERSON", "PERS":
+		return "person_name"
+	case "LOC", "LOCATION", "GPE", "ADDRESS":
+		return "address"
+	case "ORG", "ORGANIZATION", "ORGANISATION":
+		return "organization"
+	}
+	return ""
+}
+
+// filterModelFindings drops model PII findings whose toggle is off. Model PII
+// is opt-in (default off). When the operator has not configured toggles
+// (enabled == nil) all findings are kept, preserving pre-guardrails behavior.
+func filterModelFindings(fs []dlp.Finding, enabled map[string]bool) []dlp.Finding {
+	if enabled == nil {
+		return fs
+	}
+	out := fs[:0]
+	for _, f := range fs {
+		toggle := modelToggleLabel(f.Label)
+		if toggle == "" || dlpToggle(enabled, toggle, false) {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// knownPatternLabels is the set of valid toggle keys: every built-in pattern
+// plus the model toggles.
+func knownPatternLabels() map[string]bool {
+	known := map[string]bool{"person_name": true, "address": true, "organization": true}
+	for _, info := range dlp.BuiltinPatterns() {
+		known[info.Label] = true
+	}
+	return known
+}
+
+// validatePatternLabels rejects unknown pattern keys so a typo can't silently
+// disable nothing (or be mistaken for a real toggle).
+func validatePatternLabels(p map[string]bool) error {
+	known := knownPatternLabels()
+	for k := range p {
+		if !known[k] {
+			return fmt.Errorf("unknown pattern %q", k)
+		}
+	}
+	return nil
 }
 
 func defaultDLPConfig() dlpConfig {
@@ -51,6 +192,9 @@ func (s *Server) loadDLP(ctx context.Context) {
 	if !validDLPAction(cfg.Action) {
 		cfg.Action = "off"
 	}
+	// Stored config is already validated; ignore the error and use whatever
+	// compiled (defensive against a hand-edited settings row).
+	cfg.compiledCustom, _ = compileCustomPatterns(cfg.CustomPatterns)
 	s.dlpPtr.Store(&cfg)
 }
 
@@ -114,14 +258,18 @@ func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, r
 		if content == "" {
 			continue
 		}
-		findings := dlp.Scan(content)
+		findings := dlp.ScanWith(content, dlp.PatternSet{
+			Enabled: cfg.Patterns,
+			Custom:  cfg.compiledCustom,
+			Entropy: dlpToggle(cfg.Patterns, "high_entropy", true),
+		})
 		if cfg.ModelEnabled && cfg.ModelURL != "" {
 			mctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 			mf, err := dlp.ModelScan(mctx, s.httpc, cfg.ModelURL, cfg.ModelMinScore, content)
 			cancel()
 			if err != nil {
 				slog.Error("dlp model scan failed; deterministic layer only", "err", err)
-			} else if len(mf) > 0 {
+			} else if mf = filterModelFindings(mf, cfg.Patterns); len(mf) > 0 {
 				findings = dlp.Merge(append(findings, mf...))
 			}
 		}

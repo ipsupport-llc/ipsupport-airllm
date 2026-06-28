@@ -51,6 +51,8 @@ request/job without a restart.
 | `model_enabled` | `false` | Enable the BERT-NER sidecar (layer 2) |
 | `model_url` | — | Sidecar URL, e.g. `http://dlp-bert:8000` |
 | `model_min_score` | `0` | Minimum sidecar confidence to accept a span (the console pre-fills `0.5` as a suggested starting value) |
+| `patterns` | `{}` | Sensitive Info Detection toggles: built-in pattern label → on/off. A label absent from the map uses its default (secrets on, PII off), so a partial map is fine. See [DLP, capture & audit](dlp-capture-audit.md#sensitive-info-detection). |
+| `custom_patterns` | `[]` | Operator regexes: `[{ "label", "regex", "enabled" }]`. Validated on save (must compile, ≤ 512 chars, ≤ 50 entries). |
 
 ### Capture policy (`GET/PUT /api/admin/capture`)
 

@@ -30,9 +30,10 @@ func (s *Server) adminRoutes() {
 	// Dataset export for DLP model fine-tuning.
 	s.mux.HandleFunc("POST /api/admin/dataset/export", a(s.handleAdminDatasetExport))
 
-	// DLP: config, incidents, alert webhooks.
+	// DLP: config, pattern catalog, incidents, alert webhooks.
 	s.mux.HandleFunc("GET /api/admin/dlp", a(s.handleAdminGetDLP))
 	s.mux.HandleFunc("PUT /api/admin/dlp", a(s.handleAdminPutDLP))
+	s.mux.HandleFunc("GET /api/admin/dlp/patterns", a(s.handleAdminDLPPatterns))
 
 	// Capture: data-capture policy (sampling, redaction, retention, raw window).
 	s.mux.HandleFunc("GET /api/admin/capture", a(s.handleAdminGetCapture))
