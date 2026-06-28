@@ -137,7 +137,8 @@ async function viewDashboard(view) {
     <div class="panel">
       <div class="panel-head"><h2>Your keys</h2><a class="btn sm" href="#/keys">Manage</a></div>
       <div class="empty">${active} active key${active === 1 ? "" : "s"} of ${keys.length} total.</div>
-    </div>`;
+    </div>
+    ${connectPanel()}`;
 }
 
 function usageCards(u) {
@@ -149,6 +150,28 @@ function usageCards(u) {
       <div class="sub">tokens · ${fmtUSD(win.cost_usd)}</div>
     </div>`;
   return `<div class="cards">${card("Last 5h", w("5h"))}${card("Last 24h", w("24h"))}${card("Last 7d", w("7d"))}</div>`;
+}
+
+// connectPanel shows the gateway endpoints (derived from this origin) so a
+// user knows exactly where to point their client.
+function connectPanel() {
+  const base = location.origin;
+  const row = (k, v) => `<tr><td>${esc(k)}</td><td class="mono">${esc(v)}</td></tr>`;
+  return `<div class="panel">
+    <div class="panel-head"><h2>Connect</h2></div>
+    <div style="padding:.6rem 0">
+      <table>
+        ${row("OpenAI base URL", base + "/v1")}
+        ${row("Chat completions", "POST " + base + "/v1/chat/completions")}
+        ${row("Models", "GET " + base + "/v1/models")}
+        ${row("Anthropic messages", "POST " + base + "/v1/messages")}
+        ${row("Auth header", "Authorization: Bearer <key>   (or x-api-key)")}
+      </table>
+    </div>
+    <div style="padding:0 1.1rem 1rem">
+      <div class="token-box" style="border-color:var(--rule)">curl ${esc(base)}/v1/chat/completions -H "Authorization: Bearer &lt;key&gt;" -d '{"model":"mock-gpt","messages":[{"role":"user","content":"hi"}]}'</div>
+    </div>
+  </div>`;
 }
 
 // ---------- usage ----------
@@ -168,7 +191,8 @@ async function viewKeys(view) {
       <button class="btn" id="key-create">Create key</button>
     </div>
     <div id="reveal"></div>
-    <div id="keys-panel"></div>`;
+    <div id="keys-panel"></div>
+    ${connectPanel()}`;
   $("#key-create").addEventListener("click", createKey);
   $("#key-name").addEventListener("keydown", (e) => { if (e.key === "Enter") createKey(); });
   await loadKeys();
@@ -331,8 +355,8 @@ async function adminProviders(c) {
 function editProvider(c, p) {
   modalForm(p.name ? `Edit provider ${p.name}` : "New provider", [
     { name: "name", label: "Name", value: p.name || "", disabled: !!p.name },
-    { name: "kind", label: "Kind (openai|openrouter|xai|anthropic|mock)", value: p.kind || "" },
-    { name: "base_url", label: "Base URL", value: p.base_url || "" },
+    { name: "kind", label: "Kind", type: "select", options: ["mock", "openai", "openrouter", "xai", "ollama", "anthropic"], value: p.kind || "mock" },
+    { name: "base_url", label: "Base URL (optional override)", value: p.base_url || "" },
     { name: "enabled", label: "Enabled", type: "checkbox", value: p.enabled !== false },
   ], async (v) => {
     const x = await api("PUT", `/api/admin/providers/${encodeURIComponent(v.name)}`,
@@ -386,18 +410,74 @@ async function adminAliases(c) {
   }));
 }
 
-function editAlias(c, a) {
-  modalForm(a.alias ? `Edit alias ${a.alias}` : "New alias", [
-    { name: "alias", label: "Alias", value: a.alias || "", disabled: !!a.alias },
-    { name: "protocol", label: "Client protocol (openai|anthropic)", value: a.protocol || "openai" },
-    { name: "targets", label: "Targets (JSON array)", type: "textarea",
-      value: JSON.stringify(a.targets || [{ priority: 0, provider: "mock", upstream_model: "mock-model-1", upstream_protocol: "openai" }], null, 2) },
-  ], async (v) => {
-    let targets;
-    try { targets = JSON.parse(v.targets || "[]"); } catch (_) { toast("Targets must be valid JSON", "err"); return false; }
-    const x = await api("PUT", `/api/admin/aliases/${encodeURIComponent(v.alias)}`, { protocol: v.protocol, targets });
-    if (x.ok) { toast("Alias saved"); adminAliases(c); return true; }
-    toast((x.data && x.data.error) || "Failed", "err"); return false;
+async function editAlias(c, a) {
+  const pr = await api("GET", "/api/admin/providers");
+  let providers = ((pr.data && pr.data.providers) || []).map((p) => p.name);
+  if (providers.length === 0) providers = ["mock"];
+
+  const targets = (a.targets && a.targets.length)
+    ? a.targets
+    : [{ provider: providers[0], upstream_model: "", upstream_protocol: "openai" }];
+
+  const bg = document.createElement("div");
+  bg.className = "modal-bg";
+  bg.innerHTML = `<div class="modal" style="max-width:560px">
+    <h3>${esc(a.alias ? "Edit alias " + a.alias : "New alias")}</h3>
+    <label class="field"><span class="lab">Alias (the model name clients request)</span>
+      <input id="al-alias" value="${esc(a.alias || "")}" ${a.alias ? "disabled" : ""} /></label>
+    <label class="field"><span class="lab">Client protocol</span>
+      <select id="al-proto">
+        <option ${a.protocol !== "anthropic" ? "selected" : ""}>openai</option>
+        <option ${a.protocol === "anthropic" ? "selected" : ""}>anthropic</option>
+      </select></label>
+    <div class="lab" style="color:var(--muted);font-size:.82rem;margin-bottom:.3rem">Targets (tried top to bottom; first that succeeds wins)</div>
+    <div id="al-targets"></div>
+    <button type="button" class="btn ghost sm" id="al-add" style="margin-top:.3rem">+ Add target</button>
+    <div class="row" style="justify-content:flex-end;margin-top:1rem">
+      <button type="button" class="btn ghost" id="al-cancel">Cancel</button>
+      <button type="button" class="btn" id="al-save">Save</button>
+    </div>
+  </div>`;
+  document.body.appendChild(bg);
+  const close = () => bg.remove();
+  const tdiv = $("#al-targets", bg);
+
+  const provOpts = (sel) => providers.map((p) =>
+    `<option value="${esc(p)}" ${p === sel ? "selected" : ""}>${esc(p)}</option>`).join("");
+  function addRow(t) {
+    const row = document.createElement("div");
+    row.className = "row tgt";
+    row.style.marginBottom = ".4rem";
+    row.innerHTML = `
+      <select class="t-prov" style="width:auto">${provOpts(t.provider)}</select>
+      <input class="t-model" placeholder="upstream model" value="${esc(t.upstream_model || "")}" style="flex:1;min-width:120px" />
+      <select class="t-proto" style="width:auto">
+        <option ${t.upstream_protocol !== "anthropic" ? "selected" : ""}>openai</option>
+        <option ${t.upstream_protocol === "anthropic" ? "selected" : ""}>anthropic</option>
+      </select>
+      <button type="button" class="btn danger sm t-del" title="remove">×</button>`;
+    row.querySelector(".t-del").addEventListener("click", () => row.remove());
+    tdiv.appendChild(row);
+  }
+  targets.forEach(addRow);
+  $("#al-add", bg).addEventListener("click", () =>
+    addRow({ provider: providers[0], upstream_model: "", upstream_protocol: "openai" }));
+  $("#al-cancel", bg).addEventListener("click", close);
+  bg.addEventListener("click", (e) => { if (e.target === bg) close(); });
+  $("#al-save", bg).addEventListener("click", async () => {
+    const alias = $("#al-alias", bg).value.trim();
+    if (!alias) { toast("Alias is required", "err"); return; }
+    const tlist = [...tdiv.querySelectorAll(".tgt")].map((r, i) => ({
+      priority: i,
+      provider: r.querySelector(".t-prov").value,
+      upstream_model: r.querySelector(".t-model").value.trim(),
+      upstream_protocol: r.querySelector(".t-proto").value,
+    })).filter((t) => t.upstream_model);
+    if (tlist.length === 0) { toast("Add at least one target with a model", "err"); return; }
+    const x = await api("PUT", `/api/admin/aliases/${encodeURIComponent(alias)}`,
+      { protocol: $("#al-proto", bg).value, targets: tlist });
+    if (x.ok) { toast("Alias saved"); close(); adminAliases(c); }
+    else toast((x.data && x.data.error) || "Failed", "err");
   });
 }
 
@@ -423,6 +503,11 @@ function modalForm(title, fields, onSubmit) {
       if (f.type === "textarea") {
         return `<label class="field"><span class="lab">${esc(f.label)}</span>
           <textarea name="${f.name}">${esc(f.value)}</textarea></label>`;
+      }
+      if (f.type === "select") {
+        return `<label class="field"><span class="lab">${esc(f.label)}</span>
+          <select name="${f.name}" ${f.disabled ? "disabled" : ""}>${(f.options || []).map((o) =>
+            `<option value="${esc(o)}" ${o === f.value ? "selected" : ""}>${esc(o)}</option>`).join("")}</select></label>`;
       }
       return `<label class="field"><span class="lab">${esc(f.label)}</span>
         <input name="${f.name}" value="${esc(f.value)}" ${f.disabled ? "disabled" : ""} /></label>`;
