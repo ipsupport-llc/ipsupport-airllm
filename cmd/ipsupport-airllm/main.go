@@ -1,4 +1,4 @@
-// Command ipsupport-airouter is the gateway service entrypoint: it loads
+// Command ipsupport-airllm is the gateway service entrypoint: it loads
 // config, opens the stores, applies migrations, and serves HTTP.
 package main
 
@@ -12,14 +12,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/rromenskyi/ipsupport-airouter/internal/auth"
-	"github.com/rromenskyi/ipsupport-airouter/internal/config"
-	"github.com/rromenskyi/ipsupport-airouter/internal/httpapi"
-	"github.com/rromenskyi/ipsupport-airouter/internal/limits"
-	"github.com/rromenskyi/ipsupport-airouter/internal/pricing"
-	"github.com/rromenskyi/ipsupport-airouter/internal/providers"
-	"github.com/rromenskyi/ipsupport-airouter/internal/seed"
-	"github.com/rromenskyi/ipsupport-airouter/internal/store"
+	"github.com/rromenskyi/ipsupport-airllm/internal/auth"
+	"github.com/rromenskyi/ipsupport-airllm/internal/config"
+	"github.com/rromenskyi/ipsupport-airllm/internal/httpapi"
+	"github.com/rromenskyi/ipsupport-airllm/internal/limits"
+	"github.com/rromenskyi/ipsupport-airllm/internal/pricing"
+	"github.com/rromenskyi/ipsupport-airllm/internal/providers"
+	"github.com/rromenskyi/ipsupport-airllm/internal/seed"
+	"github.com/rromenskyi/ipsupport-airllm/internal/store"
 )
 
 func main() {

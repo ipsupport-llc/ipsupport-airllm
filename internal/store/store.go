@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/rromenskyi/ipsupport-airouter/internal/config"
+	"github.com/rromenskyi/ipsupport-airllm/internal/config"
 )
 
 // Store holds the shared connection pools.

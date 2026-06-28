@@ -1,4 +1,4 @@
-# ipsupport-airouter — implementation plan (full mock)
+# ipsupport-airllm — implementation plan (full mock)
 
 Goal: a complete, locally-runnable **mock** of the gateway — real
 architecture and pipeline (key-auth → policy → limits → routing →
@@ -22,13 +22,13 @@ English-only repo. No secrets in git.
 ---
 
 ## Phase 0 — Foundation  ✅ DONE (verified 2026-06-27)
-- [x] go.mod (module github.com/rromenskyi/ipsupport-airouter), .gitignore, LICENSE (Apache-2.0), README
+- [x] go.mod (module github.com/rromenskyi/ipsupport-airllm), .gitignore, LICENSE (Apache-2.0), README
 - [x] Makefile (build, test, vet, run, compose-up/down, web-build)
 - [x] deploy/docker-compose.yml (postgres + redis + app) and Dockerfile  (host ports offset 55432/56379 to avoid collisions)
 - [x] internal/config: env-driven config + validation
 - [x] internal/store: pgxpool + go-redis wiring; embedded SQL migrator (per-file tx, schema_migrations)
 - [x] migrations/0001_init.sql: users, api_keys, roles_policy, model_aliases, alias_targets, providers, pricing, usage_ledger, audit_log
-- [x] cmd/ipsupport-airouter/main.go: wire config+store+http server; /healthz, /readyz
+- [x] cmd/ipsupport-airllm/main.go: wire config+store+http server; /healthz, /readyz
 - [x] Verify: go build/vet/gofmt clean; app boots against compose; migration applied; /healthz 200; /readyz 200
 
 ## Phase 1 — Data-plane MVP (OpenAI ingress → mock upstream)  ✅ DONE (2026-06-27)
@@ -89,7 +89,7 @@ English-only repo. No secrets in git.
 - [x] Readiness 3/5 — repo hygiene: NO Cyrillic anywhere, no secrets, no artifacts committed, status clean
 - [x] Readiness 4/5 — spec coverage: dual ingress, routing/fallback/passthrough, policy, limits+metering, control-plane+RBAC, console (OIDC + real providers deferred to k8s by design)
 - [x] Readiness 5/5 — operability: README quickstart accurate, compose loopback-only
-- [x] Self review 1/5 (correctness) + fixes: /v1/models now filtered by key policy; seeded airouter_user role (restricted to mock-gpt) — verified role-based model gate (operator: mock-gpt 200, mock-fallback 403)
+- [x] Self review 1/5 (correctness) + fixes: /v1/models now filtered by key policy; seeded airllm_user role (restricted to mock-gpt) — verified role-based model gate (operator: mock-gpt 200, mock-fallback 403)
 - [x] Self review 2/5 (security) + fix: 16 MiB request-body cap (MaxBytesReader) — verified 17MB → 400, app survives; authz/RBAC + key-hash confirmed
 - [x] Self review 3/5 (simplification): code already DRY (chatEntry/usageWindows/panelTable/modalForm); no risky refactor (surgical)
 - [x] Self review 4/5 (concurrency/leaks): 13 Query ↔ 13 defer rows.Close(); single goroutine; pricing.Table RWMutex; fail-open limiter

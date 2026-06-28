@@ -1,7 +1,7 @@
 .PHONY: build test vet tidy run compose-up compose-down web-build fmt
 
 build:
-	go build -o bin/ipsupport-airouter ./cmd/ipsupport-airouter
+	go build -o bin/ipsupport-airllm ./cmd/ipsupport-airllm
 
 test:
 	go test ./...
@@ -16,7 +16,7 @@ fmt:
 	gofmt -w .
 
 run:
-	go run ./cmd/ipsupport-airouter
+	go run ./cmd/ipsupport-airllm
 
 compose-up:
 	docker compose -f deploy/docker-compose.yml up --build

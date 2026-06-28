@@ -7,12 +7,12 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/rromenskyi/ipsupport-airouter/internal/ledger"
-	"github.com/rromenskyi/ipsupport-airouter/internal/limits"
-	"github.com/rromenskyi/ipsupport-airouter/internal/llm"
-	"github.com/rromenskyi/ipsupport-airouter/internal/openai"
-	"github.com/rromenskyi/ipsupport-airouter/internal/providers"
-	"github.com/rromenskyi/ipsupport-airouter/internal/routing"
+	"github.com/rromenskyi/ipsupport-airllm/internal/ledger"
+	"github.com/rromenskyi/ipsupport-airllm/internal/limits"
+	"github.com/rromenskyi/ipsupport-airllm/internal/llm"
+	"github.com/rromenskyi/ipsupport-airllm/internal/openai"
+	"github.com/rromenskyi/ipsupport-airllm/internal/providers"
+	"github.com/rromenskyi/ipsupport-airllm/internal/routing"
 )
 
 // limitDenied checks the key's usage limits. It returns a 429-ready message

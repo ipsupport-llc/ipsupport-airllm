@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/rromenskyi/ipsupport-airouter/internal/llm"
+	"github.com/rromenskyi/ipsupport-airllm/internal/llm"
 )
 
 // StreamWriter translates the IR stream-chunk sequence into Anthropic

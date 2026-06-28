@@ -7,8 +7,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/rromenskyi/ipsupport-airouter/internal/apikey"
-	"github.com/rromenskyi/ipsupport-airouter/internal/policy"
+	"github.com/rromenskyi/ipsupport-airllm/internal/apikey"
+	"github.com/rromenskyi/ipsupport-airllm/internal/policy"
 )
 
 // handleMe returns the caller's identity.

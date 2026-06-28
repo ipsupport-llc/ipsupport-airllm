@@ -11,7 +11,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/rromenskyi/ipsupport-airouter/internal/policy"
+	"github.com/rromenskyi/ipsupport-airllm/internal/policy"
 )
 
 // BucketSize is the granularity of usage buckets; window edges are accurate

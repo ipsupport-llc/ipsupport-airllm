@@ -6,14 +6,14 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/rromenskyi/ipsupport-airouter/internal/auth"
-	"github.com/rromenskyi/ipsupport-airouter/internal/config"
-	"github.com/rromenskyi/ipsupport-airouter/internal/ledger"
-	"github.com/rromenskyi/ipsupport-airouter/internal/limits"
-	"github.com/rromenskyi/ipsupport-airouter/internal/pricing"
-	"github.com/rromenskyi/ipsupport-airouter/internal/providers"
-	"github.com/rromenskyi/ipsupport-airouter/internal/routing"
-	"github.com/rromenskyi/ipsupport-airouter/internal/store"
+	"github.com/rromenskyi/ipsupport-airllm/internal/auth"
+	"github.com/rromenskyi/ipsupport-airllm/internal/config"
+	"github.com/rromenskyi/ipsupport-airllm/internal/ledger"
+	"github.com/rromenskyi/ipsupport-airllm/internal/limits"
+	"github.com/rromenskyi/ipsupport-airllm/internal/pricing"
+	"github.com/rromenskyi/ipsupport-airllm/internal/providers"
+	"github.com/rromenskyi/ipsupport-airllm/internal/routing"
+	"github.com/rromenskyi/ipsupport-airllm/internal/store"
 )
 
 // Deps are the runtime dependencies wired into the server.

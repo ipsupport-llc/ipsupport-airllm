@@ -39,7 +39,7 @@ let me = null;
 async function init() {
   const r = await api("GET", "/api/me");
   if (r.status === 401) { renderLogin(); return; }
-  if (!r.ok) { app.innerHTML = `<div class="login-wrap"><div class="login-card"><h1>airouter</h1><p>Backend unavailable.</p></div></div>`; return; }
+  if (!r.ok) { app.innerHTML = `<div class="login-wrap"><div class="login-card"><h1>AirLLM</h1><p>Backend unavailable.</p></div></div>`; return; }
   me = r.data;
   renderShell();
 }
@@ -49,7 +49,7 @@ function renderLogin() {
   app.innerHTML = `
     <div class="login-wrap">
       <div class="login-card">
-        <h1>ai<span>router</span></h1>
+        <h1>Air<span>LLM</span></h1>
         <p>Sign in to the gateway console.</p>
         <form id="login-form">
           <label class="field"><span class="lab">Username</span>
@@ -85,7 +85,7 @@ function renderShell() {
   app.innerHTML = `
     <div class="shell">
       <aside class="sidebar">
-        <div class="brand">ai<span>router</span></div>
+        <div class="brand">Air<span>LLM</span></div>
         <nav class="nav">
           ${NAV.map((n) => `<a href="${n.href}" data-nav>${n.label}</a>`).join("")}
           ${adminLink}
@@ -252,7 +252,7 @@ async function adminUsers(c) {
   const users = (r.data && r.data.users) || [];
   c.innerHTML = panelTable("Users", ["Subject", "Email", "Roles", "Created"],
     users.map((u) => `<tr><td>${esc(u.subject)}</td><td>${esc(u.email)}</td>
-      <td>${(u.roles || []).map((x) => `<span class="badge ${x === "airouter_admin" ? "admin" : "neutral"}">${esc(x)}</span>`).join(" ")}</td>
+      <td>${(u.roles || []).map((x) => `<span class="badge ${x === "airllm_admin" ? "admin" : "neutral"}">${esc(x)}</span>`).join(" ")}</td>
       <td>${fmtTime(u.created_at)}</td></tr>`));
 }
 

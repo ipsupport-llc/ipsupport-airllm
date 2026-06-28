@@ -1,4 +1,4 @@
-# ipsupport-airouter
+# ipsupport-airllm
 
 Self-hosted, OIDC-governed LLM gateway. A single Go service exposes
 OpenAI- and Anthropic-compatible endpoints to internal coding agents,
@@ -15,7 +15,7 @@ binary, provides self-service key management and admin analytics.
 ## Architecture
 
 ```
-                 ipsupport-airouter (one Go binary)
+                 ipsupport-airllm (one Go binary)
   control-plane (session cookie)     data-plane (Bearer API key)
     /auth/login · /api/* · SPA "/"     /v1/chat/completions · /v1/models
                                        /v1/messages
@@ -82,9 +82,9 @@ make vet       # go vet
 make run       # run against local DATABASE_URL / REDIS_URL
 
 # run the binary against the compose datastores (loopback)
-DATABASE_URL='postgres://airouter:airouter@127.0.0.1:55432/airouter?sslmode=disable' \
+DATABASE_URL='postgres://airllm:airllm@127.0.0.1:55432/airllm?sslmode=disable' \
 REDIS_URL='redis://127.0.0.1:56379/0' \
-HTTP_ADDR='127.0.0.1:8099' ENV=dev AUTH_MODE=mock ./bin/ipsupport-airouter
+HTTP_ADDR='127.0.0.1:8099' ENV=dev AUTH_MODE=mock ./bin/ipsupport-airllm
 ```
 
 ## Configuration

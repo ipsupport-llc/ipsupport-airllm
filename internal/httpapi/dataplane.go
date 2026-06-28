@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/rromenskyi/ipsupport-airouter/internal/ledger"
-	"github.com/rromenskyi/ipsupport-airouter/internal/llm"
-	"github.com/rromenskyi/ipsupport-airouter/internal/openai"
-	"github.com/rromenskyi/ipsupport-airouter/internal/routing"
+	"github.com/rromenskyi/ipsupport-airllm/internal/ledger"
+	"github.com/rromenskyi/ipsupport-airllm/internal/llm"
+	"github.com/rromenskyi/ipsupport-airllm/internal/openai"
+	"github.com/rromenskyi/ipsupport-airllm/internal/routing"
 )
 
 // handleChatCompletions implements the OpenAI POST /v1/chat/completions
@@ -132,7 +132,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		if !ak.Policy.Allows(alias) {
 			continue
 		}
-		out.Data = append(out.Data, model{ID: alias, Object: "model", OwnedBy: "airouter"})
+		out.Data = append(out.Data, model{ID: alias, Object: "model", OwnedBy: "airllm"})
 	}
 	if err := rows.Err(); err != nil {
 		writeProtocolError(w, r, http.StatusInternalServerError, "internal_error", "failed to read models")

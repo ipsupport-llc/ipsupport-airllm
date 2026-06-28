@@ -4,9 +4,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/rromenskyi/ipsupport-airouter/internal/anthropic"
-	"github.com/rromenskyi/ipsupport-airouter/internal/llm"
-	"github.com/rromenskyi/ipsupport-airouter/internal/routing"
+	"github.com/rromenskyi/ipsupport-airllm/internal/anthropic"
+	"github.com/rromenskyi/ipsupport-airllm/internal/llm"
+	"github.com/rromenskyi/ipsupport-airllm/internal/routing"
 )
 
 // handleMessages implements the Anthropic POST /v1/messages ingress: policy

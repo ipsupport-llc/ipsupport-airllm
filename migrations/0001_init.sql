@@ -1,4 +1,4 @@
--- Initial schema for ipsupport-airouter.
+-- Initial schema for ipsupport-airllm.
 
 -- Identities. In prod these come from OIDC (subject = OIDC sub); in the
 -- local mock a single dev user is seeded.

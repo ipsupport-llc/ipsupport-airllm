@@ -11,7 +11,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/rromenskyi/ipsupport-airouter/internal/llm"
+	"github.com/rromenskyi/ipsupport-airllm/internal/llm"
 )
 
 type messagesRequestWire struct {

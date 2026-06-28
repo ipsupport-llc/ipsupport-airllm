@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rromenskyi/ipsupport-airouter/internal/llm"
+	"github.com/rromenskyi/ipsupport-airllm/internal/llm"
 )
 
 func mustMarshal(t *testing.T, c llm.StreamChunk) string {

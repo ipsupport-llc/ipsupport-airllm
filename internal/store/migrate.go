@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/rromenskyi/ipsupport-airouter/migrations"
+	"github.com/rromenskyi/ipsupport-airllm/migrations"
 )
 
 // Migrate applies any embedded *.sql migrations not yet recorded, in

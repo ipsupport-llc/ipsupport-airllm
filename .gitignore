@@ -1,6 +1,6 @@
 /bin/
 /dist/
-/ipsupport-airouter
+/ipsupport-airllm
 *.test
 *.out
 .env

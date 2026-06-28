@@ -1,4 +1,4 @@
-module github.com/rromenskyi/ipsupport-airouter
+module github.com/rromenskyi/ipsupport-airllm
 
 go 1.26
 

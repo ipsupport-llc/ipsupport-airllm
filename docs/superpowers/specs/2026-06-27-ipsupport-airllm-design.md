@@ -1,4 +1,4 @@
-# ipsupport-airouter — design
+# ipsupport-airllm — design
 
 Self-hosted, OIDC-governed LLM gateway. One Go service exposes
 OpenAI- and Anthropic-compatible endpoints to internal coding agents,
@@ -8,7 +8,7 @@ Anthropic), and meters tokens/cost. A SvelteKit SPA (served by the same
 binary) provides self-service key management and admin policy/analytics.
 
 - **Status:** design approved 2026-06-27, pre-implementation.
-- **Repo:** `github.com/rromenskyi/ipsupport-airouter` (private now,
+- **Repo:** `github.com/rromenskyi/ipsupport-airllm` (private now,
   written public-grade, intended to open-source later).
 - **License:** Apache-2.0.
 - **Language of the repo:** English only — code, comments, commit
@@ -42,7 +42,7 @@ binary) provides self-service key management and admin policy/analytics.
 One Go binary with two auth planes plus the static SPA it serves.
 
 ```
-                      ipsupport-airouter (Go)
+                      ipsupport-airllm (Go)
   ┌───────────────────────────────────────────────────────────────┐
   │  control-plane  (browser, OIDC session cookie)                 │
   │    /auth/* (OIDC login/callback/logout)                        │
@@ -123,8 +123,8 @@ isolation.
 - A **role policy** holds: allowed aliases/models, default limits (per
   5h/24h/7d window, in tokens and/or USD), and whether
   explicit-passthrough is allowed.
-- RBAC: at minimum `airouter_admin` (manage everything) and
-  `airouter_user` (self-service own keys, view own usage). Admin role and
+- RBAC: at minimum `airllm_admin` (manage everything) and
+  `airllm_user` (self-service own keys, view own usage). Admin role and
   claim paths are configurable.
 
 ## API keys (self-service + admin)
@@ -201,7 +201,7 @@ Pages:
 ## Repo layout
 
 ```
-/cmd/ipsupport-airouter        main entrypoint
+/cmd/ipsupport-airllm        main entrypoint
 /internal/{config,oidc,apikey,policy,gateway,providers,routing,
            translate,limits,ledger,store,httpapi}
 /web                           SvelteKit SPA (adapter-static)

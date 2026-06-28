@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/rromenskyi/ipsupport-airouter/internal/auth"
+	"github.com/rromenskyi/ipsupport-airllm/internal/auth"
 )
 
 type sessCtx int

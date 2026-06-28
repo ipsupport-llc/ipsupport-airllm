@@ -6,7 +6,7 @@ package providers
 import (
 	"context"
 
-	"github.com/rromenskyi/ipsupport-airouter/internal/llm"
+	"github.com/rromenskyi/ipsupport-airllm/internal/llm"
 )
 
 // Provider is one upstream LLM backend.

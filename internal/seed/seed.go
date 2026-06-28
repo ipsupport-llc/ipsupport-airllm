@@ -8,8 +8,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/rromenskyi/ipsupport-airouter/internal/apikey"
-	"github.com/rromenskyi/ipsupport-airouter/internal/store"
+	"github.com/rromenskyi/ipsupport-airllm/internal/apikey"
+	"github.com/rromenskyi/ipsupport-airllm/internal/store"
 )
 
 // DevToken is the fixed, well-known API key seeded in the local mock.
@@ -21,7 +21,7 @@ func Dev(ctx context.Context, st *store.Store) (string, error) {
 	var userID string
 	if err := st.PG.QueryRow(ctx, `
 		INSERT INTO users (subject, email, display, roles)
-		VALUES ('dev-admin', 'dev@local', 'Dev Admin', ARRAY['airouter_admin'])
+		VALUES ('dev-admin', 'dev@local', 'Dev Admin', ARRAY['airllm_admin'])
 		ON CONFLICT (subject) DO UPDATE SET updated_at = now()
 		RETURNING id::text`).Scan(&userID); err != nil {
 		return "", fmt.Errorf("seed user: %w", err)
@@ -29,7 +29,7 @@ func Dev(ctx context.Context, st *store.Store) (string, error) {
 
 	if _, err := st.PG.Exec(ctx, `
 		INSERT INTO roles_policy (role, allowed_models, allow_passthrough, limits)
-		VALUES ('airouter_admin', ARRAY['*'], true, '{}'::jsonb)
+		VALUES ('airllm_admin', ARRAY['*'], true, '{}'::jsonb)
 		ON CONFLICT (role) DO NOTHING`); err != nil {
 		return "", fmt.Errorf("seed role policy: %w", err)
 	}
@@ -39,7 +39,7 @@ func Dev(ctx context.Context, st *store.Store) (string, error) {
 	// functional.
 	if _, err := st.PG.Exec(ctx, `
 		INSERT INTO roles_policy (role, allowed_models, allow_passthrough, limits)
-		VALUES ('airouter_user', ARRAY['mock-gpt'], false, '{"tokens":{"24h":200000}}'::jsonb)
+		VALUES ('airllm_user', ARRAY['mock-gpt'], false, '{"tokens":{"24h":200000}}'::jsonb)
 		ON CONFLICT (role) DO NOTHING`); err != nil {
 		return "", fmt.Errorf("seed user role policy: %w", err)
 	}

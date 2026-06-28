@@ -20,8 +20,8 @@ import (
 
 // Roles.
 const (
-	AdminRole = "airouter_admin"
-	UserRole  = "airouter_user"
+	AdminRole = "airllm_admin"
+	UserRole  = "airllm_user"
 )
 
 const (

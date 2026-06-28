@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/rromenskyi/ipsupport-airouter/internal/apikey"
-	"github.com/rromenskyi/ipsupport-airouter/internal/policy"
+	"github.com/rromenskyi/ipsupport-airllm/internal/apikey"
+	"github.com/rromenskyi/ipsupport-airllm/internal/policy"
 )
 
 type ctxKey int

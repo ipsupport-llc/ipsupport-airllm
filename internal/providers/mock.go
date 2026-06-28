@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rromenskyi/ipsupport-airouter/internal/llm"
+	"github.com/rromenskyi/ipsupport-airllm/internal/llm"
 )
 
 // Mock is an in-process provider that simulates an OpenAI-shaped upstream:
