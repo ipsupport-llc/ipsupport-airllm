@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rromenskyi/ipsupport-airllm/internal/capture"
-	"github.com/rromenskyi/ipsupport-airllm/internal/dlp"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/capture"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/dlp"
 )
 
 // --- fakes ---

@@ -3,9 +3,9 @@ package httpapi
 import (
 	"encoding/json"
 
-	"github.com/rromenskyi/ipsupport-airllm/internal/capture"
-	"github.com/rromenskyi/ipsupport-airllm/internal/dlp"
-	"github.com/rromenskyi/ipsupport-airllm/internal/llm"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/capture"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/dlp"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
 )
 
 // captureBody serializes request messages and the response text into a compact

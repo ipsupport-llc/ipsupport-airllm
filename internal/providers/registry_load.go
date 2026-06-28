@@ -4,8 +4,8 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/rromenskyi/ipsupport-airllm/internal/secrets"
-	"github.com/rromenskyi/ipsupport-airllm/internal/store"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/secrets"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 )
 
 // defaultBaseURL returns the public base URL for a provider kind; an explicit

@@ -1,6 +1,10 @@
 # ipsupport-airllm
 
-Self-hosted, OIDC-governed LLM gateway. A single Go service exposes OpenAI- and
+**AirLLM** — short for **AI Router LLM** — is a self-hosted, OIDC-governed LLM
+gateway: it routes internal coding agents to upstream language models through a
+single, policed entry point.
+
+A single Go service exposes OpenAI- and
 Anthropic-compatible endpoints to internal coding agents, authenticates them by
 API key, enforces per-key model policy and rolling usage limits, routes to
 upstream providers (OpenAI, OpenRouter, xAI, Anthropic) with balancing and

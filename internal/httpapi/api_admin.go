@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/rromenskyi/ipsupport-airllm/internal/pricing"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/pricing"
 )
 
 func (s *Server) adminRoutes() {

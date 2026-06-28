@@ -7,7 +7,7 @@ import (
 	"errors"
 	"io"
 
-	"github.com/rromenskyi/ipsupport-airllm/internal/llm"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
 )
 
 type chatRequestWire struct {

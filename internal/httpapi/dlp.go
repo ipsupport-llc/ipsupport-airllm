@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rromenskyi/ipsupport-airllm/internal/dlp"
-	"github.com/rromenskyi/ipsupport-airllm/internal/llm"
-	"github.com/rromenskyi/ipsupport-airllm/internal/store"
-	"github.com/rromenskyi/ipsupport-airllm/internal/webhook"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/dlp"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/webhook"
 )
 
 // dlpConfig is the global DLP policy.

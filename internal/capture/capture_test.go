@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rromenskyi/ipsupport-airllm/internal/dlp"
-	"github.com/rromenskyi/ipsupport-airllm/internal/secrets"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/dlp"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/secrets"
 )
 
 // memBlob is a simple in-memory blob.Store for testing.

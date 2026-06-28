@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rromenskyi/ipsupport-airllm/internal/dlp"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/dlp"
 )
 
 // Engine scans text for sensitive spans using a stronger detector.

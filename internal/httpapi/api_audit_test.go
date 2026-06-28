@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rromenskyi/ipsupport-airllm/internal/auth"
-	"github.com/rromenskyi/ipsupport-airllm/internal/blob"
-	"github.com/rromenskyi/ipsupport-airllm/internal/capture"
-	"github.com/rromenskyi/ipsupport-airllm/internal/dlp"
-	"github.com/rromenskyi/ipsupport-airllm/internal/secrets"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/auth"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/blob"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/capture"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/dlp"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/secrets"
 )
 
 // --- fakes ---

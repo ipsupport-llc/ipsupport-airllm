@@ -6,7 +6,7 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/rromenskyi/ipsupport-airllm/internal/store"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 )
 
 // Entry is a single usage record.

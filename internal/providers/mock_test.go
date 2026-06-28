@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rromenskyi/ipsupport-airllm/internal/llm"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
 )
 
 func userReq(text string, tools ...llm.Tool) llm.ChatRequest {

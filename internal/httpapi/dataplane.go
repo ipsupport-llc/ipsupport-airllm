@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/rromenskyi/ipsupport-airllm/internal/ledger"
-	"github.com/rromenskyi/ipsupport-airllm/internal/llm"
-	"github.com/rromenskyi/ipsupport-airllm/internal/openai"
-	"github.com/rromenskyi/ipsupport-airllm/internal/routing"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/ledger"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/openai"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
 )
 
 // handleChatCompletions implements the OpenAI POST /v1/chat/completions
