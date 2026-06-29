@@ -130,7 +130,11 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 		writeControlError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	hash, _ := auth.HashPassword(body.Password)
+	hash, err := auth.HashPassword(body.Password)
+	if err != nil {
+		writeControlError(w, http.StatusInternalServerError, "hash failed")
+		return
+	}
 	if err := s.users().SetPassword(r.Context(), id, hash); err != nil {
 		s.writeUserErr(w, err)
 		return
@@ -183,11 +187,19 @@ func (s *Server) handleChangeOwnPassword(w http.ResponseWriter, r *http.Request)
 		writeControlError(w, http.StatusInternalServerError, "failed to load user")
 		return
 	}
-	if u.AuthSource != "local" || !auth.CheckPassword(u.PasswordHash, body.Current) {
+	if u.AuthSource != "local" {
+		writeControlError(w, http.StatusBadRequest, "password change is not available for SSO accounts")
+		return
+	}
+	if !auth.CheckPassword(u.PasswordHash, body.Current) {
 		writeControlError(w, http.StatusBadRequest, "current password is incorrect")
 		return
 	}
-	hash, _ := auth.HashPassword(body.New)
+	hash, err := auth.HashPassword(body.New)
+	if err != nil {
+		writeControlError(w, http.StatusInternalServerError, "hash failed")
+		return
+	}
 	if err := s.users().SetPassword(r.Context(), sess.userID, hash); err != nil {
 		s.writeUserErr(w, err)
 		return
@@ -208,7 +220,7 @@ func (s *Server) guardLastAdmin(r *http.Request, id string, newRoles []string, d
 			wasAdmin = true
 		}
 	}
-	if !wasAdmin {
+	if !wasAdmin || u.Disabled {
 		return nil
 	}
 	stillAdmin := false
@@ -218,7 +230,10 @@ func (s *Server) guardLastAdmin(r *http.Request, id string, newRoles []string, d
 		}
 	}
 	if disabling || !stillAdmin {
-		n, _ := s.users().CountAdmins(r.Context())
+		n, err := s.users().CountAdmins(r.Context())
+		if err != nil {
+			return fmt.Errorf("admin count: %w", err)
+		}
 		if n <= 1 {
 			return errors.New("cannot remove or disable the last admin")
 		}
