@@ -685,7 +685,7 @@ async function editUser(c, u) {
   if (isNew) fields.push({ name: "username", label: "Username", value: "" });
   fields.push(
     { name: "email", label: "Email", value: u ? (u.email || "") : "" },
-    { name: "display", label: "Display name", value: "" },
+    { name: "display", label: "Display name", value: u ? (u.display || "") : "" },
     { name: "roles", label: `Roles (comma-separated)${hint}`, value: u ? (u.roles || []).join(", ") : "" },
     { name: "disabled", label: "Disabled", type: "checkbox", value: u ? !!u.disabled : false },
   );

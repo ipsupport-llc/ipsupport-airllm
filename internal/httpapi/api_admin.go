@@ -54,7 +54,7 @@ func (s *Server) adminRoutes() {
 
 func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.st.PG.Query(r.Context(),
-		`SELECT id::text, subject, email, roles, disabled, auth_source, created_at FROM users ORDER BY created_at`)
+		`SELECT id::text, subject, email, display, roles, disabled, auth_source, created_at FROM users ORDER BY created_at`)
 	if err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to list users")
 		return
@@ -64,6 +64,7 @@ func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 		ID         string    `json:"id"`
 		Subject    string    `json:"subject"`
 		Email      string    `json:"email"`
+		Display    string    `json:"display"`
 		Roles      []string  `json:"roles"`
 		Disabled   bool      `json:"disabled"`
 		AuthSource string    `json:"auth_source"`
@@ -72,7 +73,7 @@ func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	out := []user{}
 	for rows.Next() {
 		var u user
-		if err := rows.Scan(&u.ID, &u.Subject, &u.Email, &u.Roles, &u.Disabled, &u.AuthSource, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Subject, &u.Email, &u.Display, &u.Roles, &u.Disabled, &u.AuthSource, &u.CreatedAt); err != nil {
 			writeControlError(w, http.StatusInternalServerError, "failed to read users")
 			return
 		}
