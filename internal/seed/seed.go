@@ -1,7 +1,7 @@
 // Package seed inserts demo data for the local mock: a dev admin user, a
 // permissive role policy, the mock provider, a model alias, and a single
 // API key with a fixed, well-known token. It is idempotent and intended
-// ONLY for ENV=dev + AUTH_MODE=mock.
+// ONLY for ENV=dev + AUTH_MODE=local.
 package seed
 
 import (
