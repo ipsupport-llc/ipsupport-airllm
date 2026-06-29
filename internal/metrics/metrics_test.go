@@ -40,6 +40,7 @@ func TestNilSafe(t *testing.T) {
 	m.IncRateLimited("provider_busy")
 	m.DLPModelInc()
 	m.DLPModelDone(time.Millisecond)
+	m.RegisterCaptureDropped(func() float64 { return 0 })
 }
 
 func TestRegisterCaptureDropped(t *testing.T) {
