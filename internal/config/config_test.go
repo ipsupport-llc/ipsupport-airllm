@@ -35,8 +35,8 @@ func TestLoadDefaults(t *testing.T) {
 	if c.Env != "dev" {
 		t.Errorf("Env default = %q, want dev", c.Env)
 	}
-	if c.AuthMode != "mock" {
-		t.Errorf("AuthMode default = %q, want mock", c.AuthMode)
+	if c.AuthMode != "local" {
+		t.Errorf("AuthMode default = %q, want local", c.AuthMode)
 	}
 	// dev derives a deterministic insecure key so sealed creds survive restarts.
 	if !c.MasterKeyDev {
@@ -137,5 +137,22 @@ func TestSessionKeyOverride(t *testing.T) {
 	c, err := Load()
 	if err != nil || string(c.SessionKey) != string(raw) {
 		t.Fatalf("override not honored: err=%v", err)
+	}
+}
+
+func TestAuthModeNormalizesMockToLocal(t *testing.T) {
+	setBase(t)
+	t.Setenv("AUTH_MODE", "mock")
+	c, err := Load()
+	if err != nil || c.AuthMode != "local" {
+		t.Fatalf("mock must normalize to local, got %q err=%v", c.AuthMode, err)
+	}
+}
+
+func TestAuthModeRejectsUnknown(t *testing.T) {
+	setBase(t)
+	t.Setenv("AUTH_MODE", "ldap")
+	if _, err := Load(); err == nil {
+		t.Fatal("unknown AUTH_MODE must error")
 	}
 }

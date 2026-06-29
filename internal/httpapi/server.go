@@ -123,7 +123,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/models", s.requireAPIKey(s.handleModels))
 	s.mux.HandleFunc("POST /v1/messages", s.requireAPIKey(s.handleMessages))
 
-	// Control-plane auth (password login present only in mock mode).
+	// Control-plane auth endpoints (public — no session required).
+	s.mux.HandleFunc("GET /api/auth/mode", s.handleAuthMode)
 	if s.login != nil {
 		s.mux.HandleFunc("POST /auth/login", s.handleLogin)
 		s.mux.HandleFunc("POST /auth/logout", s.handleLogout)

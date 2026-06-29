@@ -18,7 +18,7 @@ type Config struct {
 	DatabaseURL string // postgres DSN (required)
 	RedisURL    string // redis URL, e.g. "redis://host:6379/0"
 	Env         string // "dev" | "prod"; used as the API-key environment tag
-	AuthMode    string // "mock" | "oidc"; "mock" skips OIDC for local use
+	AuthMode    string // "local" | "oidc"; "mock" is a deprecated alias for "local"
 
 	MasterKey    []byte // 32-byte AES key for sealing provider credentials
 	MasterKeyDev bool   // true when a deterministic dev key was derived (insecure)
@@ -32,7 +32,7 @@ func Load() (*Config, error) {
 		DatabaseURL: os.Getenv("DATABASE_URL"),
 		RedisURL:    env("REDIS_URL", "redis://localhost:6379/0"),
 		Env:         env("ENV", "dev"),
-		AuthMode:    env("AUTH_MODE", "mock"),
+		AuthMode:    env("AUTH_MODE", "local"),
 	}
 
 	if c.DatabaseURL == "" {
@@ -41,8 +41,13 @@ func Load() (*Config, error) {
 	if c.Env != "dev" && c.Env != "prod" {
 		return nil, fmt.Errorf("ENV must be \"dev\" or \"prod\", got %q", c.Env)
 	}
-	if c.AuthMode != "mock" && c.AuthMode != "oidc" {
-		return nil, fmt.Errorf("AUTH_MODE must be \"mock\" or \"oidc\", got %q", c.AuthMode)
+	switch c.AuthMode {
+	case "mock":
+		c.AuthMode = "local" // deprecated alias
+	case "local", "oidc":
+		// ok
+	default:
+		return nil, fmt.Errorf("AUTH_MODE must be \"local\" or \"oidc\", got %q", c.AuthMode)
 	}
 
 	key, dev, err := loadMasterKey(c.Env)

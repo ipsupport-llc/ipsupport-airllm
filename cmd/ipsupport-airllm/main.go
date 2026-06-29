@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/auth"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/blob"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/capture"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/config"
@@ -57,8 +58,34 @@ func run() error {
 		return err
 	}
 
-	// Local-mock convenience: seed demo data + a fixed dev API key.
-	if cfg.Env == "dev" && cfg.AuthMode == "mock" {
+	// Wire the auth mode. AUTH_MODE=mock is a deprecated alias for local.
+	var authImpl auth.Authenticator
+	var loginImpl auth.LoginProvider
+	session := auth.NewSession(cfg.SessionKey)
+	switch cfg.AuthMode {
+	case "local":
+		users := store.NewPGUsers(st)
+		la := auth.NewLocalAuth(users, session)
+		authImpl = la
+		loginImpl = la
+		if os.Getenv("AUTH_MODE") == "mock" {
+			slog.Warn("AUTH_MODE=mock is a deprecated alias for local")
+		}
+		created, gen, err := auth.EnsureBootstrapAdmin(ctx, users,
+			envOr("AIRLLM_ADMIN_USERNAME", "admin"), os.Getenv("AIRLLM_ADMIN_PASSWORD"))
+		if err != nil {
+			return fmt.Errorf("bootstrap admin: %w", err)
+		}
+		if created && gen != "" {
+			slog.Warn("bootstrap admin created (change this password)",
+				"username", envOr("AIRLLM_ADMIN_USERNAME", "admin"), "password", gen)
+		}
+	case "oidc":
+		// wired in Task 6
+	}
+
+	// Local-mode convenience: seed demo data + a fixed dev API key.
+	if cfg.Env == "dev" && cfg.AuthMode == "local" {
 		token, err := seed.Dev(ctx, st)
 		if err != nil {
 			return err
@@ -119,6 +146,8 @@ func run() error {
 		Limiter:   limits.New(st.RDB),
 		Pricing:   priceTable,
 		Sealer:    sealer,
+		Auth:      authImpl,
+		Login:     loginImpl,
 		Capture:   capturePipeline,
 		Blob:      blobStore,
 	}
@@ -197,6 +226,13 @@ func run() error {
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)
 	}
+}
+
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
 }
 
 // secondpassStoreAdapter adapts capture.PGInserter to secondpass.Store.

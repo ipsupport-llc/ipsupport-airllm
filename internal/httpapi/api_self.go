@@ -11,6 +11,20 @@ import (
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/policy"
 )
 
+// handleAuthMode reports the active auth mode so the login screen can render
+// either the password form (local) or an SSO button (oidc).
+func (s *Server) handleAuthMode(w http.ResponseWriter, _ *http.Request) {
+	mode := "local"
+	if s.login == nil {
+		mode = "oidc"
+	}
+	resp := map[string]string{"mode": mode}
+	if mode == "oidc" {
+		resp["sso_url"] = "/auth/sso"
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // handleMe returns the caller's identity.
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	sess, _ := sessionFrom(r.Context())
