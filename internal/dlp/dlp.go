@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // DetectorVersion identifies the deterministic detection pipeline that
@@ -237,11 +238,16 @@ func mixedClasses(s string) bool {
 	return up && lo && dig
 }
 
-// Redact replaces every finding with a [REDACTED:label] marker.
+// Redact replaces every finding with a [REDACTED:label] marker. Adjacent
+// findings with the same label, separated by only whitespace (or nothing), are
+// collapsed into a single marker — so a model entity the NER splits into pieces
+// ("Acme Corporation" → two ORG spans) renders as one [REDACTED:label] rather
+// than several back to back.
 func Redact(s string, findings []Finding) string {
 	if len(findings) == 0 {
 		return s
 	}
+	findings = coalesceAdjacent(s, findings)
 	var b strings.Builder
 	prev := 0
 	for _, f := range findings {
@@ -254,6 +260,36 @@ func Redact(s string, findings []Finding) string {
 	}
 	b.WriteString(s[prev:])
 	return b.String()
+}
+
+// coalesceAdjacent merges runs of same-label findings whose gap is empty or all
+// whitespace into one span (first start … last end). Input must be sorted by
+// start and non-overlapping (as Merge produces). It does not mutate findings.
+func coalesceAdjacent(s string, findings []Finding) []Finding {
+	out := make([]Finding, 0, len(findings))
+	for _, f := range findings {
+		if n := len(out); n > 0 {
+			prev := out[n-1]
+			if prev.Label == f.Label && f.Start >= prev.End && f.End <= len(s) && isBlank(s[prev.End:f.Start]) {
+				if f.End > prev.End {
+					out[n-1].End = f.End
+				}
+				continue
+			}
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+// isBlank reports whether s is empty or contains only whitespace.
+func isBlank(s string) bool {
+	for _, r := range s {
+		if !unicode.IsSpace(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // Labels returns the distinct finding labels, sorted.

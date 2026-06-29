@@ -78,6 +78,37 @@ func TestCustomPattern(t *testing.T) {
 	}
 }
 
+func TestRedactCoalescesAdjacentSameLabel(t *testing.T) {
+	// "Acme Corporation" split into two ORG spans (gap is a blank space) -> one marker.
+	s := "Acme Corporation office"
+	out := Redact(s, []Finding{{Label: "pii:ORG", Start: 0, End: 4}, {Label: "pii:ORG", Start: 5, End: 16}})
+	if want := "[REDACTED:pii:ORG] office"; out != want {
+		t.Fatalf("adjacent same-label must collapse: got %q want %q", out, want)
+	}
+	// Empty gap (truly contiguous) also collapses.
+	out2 := Redact("AcmeCorp x", []Finding{{Label: "o", Start: 0, End: 4}, {Label: "o", Start: 4, End: 8}})
+	if want := "[REDACTED:o] x"; out2 != want {
+		t.Fatalf("contiguous same-label must collapse: got %q want %q", out2, want)
+	}
+}
+
+func TestRedactKeepsNonBlankGapSeparate(t *testing.T) {
+	// "Berlin, Germany" — the gap ", " is not whitespace-only, so stay separate.
+	s := "Berlin, Germany"
+	out := Redact(s, []Finding{{Label: "pii:LOC", Start: 0, End: 6}, {Label: "pii:LOC", Start: 8, End: 15}})
+	if want := "[REDACTED:pii:LOC], [REDACTED:pii:LOC]"; out != want {
+		t.Fatalf("non-blank gap must stay separate: got %q want %q", out, want)
+	}
+}
+
+func TestRedactKeepsDifferentLabelsSeparate(t *testing.T) {
+	s := "John Berlin"
+	out := Redact(s, []Finding{{Label: "pii:PER", Start: 0, End: 4}, {Label: "pii:LOC", Start: 5, End: 11}})
+	if want := "[REDACTED:pii:PER] [REDACTED:pii:LOC]"; out != want {
+		t.Fatalf("different labels must stay separate: got %q want %q", out, want)
+	}
+}
+
 func TestScanWithSkipsZeroWidthCustom(t *testing.T) {
 	// A zero-width-matching custom regex must not emit findings (defense in
 	// depth; the httpapi layer also rejects such patterns at save time).
