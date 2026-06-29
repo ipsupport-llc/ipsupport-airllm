@@ -12,7 +12,7 @@ The gateway exposes two planes on one listener:
 | Surface | Mechanism | How |
 |---------|-----------|-----|
 | Data-plane (`/v1/*`) | API key | `Authorization: Bearer <key>` or `x-api-key: <key>` |
-| Control-plane (`/api/*`, SPA) | Session cookie | obtained from `POST /auth/login` (mock) or OIDC (deploy) |
+| Control-plane (`/api/*`, SPA) | Session cookie | obtained from `POST /auth/login` (local mode) or OIDC (`GET /auth/sso` → `GET /auth/callback`) |
 
 Access tiers on the control-plane:
 
@@ -30,7 +30,10 @@ prefix and last-4, and shown in full exactly once at creation.
 | `GET` | `/healthz` | Liveness |
 | `GET` | `/readyz` | Readiness (datastore reachability) |
 | `GET` | `/` | The SPA console (static, embedded) |
-| `POST` | `/auth/login` | Mock password login → sets session cookie. Body: `{"username","password"}` |
+| `GET` | `/api/auth/mode` | Reports the active auth mode (`local` or `oidc`) and, in OIDC mode, the SSO start URL. The SPA uses this to decide whether to render a password form or an "Sign in with SSO" button. |
+| `POST` | `/auth/login` | Password login (local mode only) → sets an HMAC session cookie. Body: `{"username","password"}` |
+| `GET` | `/auth/sso` | Begin OIDC login — redirects to the IdP (OIDC mode only). PKCE + `state` + `nonce` are set in short-lived signed cookies. |
+| `GET` | `/auth/callback` | OIDC callback — validates `state`, exchanges the code, verifies the ID token, upserts the user, sets the session cookie, and redirects to `/` (OIDC mode only). |
 | `POST` | `/auth/logout` | Clears the session cookie |
 
 ## Data-plane (API key)
@@ -55,6 +58,7 @@ than failing.
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/api/me` | Current principal (subject, email, roles, is_admin) |
+| `POST` | `/api/me/password` | Change own password. Body: `{"current","new"}`. Local-auth users only; OIDC-provisioned users (`auth_source=oidc`) are rejected. Requires the caller's current password (not admin-only). |
 | `GET` | `/api/keys` | List the caller's API keys |
 | `POST` | `/api/keys` | Create a key (token returned once). Body: `{"name"}` |
 | `POST` | `/api/keys/{id}/revoke` | Revoke one of the caller's keys |
@@ -64,7 +68,11 @@ than failing.
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `GET` | `/api/admin/users` | List users |
+| `GET` | `/api/admin/users` | List users. Each entry now includes `disabled`, `auth_source` (`local` or `oidc`), and `display`. |
+| `POST` | `/api/admin/users` | Create a local user. Body: `{"username","email","display","roles","password"}`. Password must be ≥ 8 characters; roles must be known keys. |
+| `PUT` | `/api/admin/users/{id}` | Update `email`, `display`, `roles`, or `disabled`. Cannot set a password via this route; use the `/password` sub-resource. |
+| `POST` | `/api/admin/users/{id}/password` | Admin-reset a user's password (no current-password required). Body: `{"password":"..."}`. Blocked for OIDC-provisioned users. |
+| `DELETE` | `/api/admin/users/{id}` | Delete a user. Blocked if the user still owns active API keys (revoke them first). Blocked if deleting would remove the last admin. Prefer setting `disabled=true` as a non-destructive alternative. |
 | `GET` | `/api/admin/keys` | List all keys |
 | `POST` | `/api/admin/keys/{id}/revoke` | Revoke any key |
 | `GET` | `/api/admin/usage` | Usage across all keys |

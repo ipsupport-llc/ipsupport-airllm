@@ -18,7 +18,10 @@ Read by `internal/config` at startup. Invalid values fail fast.
 | `HTTP_ADDR` | `:8080` | no | Listen address. In compose this stays `:8080` inside the container; the host binding is controlled by `APP_BIND`. |
 | `REDIS_URL` | `redis://localhost:6379/0` | no | Redis URL for rolling usage counters |
 | `ENV` | `dev` | no | `dev` or `prod`. Used as the API-key environment tag (`air_<env>_…`). `dev` seeds mock data and a fixed demo key. |
-| `AUTH_MODE` | `mock` | no | `mock` (password login, random per-boot credentials) or `oidc` (generic OIDC, used on the kubernetes deploy) |
+| `AUTH_MODE` | `local` | no | `local` (DB-backed username/password) or `oidc` (generic OpenID Connect). `mock` is a **deprecated alias** for `local` — existing configs keep working but a deprecation warning is logged at startup. |
+| `AIRLLM_SESSION_KEY` | — | no | Base64-encoded **32-byte** HMAC session signing key. Optional: if unset, the key is derived deterministically from `AIRLLM_MASTER_KEY` via HKDF-SHA256 (`info="airllm-session-v1"`), so sessions survive restarts and work across replicas with no extra secret to manage. Never logged. |
+| `AIRLLM_ADMIN_USERNAME` | `admin` | no | Username for the bootstrap admin account created on first run. |
+| `AIRLLM_ADMIN_PASSWORD` | — | no | Password for the bootstrap admin. If unset, a random password is **logged once** at `WARN` on first boot and then permanently stored — it is never regenerated. If set, the value is hashed and stored silently and **never logged**. Has no effect once an admin account already exists. |
 | `AIRLLM_MASTER_KEY` | — | in `prod` | Base64-encoded **32-byte** AES key that seals provider credentials at rest. **Required when `ENV=prod`.** In `dev`, a deterministic *insecure* key is derived so sealed credentials survive restarts without configuration. |
 | `CAPTURE_BLOB_DIR` | `capture-blobs` | no | Filesystem directory for the capture blob store (relative to the working directory by default). The process runs as a non-root user, so point this at a writable path (compose uses `/tmp/airllm-captures`). Back it with a volume or object store on deploy. |
 
@@ -27,6 +30,18 @@ Read by `internal/config` at startup. Invalid values fail fast.
 | Variable | Default | Notes |
 |----------|---------|-------|
 | `APP_BIND` | `127.0.0.1:8080` | Host interface the gateway publishes on. See [`deploy/.env.example`](../deploy/.env.example). Never set this to `0.0.0.0` on a host with a public IP. |
+
+### OIDC settings (required when `AUTH_MODE=oidc`)
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `OIDC_ISSUER` | — | **required** | Issuer URL; discovery document fetched from `<issuer>/.well-known/openid-configuration`. Placeholder: `https://idp.example.com`. |
+| `OIDC_CLIENT_ID` | — | **required** | Relying-party client ID. Placeholder: `CHANGE_ME`. |
+| `OIDC_CLIENT_SECRET` | — | **required** | Relying-party client secret. Placeholder: `CHANGE_ME`. |
+| `OIDC_REDIRECT_URL` | — | **required** | Callback URL registered with the IdP, e.g. `https://airllm.example.com/auth/callback`. |
+| `OIDC_ROLES_CLAIM` | — | **required** | ID-token claim that carries roles. Supports a string array (`["admin","viewer"]`) or an object whose keys are role names (e.g. Zitadel's `urn:zitadel:iam:org:project:roles` map). |
+| `OIDC_SCOPES` | `openid profile email` | no | Space-separated scopes to request. |
+| `OIDC_ROLE_MAP` | — | no | Optional mapping from IdP role names to AirLLM roles, as a comma-separated list of `idpRole:airllmRole` pairs, e.g. `admins:airllm_admin,devs:airllm_user`. When unset, role names are used as-is and must match `airllm_admin`, `airllm_user`, or `airllm_auditor` exactly. |
 
 Generate a production master key:
 

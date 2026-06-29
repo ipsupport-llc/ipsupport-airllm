@@ -58,8 +58,51 @@ func run() error {
 		return err
 	}
 
-	// Local-mock convenience: seed demo data + a fixed dev API key.
-	if cfg.Env == "dev" && cfg.AuthMode == "mock" {
+	// Wire the auth mode. AUTH_MODE=mock is a deprecated alias for local.
+	var authImpl auth.Authenticator
+	var loginImpl auth.LoginProvider
+	var oidcImpl interface {
+		LoginStart(http.ResponseWriter, *http.Request)
+		Callback(http.ResponseWriter, *http.Request)
+	}
+	session := auth.NewSession(cfg.SessionKey)
+	switch cfg.AuthMode {
+	case "local":
+		users := store.NewPGUsers(st)
+		la := auth.NewLocalAuth(users, session)
+		authImpl = la
+		loginImpl = la
+		if os.Getenv("AUTH_MODE") == "mock" {
+			slog.Warn("AUTH_MODE=mock is a deprecated alias for local")
+		}
+		created, gen, err := auth.EnsureBootstrapAdmin(ctx, users,
+			envOr("AIRLLM_ADMIN_USERNAME", "admin"), os.Getenv("AIRLLM_ADMIN_PASSWORD"))
+		if err != nil {
+			return fmt.Errorf("bootstrap admin: %w", err)
+		}
+		if created && gen != "" {
+			slog.Warn("bootstrap admin created (change this password)",
+				"username", envOr("AIRLLM_ADMIN_USERNAME", "admin"), "password", gen)
+		}
+	case "oidc":
+		oa, err := auth.NewOIDCAuth(ctx, auth.OIDCConfig{
+			Issuer:       cfg.OIDC.Issuer,
+			ClientID:     cfg.OIDC.ClientID,
+			ClientSecret: cfg.OIDC.ClientSecret,
+			RedirectURL:  cfg.OIDC.RedirectURL,
+			Scopes:       cfg.OIDC.Scopes,
+			RolesClaim:   cfg.OIDC.RolesClaim,
+			RoleMap:      cfg.OIDC.RoleMap,
+		}, store.NewPGUsers(st), session)
+		if err != nil {
+			return fmt.Errorf("oidc init: %w", err)
+		}
+		authImpl = oa
+		oidcImpl = oa
+	}
+
+	// Local-mode convenience: seed demo data + a fixed dev API key.
+	if cfg.Env == "dev" && cfg.AuthMode == "local" {
 		token, err := seed.Dev(ctx, st)
 		if err != nil {
 			return err
@@ -120,19 +163,11 @@ func run() error {
 		Limiter:   limits.New(st.RDB),
 		Pricing:   priceTable,
 		Sealer:    sealer,
+		Auth:      authImpl,
+		Login:     loginImpl,
+		OIDC:      oidcImpl,
 		Capture:   capturePipeline,
 		Blob:      blobStore,
-	}
-
-	// Control-plane auth. The local mock uses password login with random
-	// credentials; real OIDC is wired on the k8s deploy.
-	if cfg.AuthMode == "mock" {
-		mockAuth, creds := auth.NewMock()
-		deps.Auth = mockAuth
-		deps.Login = mockAuth
-		for _, c := range creds {
-			slog.Warn("mock login credential (dev only)", "username", c.Username, "password", c.Password, "admin", c.Admin)
-		}
 	}
 
 	apiSrv := httpapi.NewServer(cfg, st, deps)
@@ -209,6 +244,13 @@ func run() error {
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)
 	}
+}
+
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
 }
 
 // secondpassStoreAdapter adapts capture.PGInserter to secondpass.Store.

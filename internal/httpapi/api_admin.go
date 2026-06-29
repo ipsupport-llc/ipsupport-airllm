@@ -13,6 +13,10 @@ import (
 func (s *Server) adminRoutes() {
 	a := s.requireAdmin
 	s.mux.HandleFunc("GET /api/admin/users", a(s.handleAdminUsers))
+	s.mux.HandleFunc("POST /api/admin/users", a(s.handleCreateUser))
+	s.mux.HandleFunc("PUT /api/admin/users/{id}", a(s.handleUpdateUser))
+	s.mux.HandleFunc("POST /api/admin/users/{id}/password", a(s.handleResetPassword))
+	s.mux.HandleFunc("DELETE /api/admin/users/{id}", a(s.handleDeleteUser))
 	s.mux.HandleFunc("GET /api/admin/keys", a(s.handleAdminKeys))
 	s.mux.HandleFunc("POST /api/admin/keys/{id}/revoke", a(s.handleAdminRevokeKey))
 	s.mux.HandleFunc("GET /api/admin/usage", a(s.handleAdminUsage))
@@ -50,22 +54,26 @@ func (s *Server) adminRoutes() {
 
 func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.st.PG.Query(r.Context(),
-		`SELECT subject, email, roles, created_at FROM users ORDER BY created_at`)
+		`SELECT id::text, subject, email, display, roles, disabled, auth_source, created_at FROM users ORDER BY created_at`)
 	if err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to list users")
 		return
 	}
 	defer rows.Close()
 	type user struct {
-		Subject   string    `json:"subject"`
-		Email     string    `json:"email"`
-		Roles     []string  `json:"roles"`
-		CreatedAt time.Time `json:"created_at"`
+		ID         string    `json:"id"`
+		Subject    string    `json:"subject"`
+		Email      string    `json:"email"`
+		Display    string    `json:"display"`
+		Roles      []string  `json:"roles"`
+		Disabled   bool      `json:"disabled"`
+		AuthSource string    `json:"auth_source"`
+		CreatedAt  time.Time `json:"created_at"`
 	}
 	out := []user{}
 	for rows.Next() {
 		var u user
-		if err := rows.Scan(&u.Subject, &u.Email, &u.Roles, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Subject, &u.Email, &u.Display, &u.Roles, &u.Disabled, &u.AuthSource, &u.CreatedAt); err != nil {
 			writeControlError(w, http.StatusInternalServerError, "failed to read users")
 			return
 		}

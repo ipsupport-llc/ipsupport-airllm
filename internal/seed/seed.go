@@ -1,7 +1,7 @@
 // Package seed inserts demo data for the local mock: a dev admin user, a
 // permissive role policy, the mock provider, a model alias, and a single
 // API key with a fixed, well-known token. It is idempotent and intended
-// ONLY for ENV=dev + AUTH_MODE=mock.
+// ONLY for ENV=dev + AUTH_MODE=local.
 package seed
 
 import (
@@ -9,12 +9,17 @@ import (
 	"fmt"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/apikey"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/auth"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 )
 
 // DevToken is the fixed, well-known API key seeded in the local mock.
 // It is NOT a secret and must never be used outside local development.
 const DevToken = "air_dev_demo00000000000000000000000000000z"
+
+// DevPassword is the fixed password for the seeded demo users (operator,
+// auditor, dev-admin). DEV ONLY — never used outside local development.
+const DevPassword = "devpass123"
 
 // Dev seeds idempotent demo data and returns the dev API token.
 func Dev(ctx context.Context, st *store.Store) (string, error) {
@@ -32,6 +37,22 @@ func Dev(ctx context.Context, st *store.Store) (string, error) {
 		VALUES ('dev-auditor', 'auditor@local', 'Dev Auditor', ARRAY['airllm_auditor'])
 		ON CONFLICT (subject) DO UPDATE SET updated_at = now()`); err != nil {
 		return "", fmt.Errorf("seed auditor user: %w", err)
+	}
+
+	devHash, err := auth.HashPassword(DevPassword)
+	if err != nil {
+		return "", fmt.Errorf("seed password hash: %w", err)
+	}
+	if _, err := st.PG.Exec(ctx, `
+		INSERT INTO users (subject, email, display, roles, password_hash, password_set_at)
+		VALUES ('operator', 'operator@local', 'Dev Operator', ARRAY['airllm_user'], $1, now())
+		ON CONFLICT (subject) DO NOTHING`, devHash); err != nil {
+		return "", fmt.Errorf("seed operator user: %w", err)
+	}
+	if _, err := st.PG.Exec(ctx, `
+		UPDATE users SET password_hash = $1, password_set_at = now()
+		WHERE subject IN ('dev-admin','dev-auditor','operator') AND password_hash = ''`, devHash); err != nil {
+		return "", fmt.Errorf("seed demo passwords: %w", err)
 	}
 
 	if _, err := st.PG.Exec(ctx, `

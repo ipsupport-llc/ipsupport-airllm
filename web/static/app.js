@@ -44,6 +44,7 @@ function fmtLimits(lim) {
 }
 
 let me = null;
+let authMode = { mode: "local" };
 
 // isAuditor returns true when the signed-in user holds the auditor or admin
 // role. Used to gate the Captures nav link and route.
@@ -51,7 +52,8 @@ function isAuditor() { return me && (me.is_admin || me.is_auditor); }
 
 // ---------- bootstrap ----------
 async function init() {
-  const r = await api("GET", "/api/me");
+  const [r, modeR] = await Promise.all([api("GET", "/api/me"), api("GET", "/api/auth/mode")]);
+  authMode = modeR.data || { mode: "local" };
   if (r.status === 401) { renderLogin(); return; }
   if (!r.ok) { app.innerHTML = `<div class="login-wrap"><div class="login-card"><h1>AirLLM</h1><p>Backend unavailable.</p></div></div>`; return; }
   me = r.data;
@@ -60,6 +62,17 @@ async function init() {
 
 // ---------- login ----------
 function renderLogin() {
+  if (authMode.mode === "oidc") {
+    app.innerHTML = `
+    <div class="login-wrap">
+      <div class="login-card">
+        <h1>Air<span>LLM</span></h1>
+        <p>Sign in to the gateway console.</p>
+        <a class="btn" href="${esc(authMode.sso_url || "/auth/sso")}" style="width:100%;text-align:center;display:block">Sign in with SSO</a>
+      </div>
+    </div>`;
+    return;
+  }
   app.innerHTML = `
     <div class="login-wrap">
       <div class="login-card">
@@ -108,15 +121,30 @@ function renderShell() {
         </nav>
         <div class="sidebar-foot">
           <div class="who">${esc(me.subject)}</div>
-          <div>${(me.roles || []).join(", ") || "no roles"}</div>
+          <div>${esc((me.roles || []).join(", ")) || "no roles"}</div>
+          ${authMode.mode !== "oidc" ? `<button class="btn ghost sm" id="change-pw" style="margin-top:.3rem">Change password</button>` : ""}
           <button class="btn ghost sm" id="logout" style="margin-top:.6rem">Sign out</button>
         </div>
       </aside>
       <main class="main"><div id="view"></div></main>
     </div>`;
+  const cpBtn = $("#change-pw");
+  if (cpBtn) cpBtn.addEventListener("click", changePassword);
   $("#logout").addEventListener("click", async () => { await api("POST", "/auth/logout"); me = null; renderLogin(); });
   window.onhashchange = route;
   route();
+}
+
+function changePassword() {
+  modalForm("Change password", [
+    { name: "current", label: "Current password", type: "password", value: "" },
+    { name: "new", label: "New password", type: "password", value: "" },
+  ], async (v) => {
+    if (!v.current || !v["new"]) { toast("Both fields are required", "err"); return false; }
+    const x = await api("POST", "/api/me/password", { current: v.current, new: v["new"] });
+    if (x.ok) { toast("Password changed"); return true; }
+    toast((x.data && x.data.error) || "Failed", "err"); return false;
+  });
 }
 
 function setActiveNav() {
@@ -621,10 +649,73 @@ async function adminUsage(c) {
 async function adminUsers(c) {
   const r = await api("GET", "/api/admin/users");
   const users = (r.data && r.data.users) || [];
-  c.innerHTML = panelTable("Users", ["Subject", "Email", "Roles", "Created"],
-    users.map((u) => `<tr><td>${esc(u.subject)}</td><td>${esc(u.email)}</td>
-      <td>${(u.roles || []).map((x) => `<span class="badge ${x === "airllm_admin" ? "admin" : "neutral"}">${esc(x)}</span>`).join(" ")}</td>
-      <td>${fmtTime(u.created_at)}</td></tr>`));
+  c.innerHTML = `<div class="row" style="margin-bottom:1rem"><button class="btn sm" id="new-user">New user</button></div>` +
+    panelTable("Users", ["Subject", "Email", "Roles", "Auth", "Status", "Created", ""],
+      users.map((u) => `<tr>
+        <td>${esc(u.subject)}</td>
+        <td>${esc(u.email)}</td>
+        <td>${(u.roles || []).map((x) => `<span class="badge ${x === "airllm_admin" ? "admin" : "neutral"}">${esc(x)}</span>`).join(" ")}</td>
+        <td>${esc(u.auth_source || "local")}</td>
+        <td>${u.disabled ? `<span class="badge revoked">disabled</span>` : `<span class="badge active">active</span>`}</td>
+        <td>${fmtTime(u.created_at)}</td>
+        <td style="text-align:right">
+          <button class="btn ghost sm" data-edit-user='${esc(JSON.stringify(u))}'>Edit</button>
+          <button class="btn ghost sm" data-reset-user="${esc(u.id)}">Reset pw</button>
+          <button class="btn danger sm" data-del-user="${esc(u.id)}">Delete</button>
+        </td></tr>`));
+  $("#new-user").addEventListener("click", () => editUser(c, null));
+  document.querySelectorAll("[data-edit-user]").forEach((b) =>
+    b.addEventListener("click", () => editUser(c, JSON.parse(b.getAttribute("data-edit-user")))));
+  document.querySelectorAll("[data-reset-user]").forEach((b) =>
+    b.addEventListener("click", () => resetUserPassword(c, b.getAttribute("data-reset-user"))));
+  document.querySelectorAll("[data-del-user]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("Delete user " + b.getAttribute("data-del-user") + "?")) return;
+    const x = await api("DELETE", `/api/admin/users/${encodeURIComponent(b.getAttribute("data-del-user"))}`);
+    if (x.ok) { toast("User deleted"); adminUsers(c); }
+    else toast((x.data && x.data.error) || "Failed", "err");
+  }));
+}
+
+async function editUser(c, u) {
+  const rolesR = await api("GET", "/api/admin/roles");
+  const availRoles = ((rolesR.data && rolesR.data.roles) || []).map((rp) => rp.role);
+  const hint = availRoles.length ? ` (available: ${availRoles.join(", ")})` : "";
+  const isNew = !u;
+  const fields = [];
+  if (isNew) fields.push({ name: "username", label: "Username", value: "" });
+  fields.push(
+    { name: "email", label: "Email", value: u ? (u.email || "") : "" },
+    { name: "display", label: "Display name", value: u ? (u.display || "") : "" },
+    { name: "roles", label: `Roles (comma-separated)${hint}`, value: u ? (u.roles || []).join(", ") : "" },
+    { name: "disabled", label: "Disabled", type: "checkbox", value: u ? !!u.disabled : false },
+  );
+  if (isNew) fields.push({ name: "password", label: "Password", type: "password", value: "" });
+  modalForm(isNew ? "New user" : `Edit user ${u.subject}`, fields, async (v) => {
+    const roles = v.roles.split(",").map((s) => s.trim()).filter(Boolean);
+    let x;
+    if (isNew) {
+      x = await api("POST", "/api/admin/users", {
+        username: v.username, email: v.email, display: v.display, roles, password: v.password,
+      });
+    } else {
+      x = await api("PUT", `/api/admin/users/${encodeURIComponent(u.id)}`, {
+        email: v.email, display: v.display, roles, disabled: v.disabled,
+      });
+    }
+    if (x.ok) { toast(isNew ? "User created" : "User saved"); adminUsers(c); return true; }
+    toast((x.data && x.data.error) || "Failed", "err"); return false;
+  });
+}
+
+function resetUserPassword(_c, id) {
+  modalForm("Reset password", [
+    { name: "password", label: "New password", type: "password", value: "" },
+  ], async (v) => {
+    if (!v.password) { toast("Password is required", "err"); return false; }
+    const x = await api("POST", `/api/admin/users/${encodeURIComponent(id)}/password`, { password: v.password });
+    if (x.ok) { toast("Password reset"); return true; }
+    toast((x.data && x.data.error) || "Failed", "err"); return false;
+  });
 }
 
 async function adminKeys(c) {

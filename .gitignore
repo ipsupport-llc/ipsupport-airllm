@@ -19,3 +19,6 @@
 
 # local capture blob store (dev)
 capture-blobs/
+
+# Local Claude Code state
+.claude/

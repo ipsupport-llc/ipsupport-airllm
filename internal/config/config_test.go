@@ -17,6 +17,15 @@ func setBase(t *testing.T) {
 	t.Setenv("ENV", "")
 	t.Setenv("AUTH_MODE", "")
 	t.Setenv("AIRLLM_MASTER_KEY", "")
+	t.Setenv("AIRLLM_SESSION_KEY", "")
+	// Clear OIDC vars so they don't bleed into non-OIDC tests.
+	t.Setenv("OIDC_ISSUER", "")
+	t.Setenv("OIDC_CLIENT_ID", "")
+	t.Setenv("OIDC_CLIENT_SECRET", "")
+	t.Setenv("OIDC_REDIRECT_URL", "")
+	t.Setenv("OIDC_ROLES_CLAIM", "")
+	t.Setenv("OIDC_SCOPES", "")
+	t.Setenv("OIDC_ROLE_MAP", "")
 }
 
 func TestLoadDefaults(t *testing.T) {
@@ -34,8 +43,8 @@ func TestLoadDefaults(t *testing.T) {
 	if c.Env != "dev" {
 		t.Errorf("Env default = %q, want dev", c.Env)
 	}
-	if c.AuthMode != "mock" {
-		t.Errorf("AuthMode default = %q, want mock", c.AuthMode)
+	if c.AuthMode != "local" {
+		t.Errorf("AuthMode default = %q, want local", c.AuthMode)
 	}
 	// dev derives a deterministic insecure key so sealed creds survive restarts.
 	if !c.MasterKeyDev {
@@ -114,5 +123,94 @@ func TestLoadProdRequiresMasterKey(t *testing.T) {
 	t.Setenv("ENV", "prod")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected error: AIRLLM_MASTER_KEY is required in prod")
+	}
+}
+
+func TestSessionKeyDerivedAndStable(t *testing.T) {
+	setBase(t)
+	c1, _ := Load()
+	c2, _ := Load()
+	if len(c1.SessionKey) != 32 {
+		t.Fatalf("session key length = %d", len(c1.SessionKey))
+	}
+	if string(c1.SessionKey) != string(c2.SessionKey) {
+		t.Error("derived session key must be deterministic across loads")
+	}
+}
+
+func TestSessionKeyOverride(t *testing.T) {
+	setBase(t)
+	raw := make([]byte, 32)
+	t.Setenv("AIRLLM_SESSION_KEY", base64.StdEncoding.EncodeToString(raw))
+	c, err := Load()
+	if err != nil || string(c.SessionKey) != string(raw) {
+		t.Fatalf("override not honored: err=%v", err)
+	}
+}
+
+func TestAuthModeNormalizesMockToLocal(t *testing.T) {
+	setBase(t)
+	t.Setenv("AUTH_MODE", "mock")
+	c, err := Load()
+	if err != nil || c.AuthMode != "local" {
+		t.Fatalf("mock must normalize to local, got %q err=%v", c.AuthMode, err)
+	}
+}
+
+func TestAuthModeRejectsUnknown(t *testing.T) {
+	setBase(t)
+	t.Setenv("AUTH_MODE", "ldap")
+	if _, err := Load(); err == nil {
+		t.Fatal("unknown AUTH_MODE must error")
+	}
+}
+
+func TestOIDCModeRequiresVars(t *testing.T) {
+	setBase(t)
+	t.Setenv("AUTH_MODE", "oidc")
+	// No OIDC vars set — must error.
+	if _, err := Load(); err == nil {
+		t.Fatal("AUTH_MODE=oidc without OIDC vars must error")
+	}
+}
+
+func TestOIDCModeWithAllVars(t *testing.T) {
+	setBase(t)
+	t.Setenv("AUTH_MODE", "oidc")
+	t.Setenv("OIDC_ISSUER", "https://idp.example.com")
+	t.Setenv("OIDC_CLIENT_ID", "client-id")
+	t.Setenv("OIDC_CLIENT_SECRET", "client-secret")
+	t.Setenv("OIDC_REDIRECT_URL", "https://app.example.com/auth/callback")
+	t.Setenv("OIDC_ROLES_CLAIM", "roles")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load with all OIDC vars: %v", err)
+	}
+	if c.OIDC.Issuer != "https://idp.example.com" {
+		t.Errorf("OIDC.Issuer = %q", c.OIDC.Issuer)
+	}
+	if len(c.OIDC.Scopes) == 0 {
+		t.Error("OIDC.Scopes must default to openid profile email")
+	}
+}
+
+func TestOIDCRoleMap(t *testing.T) {
+	setBase(t)
+	t.Setenv("AUTH_MODE", "oidc")
+	t.Setenv("OIDC_ISSUER", "https://idp.example.com")
+	t.Setenv("OIDC_CLIENT_ID", "client-id")
+	t.Setenv("OIDC_CLIENT_SECRET", "client-secret")
+	t.Setenv("OIDC_REDIRECT_URL", "https://app.example.com/auth/callback")
+	t.Setenv("OIDC_ROLES_CLAIM", "roles")
+	t.Setenv("OIDC_ROLE_MAP", "admins:airllm_admin,devs:airllm_user")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.OIDC.RoleMap["admins"] != "airllm_admin" {
+		t.Errorf("RoleMap[admins] = %q", c.OIDC.RoleMap["admins"])
+	}
+	if c.OIDC.RoleMap["devs"] != "airllm_user" {
+		t.Errorf("RoleMap[devs] = %q", c.OIDC.RoleMap["devs"])
 	}
 }
