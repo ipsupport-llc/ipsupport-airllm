@@ -30,6 +30,7 @@ Read by `internal/config` at startup. Invalid values fail fast.
 | Variable | Default | Notes |
 |----------|---------|-------|
 | `APP_BIND` | `127.0.0.1:8080` | Host interface the gateway publishes on. See [`deploy/.env.example`](../deploy/.env.example). Never set this to `0.0.0.0` on a host with a public IP. |
+| `GF_SECURITY_ADMIN_PASSWORD` | `admin` | Grafana admin password when the `metrics` compose profile is active. **Change on any real deploy.** No effect unless Grafana is running. |
 
 ### OIDC settings (required when `AUTH_MODE=oidc`)
 
@@ -48,6 +49,39 @@ Generate a production master key:
 ```sh
 openssl rand -base64 32
 ```
+
+## Metrics endpoint and compose profile
+
+### `/metrics` endpoint
+
+`GET /metrics` returns Prometheus text-format metrics on the same listener as
+the rest of the API. It is **unauthenticated** (mirrors `/healthz` and
+`/readyz`) so that the in-cluster Prometheus scraper can reach it without an
+API key.
+
+> **Internal-scrape only — do not route `/metrics` through the public
+> ingress.** The endpoint exposes usage volume and latency (not secrets), but
+> traffic patterns are still operator-sensitive. In kubernetes a
+> `ServiceMonitor` scrapes it inside the cluster; in compose Prometheus reaches
+> it over the container network.
+
+### Compose `metrics` profile
+
+Adds Prometheus and Grafana as loopback-bound services:
+
+```sh
+docker compose -f deploy/docker-compose.yml --profile metrics up
+```
+
+| Service | Host binding | Notes |
+|---------|-------------|-------|
+| `prometheus` | `127.0.0.1:9090` | Scrapes `app:8080/metrics` inside the container network |
+| `grafana` | `127.0.0.1:3000` | Pre-provisioned with the AirLLM Overview dashboard |
+
+Grafana admin credentials: username `admin`, password controlled by
+`GF_SECURITY_ADMIN_PASSWORD` (default `admin` — **change on any real
+deploy**). The dashboard datasource is a `${DS_PROMETHEUS}` variable so the
+same JSON can be imported into any Grafana instance.
 
 ## Runtime settings
 

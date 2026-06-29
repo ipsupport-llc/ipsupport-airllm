@@ -92,3 +92,27 @@ DLP, capture, and second-pass policy are cached behind atomic pointers and
 reloaded when saved via the admin API, so policy changes take effect on the
 next request or job without a restart. Provider edits rebuild the registry the
 same way.
+
+## Observability
+
+Two surfaces, one source of truth each:
+
+- **Prometheus `/metrics`** — `GET /metrics` exposes `airllm_*` counters,
+  histograms, and gauges (unauthenticated; internal-scrape only). Per-component
+  histograms (`airllm_component_duration_seconds{component=routing|limits|dlp|provider}`)
+  give per-stage latency breakdowns. `airllm_dlp_model_requests_inflight` tracks
+  in-flight BERT scans — the primary saturation indicator when the DLP sidecar
+  is the bottleneck.
+
+- **Grafana dashboards** — JSON in `deploy/grafana/dashboards/`, datasource
+  wired via a `${DS_PROMETHEUS}` template variable (no hardcoded UID). Bring up
+  the full stack locally with
+  `docker compose --profile metrics up` (Prometheus at `127.0.0.1:9090`,
+  Grafana at `127.0.0.1:3000`). On a real deploy the cluster's Prometheus and
+  Grafana are used instead.
+
+- **In-console sparklines** — the Dashboard page renders four inline SVG
+  sparklines (tokens, cost, requests, p95 latency — hourly for the last 24 h)
+  sourced from `GET /api/usage/series` (or `/api/admin/usage/series` for
+  admins). These query the existing `usage_ledger` table directly — no
+  Prometheus dependency in the browser.
