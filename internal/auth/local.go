@@ -20,7 +20,8 @@ func (l *LocalAuth) Login(username, password string) (Principal, bool) {
 		checkAgainstDummy(password) // constant-ish time on not-found
 		return Principal{}, false
 	}
-	if u.Disabled || !CheckPassword(u.PasswordHash, password) {
+	pwOK := CheckPassword(u.PasswordHash, password)
+	if u.Disabled || !pwOK {
 		return Principal{}, false
 	}
 	return Principal{Subject: u.Subject, Email: u.Email, Roles: u.Roles}, true

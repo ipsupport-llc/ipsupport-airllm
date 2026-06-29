@@ -69,7 +69,10 @@ func (o *OIDCAuth) LoginStart(w http.ResponseWriter, r *http.Request) {
 
 // Callback completes the flow, upserts the user, and sets the session cookie.
 func (o *OIDCAuth) Callback(w http.ResponseWriter, r *http.Request) {
-	if c, _ := r.Cookie("air_oidc_state"); c == nil || c.Value != r.URL.Query().Get("state") {
+	if qs := r.URL.Query().Get("state"); qs == "" {
+		http.Error(w, "bad state", http.StatusBadRequest)
+		return
+	} else if c, _ := r.Cookie("air_oidc_state"); c == nil || c.Value == "" || c.Value != qs {
 		http.Error(w, "bad state", http.StatusBadRequest)
 		return
 	}
@@ -87,7 +90,7 @@ func (o *OIDCAuth) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	nonce, _ := r.Cookie("air_oidc_nonce")
-	if nonce == nil || idt.Nonce != nonce.Value {
+	if nonce == nil || nonce.Value == "" || idt.Nonce != nonce.Value {
 		http.Error(w, "bad nonce", http.StatusUnauthorized)
 		return
 	}
@@ -104,6 +107,9 @@ func (o *OIDCAuth) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	o.SetSession(w, p)
+	for _, name := range []string{"air_oidc_state", "air_oidc_nonce", "air_oidc_pkce"} {
+		http.SetCookie(w, &http.Cookie{Name: name, Path: "/", HttpOnly: true, MaxAge: -1})
+	}
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 

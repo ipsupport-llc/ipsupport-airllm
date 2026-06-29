@@ -51,7 +51,7 @@ func (p *PGUsers) UpsertOIDC(ctx context.Context, pr auth.Principal) (string, er
 	err := p.st.PG.QueryRow(ctx, `
 		INSERT INTO users (subject, email, display, roles, auth_source)
 		VALUES ($1, $2, $1, $3, 'oidc')
-		ON CONFLICT (subject) DO UPDATE SET email=EXCLUDED.email, roles=EXCLUDED.roles, updated_at=now()
+		ON CONFLICT (subject) DO UPDATE SET email=EXCLUDED.email, roles=EXCLUDED.roles, auth_source='oidc', updated_at=now()
 		RETURNING id::text`, pr.Subject, pr.Email, pr.Roles).Scan(&id)
 	return id, err
 }

@@ -66,11 +66,16 @@ func (s *Server) requireAuditor(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) ensureUser(ctx context.Context, p auth.Principal) (string, error) {
+	// Resolve the user id by subject. On an existing row, touch only updated_at —
+	// never overwrite roles/email from the stateless session cookie, or an admin's
+	// role change to an active user would be silently reverted on their next request.
+	// (OIDC refreshes roles in the callback's UpsertOIDC before the session is set;
+	// local users are admin-managed in the DB.)
 	var id string
 	err := s.st.PG.QueryRow(ctx, `
 		INSERT INTO users (subject, email, display, roles)
 		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (subject) DO UPDATE SET email = EXCLUDED.email, roles = EXCLUDED.roles, updated_at = now()
+		ON CONFLICT (subject) DO UPDATE SET updated_at = now()
 		RETURNING id::text`,
 		p.Subject, p.Email, p.Subject, p.Roles,
 	).Scan(&id)

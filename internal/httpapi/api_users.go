@@ -104,6 +104,17 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		writeControlError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
+	known, err := s.knownRoles(r)
+	if err != nil {
+		writeControlError(w, http.StatusInternalServerError, "failed to load roles")
+		return
+	}
+	for _, role := range body.Roles {
+		if !known[role] {
+			writeControlError(w, http.StatusBadRequest, fmt.Sprintf("unknown role %q", role))
+			return
+		}
+	}
 	if err := s.guardLastAdmin(r, id, body.Roles, body.Disabled); err != nil {
 		writeControlError(w, http.StatusBadRequest, err.Error())
 		return

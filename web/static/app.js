@@ -121,7 +121,7 @@ function renderShell() {
         </nav>
         <div class="sidebar-foot">
           <div class="who">${esc(me.subject)}</div>
-          <div>${(me.roles || []).join(", ") || "no roles"}</div>
+          <div>${esc((me.roles || []).join(", ")) || "no roles"}</div>
           ${authMode.mode !== "oidc" ? `<button class="btn ghost sm" id="change-pw" style="margin-top:.3rem">Change password</button>` : ""}
           <button class="btn ghost sm" id="logout" style="margin-top:.6rem">Sign out</button>
         </div>
