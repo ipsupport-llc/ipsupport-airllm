@@ -130,6 +130,14 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
+// Flush forwards to the underlying ResponseWriter so SSE streaming handlers
+// that type-assert http.Flusher keep working through the metrics wrapper.
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // ingressOf maps a request path to a metrics ingress label.
 func ingressOf(path string) string {
 	switch path {
