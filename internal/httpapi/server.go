@@ -102,6 +102,9 @@ func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 	return s
 }
 
+// Metrics exposes the server's metrics for wiring external gauge sources in main.
+func (s *Server) Metrics() *metrics.Metrics { return s.metrics }
+
 // reg returns the current provider registry.
 func (s *Server) reg() *providers.Registry { return s.regPtr.Load() }
 
