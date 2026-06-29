@@ -32,6 +32,17 @@ function toast(msg, kind = "ok") {
 function fmtUSD(n) { return "$" + Number(n || 0).toFixed(4); }
 function fmtNum(n) { return Number(n || 0).toLocaleString("en-US"); }
 function fmtTime(s) { return s ? new Date(s).toLocaleString() : "—"; }
+// sparkline renders an inline SVG polyline from numeric values. No deps.
+function sparkline(values, opts) {
+  const o = Object.assign({ w: 220, h: 40, stroke: "var(--accent)" }, opts || {});
+  const vals = (values && values.length) ? values : [0];
+  const max = Math.max(...vals, 1), min = Math.min(...vals, 0);
+  const span = (max - min) || 1;
+  const step = vals.length > 1 ? o.w / (vals.length - 1) : o.w;
+  const pts = vals.map((v, i) => `${(i * step).toFixed(1)},${(o.h - ((v - min) / span) * o.h).toFixed(1)}`).join(" ");
+  return `<svg viewBox="0 0 ${o.w} ${o.h}" width="100%" height="${o.h}" preserveAspectRatio="none" style="display:block">
+    <polyline fill="none" stroke="${esc(o.stroke)}" stroke-width="2" points="${pts}" /></svg>`;
+}
 // Render a role limits object ({tokens:{24h:N}, usd:{7d:N}}) as readable text.
 function fmtLimits(lim) {
   const parts = [];
@@ -178,12 +189,29 @@ function route() {
 // ---------- dashboard ----------
 async function viewDashboard(view) {
   view.innerHTML = `<h1 class="page-title">Dashboard</h1><div id="dash"></div>`;
-  const [u, k] = await Promise.all([api("GET", "/api/usage"), api("GET", "/api/keys")]);
+  const seriesPath = me.is_admin ? "/api/admin/usage/series" : "/api/usage/series";
+  const [u, k, sr] = await Promise.all([api("GET", "/api/usage"), api("GET", "/api/keys"), api("GET", seriesPath)]);
   const usage = u.data || {};
   const keys = (k.data && k.data.keys) || [];
   const active = keys.filter((x) => x.status === "active").length;
+  const series = (sr.data && sr.data.series) || [];
+  const spark = (label, key, fmt) => {
+    const vals = series.map((p) => Number(p[key]) || 0);
+    const last = vals.length ? vals[vals.length - 1] : 0;
+    return `<div class="card"><div class="sub">${esc(label)} · 24h</div>
+      <div class="value">${fmt(last)}</div>${sparkline(vals)}</div>`;
+  };
+  const sparksHtml = series.length
+    ? `<div class="cards" style="margin-top:1rem">
+        ${spark("Tokens/hr", "tokens", fmtNum)}
+        ${spark("Cost/hr", "cost_usd", (v) => "$" + Number(v).toFixed(4))}
+        ${spark("Requests/hr", "requests", fmtNum)}
+        ${spark("p95 latency", "p95_ms", (v) => fmtNum(v) + " ms")}
+      </div>`
+    : `<div class="empty" style="margin-top:1rem">No usage history yet.</div>`;
   $("#dash").innerHTML = `
     ${usageCards(usage)}
+    ${sparksHtml}
     <div class="panel">
       <div class="panel-head"><h2>Your keys</h2><a class="btn sm" href="#/keys">Manage</a></div>
       <div class="empty">${active} active key${active === 1 ? "" : "s"} of ${keys.length} total.</div>

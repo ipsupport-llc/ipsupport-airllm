@@ -20,6 +20,7 @@ func (s *Server) adminRoutes() {
 	s.mux.HandleFunc("GET /api/admin/keys", a(s.handleAdminKeys))
 	s.mux.HandleFunc("POST /api/admin/keys/{id}/revoke", a(s.handleAdminRevokeKey))
 	s.mux.HandleFunc("GET /api/admin/usage", a(s.handleAdminUsage))
+	s.mux.HandleFunc("GET /api/admin/usage/series", a(s.handleAdminUsageSeries))
 	s.mux.HandleFunc("GET /api/admin/audit", a(s.handleAdminAudit))
 	s.mux.HandleFunc("GET /api/admin/roles", a(s.handleAdminRoles))
 	s.mux.HandleFunc("PUT /api/admin/roles/{role}", a(s.handleAdminPutRole))
@@ -494,6 +495,17 @@ func (s *Server) handleAdminPutPricing(w http.ResponseWriter, r *http.Request) {
 	s.pricing.Set(model, pricing.Price{InputPer1M: body.InputPer1M, OutputPer1M: body.OutputPer1M})
 	s.audit(r.Context(), sess.principal.Subject, "pricing.put", model, body)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
+}
+
+// handleAdminUsageSeries returns global hourly usage buckets.
+func (s *Server) handleAdminUsageSeries(w http.ResponseWriter, r *http.Request) {
+	hours := clampHours(r.URL.Query().Get("hours"))
+	series, err := s.usageSeries(r.Context(), ``, hours)
+	if err != nil {
+		writeControlError(w, http.StatusInternalServerError, "failed to load usage series")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"series": series})
 }
 
 // audit records a control-plane mutation. Best-effort. When auditHook is set

@@ -104,3 +104,54 @@ ordered-on-boot migrator.
   supplied via env vars) are logged once at `WARN` on first boot; treat any log
   containing credentials as dev-only. Env-provided passwords are never logged.
 - The capture pipeline exposes a dropped-records counter for overload visibility.
+
+### Prometheus metrics
+
+`GET /metrics` returns the gateway's Prometheus counters, histograms, and
+gauges in text format. It is unauthenticated and must be scraped **inside the
+cluster or container network — never via the public ingress** (see
+[Configuration → Metrics endpoint](configuration.md#metrics-endpoint-and-compose-profile)).
+
+#### Metric catalog
+
+All metrics are prefixed `airllm_`.
+
+| Metric | Type | Labels | What it counts |
+|--------|------|--------|----------------|
+| `airllm_http_requests_total` | counter | `ingress`, `status` | Every HTTP request, labeled by ingress (`openai` / `anthropic` / `control`) and HTTP status code |
+| `airllm_http_request_duration_seconds` | histogram | `ingress` | End-to-end request duration |
+| `airllm_component_duration_seconds` | histogram | `component` | Per-stage latency: `routing`, `limits`, `dlp`, `provider` |
+| `airllm_tokens_total` | counter | `ingress`, `direction` | Tokens metered; `direction` is `prompt` or `completion` |
+| `airllm_cost_usd_total` | counter | `ingress` | Cost in USD metered per ingress |
+| `airllm_rate_limited_total` | counter | `reason` | 429 responses: `usage_limit` (rolling window) or `provider_busy` (all targets saturated) |
+| `airllm_dlp_model_requests_inflight` | gauge | — | In-flight BERT-NER sidecar scans (the saturation indicator for the DLP bottleneck) |
+| `airllm_dlp_model_duration_seconds` | histogram | — | Per-message BERT scan duration |
+| `airllm_capture_dropped` | gauge | — | Capture records dropped due to a full async buffer |
+
+### Grafana dashboards
+
+Dashboard JSON lives in `deploy/grafana/dashboards/`. The datasource is a
+`${DS_PROMETHEUS}` template variable — no hardcoded UID — so the file is
+portable and can be imported into any Grafana. Panels cover: request rate by
+status, p50/p95 request latency, per-component latency, token and cost rate,
+rate-limited breakdown, and BERT inflight + scan duration (the bottleneck view).
+
+To bring up the full local observability stack (Prometheus + Grafana,
+loopback-only):
+
+```sh
+docker compose -f deploy/docker-compose.yml --profile metrics up
+```
+
+On a real deploy, use the cluster's existing Prometheus and Grafana instead
+(a `ServiceMonitor` + the same dashboard JSON ship in the Helm chart, a later
+sub-project). Nothing in the repo is environment-specific.
+
+### In-console sparklines
+
+The Dashboard renders four sparklines (tokens/hour, cost/hour, requests/hour,
+p95 latency/hour) without requiring Prometheus. They are fed by the
+`usage_ledger` table via:
+
+- `GET /api/usage/series` — current user's data (last 24 h, hourly buckets).
+- `GET /api/admin/usage/series` — gateway-wide data (admin only).

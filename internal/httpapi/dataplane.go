@@ -29,16 +29,24 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeProtocolError(w, r, http.StatusForbidden, "permission_error", "model not permitted for this key: "+req.Model)
 		return
 	}
+	t0 := time.Now()
 	plan, err := s.router.Resolve(r.Context(), req.Model, ak.Policy.AllowPassthrough)
+	s.metrics.ObserveComponent("routing", time.Since(t0))
 	if err != nil {
 		writeProtocolError(w, r, http.StatusNotFound, "invalid_request_error", err.Error())
 		return
 	}
+	t0 = time.Now()
 	if msg, denied := s.limitDenied(r.Context(), ak); denied {
+		s.metrics.ObserveComponent("limits", time.Since(t0))
+		s.metrics.IncRateLimited("usage_limit")
 		writeProtocolError(w, r, http.StatusTooManyRequests, "rate_limit_error", msg)
 		return
 	}
+	s.metrics.ObserveComponent("limits", time.Since(t0))
+	t0 = time.Now()
 	blocked, msg, dlpRes := s.dlpEnforce(r.Context(), ak, "openai", &req)
+	s.metrics.ObserveComponent("dlp", time.Since(t0))
 	if blocked {
 		writeProtocolError(w, r, http.StatusBadRequest, "invalid_request_error", msg)
 		return
@@ -49,7 +57,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tp := time.Now()
 	resp, target, callErr := s.runChat(r.Context(), plan, req)
+	s.metrics.ObserveComponent("provider", time.Since(tp))
 	entry := chatEntry(ak, req.Model, target, "openai", start)
 	if callErr != nil {
 		code, typ := classifyUpstreamErr(callErr)
@@ -95,7 +105,9 @@ func (s *Server) streamChatCompletions(w http.ResponseWriter, r *http.Request, r
 		meta:  openai.StreamMeta{ID: "chatcmpl-" + newID(), Model: req.Model, Created: time.Now().Unix()},
 	}
 
+	tp := time.Now()
 	target, usage, started, err := s.runStream(r.Context(), plan, req, sink)
+	s.metrics.ObserveComponent("provider", time.Since(tp))
 	entry := chatEntry(ak, req.Model, target, "openai", start)
 
 	if err != nil {

@@ -75,6 +75,7 @@ func (s *Server) finalizeUsage(ctx context.Context, entry ledger.Entry, keyID, u
 	costMicro := s.pricing.CostMicroUSD(upstreamModel, prompt, completion)
 	entry.CostUSD = float64(costMicro) / 1e6
 	s.ledger.Record(ctx, entry)
+	s.metrics.RecordUsage(entry.IngressProtocol, prompt, completion, entry.CostUSD)
 
 	if entry.Status == http.StatusOK && (prompt > 0 || completion > 0) {
 		if err := s.limiter.Add(ctx, keyID, int64(prompt+completion), costMicro); err != nil {
@@ -126,6 +127,7 @@ func (s *Server) runChat(ctx context.Context, plan *routing.Plan, req llm.ChatRe
 	if lastErr == nil {
 		lastErr = errAllBusy
 	}
+	s.metrics.IncRateLimited("provider_busy")
 	return llm.ChatResponse{}, routing.Target{}, lastErr
 }
 
@@ -196,6 +198,7 @@ func (s *Server) runStream(ctx context.Context, plan *routing.Plan, req llm.Chat
 	if lastErr == nil {
 		lastErr = errAllBusy
 	}
+	s.metrics.IncRateLimited("provider_busy")
 	return routing.Target{}, llm.Usage{}, false, lastErr
 }
 

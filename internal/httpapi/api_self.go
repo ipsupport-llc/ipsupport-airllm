@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/apikey"
@@ -179,6 +180,69 @@ func (s *Server) usageWindows(ctx context.Context, where string, args ...any) (m
 		return nil, err
 	}
 	return map[string]windowUsage{"5h": w5, "24h": w24, "7d": w7}, nil
+}
+
+type seriesPoint struct {
+	Ts       time.Time `json:"ts"`
+	Requests int64     `json:"requests"`
+	Tokens   int64     `json:"tokens"`
+	CostUSD  float64   `json:"cost_usd"`
+	P50ms    int64     `json:"p50_ms"`
+	P95ms    int64     `json:"p95_ms"`
+}
+
+// clampHours parses the ?hours param, defaulting to 24 and capping at 168 (7d).
+func clampHours(raw string) int {
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return 24
+	}
+	if n > 168 {
+		return 168
+	}
+	return n
+}
+
+// usageSeries returns hourly usage buckets over the last `hours`. where is an
+// optional "AND user_id = $2" clause; whereArgs are bound after hours ($1).
+func (s *Server) usageSeries(ctx context.Context, where string, hours int, whereArgs ...any) ([]seriesPoint, error) {
+	args := append([]any{hours}, whereArgs...)
+	q := `
+		SELECT date_trunc('hour', ts) AS bucket,
+		       count(*),
+		       COALESCE(SUM(prompt_tokens + completion_tokens), 0),
+		       COALESCE(SUM(cost_usd), 0),
+		       COALESCE(percentile_cont(0.5)  WITHIN GROUP (ORDER BY latency_ms), 0)::bigint,
+		       COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms), 0)::bigint
+		FROM usage_ledger
+		WHERE ts > now() - make_interval(hours => $1) ` + where + `
+		GROUP BY 1 ORDER BY 1`
+	rows, err := s.st.PG.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []seriesPoint{}
+	for rows.Next() {
+		var p seriesPoint
+		if err := rows.Scan(&p.Ts, &p.Requests, &p.Tokens, &p.CostUSD, &p.P50ms, &p.P95ms); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// handleUsageSeries returns the caller's hourly usage buckets.
+func (s *Server) handleUsageSeries(w http.ResponseWriter, r *http.Request) {
+	sess, _ := sessionFrom(r.Context())
+	hours := clampHours(r.URL.Query().Get("hours"))
+	series, err := s.usageSeries(r.Context(), `AND user_id = $2`, hours, sess.userID)
+	if err != nil {
+		writeControlError(w, http.StatusInternalServerError, "failed to load usage series")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"series": series})
 }
 
 // effectivePolicyJSON merges the policies of the caller's roles into one

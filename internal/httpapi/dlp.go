@@ -265,7 +265,10 @@ func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, r
 		})
 		if cfg.ModelEnabled && cfg.ModelURL != "" {
 			mctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			mstart := time.Now()
+			s.metrics.DLPModelInc()
 			mf, err := dlp.ModelScan(mctx, s.httpc, cfg.ModelURL, cfg.ModelMinScore, content)
+			s.metrics.DLPModelDone(time.Since(mstart))
 			cancel()
 			if err != nil {
 				slog.Error("dlp model scan failed; deterministic layer only", "err", err)
