@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sync/atomic"
+	"time"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/auth"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/blob"
@@ -14,6 +15,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/config"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/ledger"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/limits"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/metrics"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/pricing"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
@@ -61,6 +63,7 @@ type Server struct {
 	capturePl     *capture.Pipeline // nil when capture is not configured
 	blobStore     blob.Store        // nil when blob store is not configured
 	captureIdx    captureReader     // nil until first audit route access (set in NewServer)
+	metrics       *metrics.Metrics
 
 	// Test hooks: non-nil values replace the real implementations in tests.
 	auditHook    func(ctx context.Context, actor, action, target string, detail any)
@@ -82,6 +85,7 @@ func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 		login:   deps.Login,
 		oidc:    deps.OIDC,
 		httpc:   &http.Client{},
+		metrics: metrics.New(),
 	}
 	s.regPtr.Store(deps.Providers)
 	s.loadDLP(context.Background())
@@ -115,17 +119,44 @@ func (s *Server) reloadProviders(ctx context.Context) error {
 // for large prompts but blocks pathological payloads.
 const maxRequestBody = 16 << 20 // 16 MiB
 
+// statusRecorder captures the response status for metrics.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+// ingressOf maps a request path to a metrics ingress label.
+func ingressOf(path string) string {
+	switch path {
+	case "/v1/chat/completions", "/v1/models":
+		return "openai"
+	case "/v1/messages":
+		return "anthropic"
+	default:
+		return "control"
+	}
+}
+
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Body != nil {
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	}
-	s.mux.ServeHTTP(w, r)
+	start := time.Now()
+	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+	s.mux.ServeHTTP(rec, r)
+	s.metrics.RecordRequest(ingressOf(r.URL.Path), rec.status, time.Since(start))
 }
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealth)
 	s.mux.HandleFunc("GET /readyz", s.handleReady)
+	s.mux.Handle("GET /metrics", s.metrics.Handler())
 
 	// Data-plane (API-key auth).
 	s.mux.HandleFunc("POST /v1/chat/completions", s.requireAPIKey(s.handleChatCompletions))
