@@ -58,7 +58,7 @@ than failing.
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/api/me` | Current principal (subject, email, roles, is_admin) |
-| `POST` | `/api/me/password` | Change own password. Body: `{"current_password","new_password"}`. Local-auth users only; OIDC-provisioned users (`auth_source=oidc`) are rejected. Requires the caller's current password (not admin-only). |
+| `POST` | `/api/me/password` | Change own password. Body: `{"current","new"}`. Local-auth users only; OIDC-provisioned users (`auth_source=oidc`) are rejected. Requires the caller's current password (not admin-only). |
 | `GET` | `/api/keys` | List the caller's API keys |
 | `POST` | `/api/keys` | Create a key (token returned once). Body: `{"name"}` |
 | `POST` | `/api/keys/{id}/revoke` | Revoke one of the caller's keys |
@@ -71,7 +71,7 @@ than failing.
 | `GET` | `/api/admin/users` | List users. Each entry now includes `disabled`, `auth_source` (`local` or `oidc`), and `display`. |
 | `POST` | `/api/admin/users` | Create a local user. Body: `{"username","email","display","roles","password"}`. Password must be ≥ 8 characters; roles must be known keys. |
 | `PUT` | `/api/admin/users/{id}` | Update `email`, `display`, `roles`, or `disabled`. Cannot set a password via this route; use the `/password` sub-resource. |
-| `POST` | `/api/admin/users/{id}/password` | Admin-reset a user's password (no current-password required). Blocked for OIDC-provisioned users. |
+| `POST` | `/api/admin/users/{id}/password` | Admin-reset a user's password (no current-password required). Body: `{"password":"..."}`. Blocked for OIDC-provisioned users. |
 | `DELETE` | `/api/admin/users/{id}` | Delete a user. Blocked if the user still owns active API keys (revoke them first). Blocked if deleting would remove the last admin. Prefer setting `disabled=true` as a non-destructive alternative. |
 | `GET` | `/api/admin/keys` | List all keys |
 | `POST` | `/api/admin/keys/{id}/revoke` | Revoke any key |

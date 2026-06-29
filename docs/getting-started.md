@@ -47,9 +47,10 @@ Open the console at <http://127.0.0.1:8080> and sign in as `admin` (or the
 name set by `AIRLLM_ADMIN_USERNAME`). (Reach a remote box via an SSH tunnel or
 `kubectl port-forward` — do not publish the port on a public NIC.)
 
-In `dev` mode, sample `operator` and `auditor` accounts are also seeded on
-first run; their generated passwords appear in the same log output. From the
-console an admin can create additional users under **Admin → Users**.
+In `dev` mode, sample `operator` (role `airllm_user`) and `auditor` (role
+`airllm_auditor`) accounts are seeded with the fixed dev-only password
+`devpass123` (a non-secret constant, never used outside local development).
+From the console an admin can create additional users under **Admin → Users**.
 
 ### Enabling OIDC
 
