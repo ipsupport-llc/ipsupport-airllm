@@ -1,8 +1,8 @@
 // Standalone screenshot tour of the AirLLM console for design review.
-// Usage: ADMIN_PASSWORD=... BASE_URL=http://10.0.0.2:8088 node shoot.js
+// Usage: ADMIN_PASSWORD=... BASE_URL=http://127.0.0.1:8080 node shoot.js
 const { chromium } = require("@playwright/test");
 
-const BASE = process.env.BASE_URL || "http://10.0.0.2:8088";
+const BASE = process.env.BASE_URL || "http://127.0.0.1:8080";
 const PW = process.env.ADMIN_PASSWORD;
 const OUT = __dirname + "/screenshots";
 

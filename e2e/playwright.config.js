@@ -8,7 +8,7 @@ module.exports = defineConfig({
   timeout: 30000,
   reporter: [["list"]],
   use: {
-    baseURL: process.env.BASE_URL || "http://10.0.0.2:8088",
+    baseURL: process.env.BASE_URL || "http://127.0.0.1:8080",
     channel: "chrome",
     headless: true,
     viewport: { width: 1280, height: 900 },
