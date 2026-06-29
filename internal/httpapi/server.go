@@ -136,6 +136,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/keys", s.requireSession(s.handleCreateKey))
 	s.mux.HandleFunc("POST /api/keys/{id}/revoke", s.requireSession(s.handleRevokeKey))
 	s.mux.HandleFunc("GET /api/usage", s.requireSession(s.handleUsage))
+	s.mux.HandleFunc("POST /api/me/password", s.requireSession(s.handleChangeOwnPassword))
 
 	s.adminRoutes()
 	s.auditRoutes()
