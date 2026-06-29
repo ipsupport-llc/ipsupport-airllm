@@ -6,7 +6,10 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"os"
+
+	"golang.org/x/crypto/hkdf"
 )
 
 // Config is the validated runtime configuration.
@@ -19,6 +22,7 @@ type Config struct {
 
 	MasterKey    []byte // 32-byte AES key for sealing provider credentials
 	MasterKeyDev bool   // true when a deterministic dev key was derived (insecure)
+	SessionKey   []byte // 32-byte HMAC key for signing session cookies
 }
 
 // Load reads configuration from the environment and validates it.
@@ -47,6 +51,12 @@ func Load() (*Config, error) {
 	}
 	c.MasterKey, c.MasterKeyDev = key, dev
 
+	sk, err := loadSessionKey(c.MasterKey)
+	if err != nil {
+		return nil, err
+	}
+	c.SessionKey = sk
+
 	return c, nil
 }
 
@@ -69,6 +79,28 @@ func loadMasterKey(envName string) ([]byte, bool, error) {
 	}
 	sum := sha256.Sum256([]byte("airllm-dev-insecure-master-key"))
 	return sum[:], true, nil
+}
+
+// loadSessionKey returns the HMAC session signing key: AIRLLM_SESSION_KEY
+// (base64, 32 bytes) when set, otherwise a deterministic key derived from the
+// master key so sessions survive restarts and replicas without a new secret.
+func loadSessionKey(master []byte) ([]byte, error) {
+	if v := os.Getenv("AIRLLM_SESSION_KEY"); v != "" {
+		b, err := base64.StdEncoding.DecodeString(v)
+		if err != nil {
+			return nil, fmt.Errorf("AIRLLM_SESSION_KEY must be base64: %w", err)
+		}
+		if len(b) != 32 {
+			return nil, fmt.Errorf("AIRLLM_SESSION_KEY must decode to 32 bytes, got %d", len(b))
+		}
+		return b, nil
+	}
+	r := hkdf.New(sha256.New, master, nil, []byte("airllm-session-v1"))
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(r, key); err != nil {
+		return nil, fmt.Errorf("derive session key: %w", err)
+	}
+	return key, nil
 }
 
 func env(key, def string) string {

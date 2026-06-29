@@ -17,6 +17,7 @@ func setBase(t *testing.T) {
 	t.Setenv("ENV", "")
 	t.Setenv("AUTH_MODE", "")
 	t.Setenv("AIRLLM_MASTER_KEY", "")
+	t.Setenv("AIRLLM_SESSION_KEY", "")
 }
 
 func TestLoadDefaults(t *testing.T) {
@@ -114,5 +115,27 @@ func TestLoadProdRequiresMasterKey(t *testing.T) {
 	t.Setenv("ENV", "prod")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected error: AIRLLM_MASTER_KEY is required in prod")
+	}
+}
+
+func TestSessionKeyDerivedAndStable(t *testing.T) {
+	setBase(t)
+	c1, _ := Load()
+	c2, _ := Load()
+	if len(c1.SessionKey) != 32 {
+		t.Fatalf("session key length = %d", len(c1.SessionKey))
+	}
+	if string(c1.SessionKey) != string(c2.SessionKey) {
+		t.Error("derived session key must be deterministic across loads")
+	}
+}
+
+func TestSessionKeyOverride(t *testing.T) {
+	setBase(t)
+	raw := make([]byte, 32)
+	t.Setenv("AIRLLM_SESSION_KEY", base64.StdEncoding.EncodeToString(raw))
+	c, err := Load()
+	if err != nil || string(c.SessionKey) != string(raw) {
+		t.Fatalf("override not honored: err=%v", err)
 	}
 }
