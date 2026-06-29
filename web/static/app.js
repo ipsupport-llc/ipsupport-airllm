@@ -41,7 +41,7 @@ function sparkline(values, opts) {
   const step = vals.length > 1 ? o.w / (vals.length - 1) : o.w;
   const pts = vals.map((v, i) => `${(i * step).toFixed(1)},${(o.h - ((v - min) / span) * o.h).toFixed(1)}`).join(" ");
   return `<svg viewBox="0 0 ${o.w} ${o.h}" width="100%" height="${o.h}" preserveAspectRatio="none" style="display:block">
-    <polyline fill="none" stroke="${o.stroke}" stroke-width="2" points="${pts}" /></svg>`;
+    <polyline fill="none" stroke="${esc(o.stroke)}" stroke-width="2" points="${pts}" /></svg>`;
 }
 // Render a role limits object ({tokens:{24h:N}, usd:{7d:N}}) as readable text.
 function fmtLimits(lim) {
@@ -198,7 +198,7 @@ async function viewDashboard(view) {
   const spark = (label, key, fmt) => {
     const vals = series.map((p) => Number(p[key]) || 0);
     const last = vals.length ? vals[vals.length - 1] : 0;
-    return `<div class="card"><div class="sub">${label} · 24h</div>
+    return `<div class="card"><div class="sub">${esc(label)} · 24h</div>
       <div class="value">${fmt(last)}</div>${sparkline(vals)}</div>`;
   };
   const sparksHtml = series.length

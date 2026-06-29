@@ -78,7 +78,7 @@ services:
     image: grafana/grafana:11.2.0
     profiles: ["metrics"]
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: "admin"   # dev-only; change on any real deploy
+      GF_SECURITY_ADMIN_PASSWORD: "${GF_SECURITY_ADMIN_PASSWORD:-admin}"   # dev-only; change on any real deploy
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro

@@ -103,7 +103,9 @@ func (s *Server) streamMessages(w http.ResponseWriter, r *http.Request, req llm.
 			"msg_"+newID(), req.Model, anthropic.EstimateInputTokens(req)),
 	}
 
+	tp := time.Now()
 	target, usage, started, err := s.runStream(r.Context(), plan, req, sink)
+	s.metrics.ObserveComponent("provider", time.Since(tp))
 	entry := chatEntry(ak, req.Model, target, "anthropic", start)
 
 	if err != nil {

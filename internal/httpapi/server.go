@@ -161,7 +161,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 	s.mux.ServeHTTP(rec, r)
-	s.metrics.RecordRequest(ingressOf(r.URL.Path), rec.status, time.Since(start))
+	switch r.URL.Path {
+	case "/metrics", "/healthz", "/readyz":
+		// infra endpoints — don't pollute request metrics
+	default:
+		s.metrics.RecordRequest(ingressOf(r.URL.Path), rec.status, time.Since(start))
+	}
 }
 
 func (s *Server) routes() {

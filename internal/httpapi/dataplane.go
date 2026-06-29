@@ -105,7 +105,9 @@ func (s *Server) streamChatCompletions(w http.ResponseWriter, r *http.Request, r
 		meta:  openai.StreamMeta{ID: "chatcmpl-" + newID(), Model: req.Model, Created: time.Now().Unix()},
 	}
 
+	tp := time.Now()
 	target, usage, started, err := s.runStream(r.Context(), plan, req, sink)
+	s.metrics.ObserveComponent("provider", time.Since(tp))
 	entry := chatEntry(ak, req.Model, target, "openai", start)
 
 	if err != nil {
