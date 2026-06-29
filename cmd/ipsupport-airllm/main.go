@@ -14,7 +14,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ipsupport-llc/ipsupport-airllm/internal/auth"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/blob"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/capture"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/config"
@@ -122,17 +121,6 @@ func run() error {
 		Sealer:    sealer,
 		Capture:   capturePipeline,
 		Blob:      blobStore,
-	}
-
-	// Control-plane auth. The local mock uses password login with random
-	// credentials; real OIDC is wired on the k8s deploy.
-	if cfg.AuthMode == "mock" {
-		mockAuth, creds := auth.NewMock()
-		deps.Auth = mockAuth
-		deps.Login = mockAuth
-		for _, c := range creds {
-			slog.Warn("mock login credential (dev only)", "username", c.Username, "password", c.Password, "admin", c.Admin)
-		}
 	}
 
 	apiSrv := httpapi.NewServer(cfg, st, deps)
