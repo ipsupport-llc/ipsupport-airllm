@@ -20,6 +20,7 @@ func (f *fakeUsers) CreateLocal(_ context.Context, u UserRow) (string, error) {
 	f.created = append(f.created, u)
 	return "new-id", nil
 }
+func (f *fakeUsers) UpsertOIDC(context.Context, Principal) (string, error) { return "oidc-id", nil }
 
 func newLocal(t *testing.T, users map[string]UserRow) *LocalAuth {
 	t.Helper()

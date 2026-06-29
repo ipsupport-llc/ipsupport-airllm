@@ -21,6 +21,12 @@ import (
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 )
 
+// oidcHandler is the interface for OIDC SSO handlers (optional — nil = no SSO routes).
+type oidcHandler interface {
+	LoginStart(http.ResponseWriter, *http.Request)
+	Callback(http.ResponseWriter, *http.Request)
+}
+
 // Deps are the runtime dependencies wired into the server.
 type Deps struct {
 	Providers *providers.Registry
@@ -29,6 +35,7 @@ type Deps struct {
 	Sealer    *secrets.Sealer
 	Auth      auth.Authenticator
 	Login     auth.LoginProvider // nil when not using password login (e.g. OIDC)
+	OIDC      oidcHandler        // nil when not using OIDC
 	Capture   *capture.Pipeline  // nil disables capture
 	Blob      blob.Store         // for audit transcript reads; nil disables body fetch
 }
@@ -49,6 +56,7 @@ type Server struct {
 	ledger        *ledger.Ledger
 	auth          auth.Authenticator
 	login         auth.LoginProvider
+	oidc          oidcHandler
 	httpc         *http.Client      // shared client for the DLP model sidecar
 	capturePl     *capture.Pipeline // nil when capture is not configured
 	blobStore     blob.Store        // nil when blob store is not configured
@@ -72,6 +80,7 @@ func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 		ledger:  ledger.New(st),
 		auth:    deps.Auth,
 		login:   deps.Login,
+		oidc:    deps.OIDC,
 		httpc:   &http.Client{},
 	}
 	s.regPtr.Store(deps.Providers)
@@ -128,6 +137,10 @@ func (s *Server) routes() {
 	if s.login != nil {
 		s.mux.HandleFunc("POST /auth/login", s.handleLogin)
 		s.mux.HandleFunc("POST /auth/logout", s.handleLogout)
+	}
+	if s.oidc != nil {
+		s.mux.HandleFunc("GET /auth/sso", s.oidc.LoginStart)
+		s.mux.HandleFunc("GET /auth/callback", s.oidc.Callback)
 	}
 
 	// Control-plane self-service (session auth).

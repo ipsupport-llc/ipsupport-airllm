@@ -46,6 +46,16 @@ func (p *PGUsers) CreateLocal(ctx context.Context, u auth.UserRow) (string, erro
 	return id, err
 }
 
+func (p *PGUsers) UpsertOIDC(ctx context.Context, pr auth.Principal) (string, error) {
+	var id string
+	err := p.st.PG.QueryRow(ctx, `
+		INSERT INTO users (subject, email, display, roles, auth_source)
+		VALUES ($1, $2, $1, $3, 'oidc')
+		ON CONFLICT (subject) DO UPDATE SET email=EXCLUDED.email, roles=EXCLUDED.roles, updated_at=now()
+		RETURNING id::text`, pr.Subject, pr.Email, pr.Roles).Scan(&id)
+	return id, err
+}
+
 func (p *PGUsers) Update(ctx context.Context, id, email, display string, roles []string, disabled bool) error {
 	tag, err := p.st.PG.Exec(ctx, `
 		UPDATE users SET email=$2, display=$3, roles=$4, disabled=$5, updated_at=now() WHERE id=$1`,

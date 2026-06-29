@@ -18,6 +18,14 @@ func setBase(t *testing.T) {
 	t.Setenv("AUTH_MODE", "")
 	t.Setenv("AIRLLM_MASTER_KEY", "")
 	t.Setenv("AIRLLM_SESSION_KEY", "")
+	// Clear OIDC vars so they don't bleed into non-OIDC tests.
+	t.Setenv("OIDC_ISSUER", "")
+	t.Setenv("OIDC_CLIENT_ID", "")
+	t.Setenv("OIDC_CLIENT_SECRET", "")
+	t.Setenv("OIDC_REDIRECT_URL", "")
+	t.Setenv("OIDC_ROLES_CLAIM", "")
+	t.Setenv("OIDC_SCOPES", "")
+	t.Setenv("OIDC_ROLE_MAP", "")
 }
 
 func TestLoadDefaults(t *testing.T) {
@@ -154,5 +162,55 @@ func TestAuthModeRejectsUnknown(t *testing.T) {
 	t.Setenv("AUTH_MODE", "ldap")
 	if _, err := Load(); err == nil {
 		t.Fatal("unknown AUTH_MODE must error")
+	}
+}
+
+func TestOIDCModeRequiresVars(t *testing.T) {
+	setBase(t)
+	t.Setenv("AUTH_MODE", "oidc")
+	// No OIDC vars set — must error.
+	if _, err := Load(); err == nil {
+		t.Fatal("AUTH_MODE=oidc without OIDC vars must error")
+	}
+}
+
+func TestOIDCModeWithAllVars(t *testing.T) {
+	setBase(t)
+	t.Setenv("AUTH_MODE", "oidc")
+	t.Setenv("OIDC_ISSUER", "https://idp.example.com")
+	t.Setenv("OIDC_CLIENT_ID", "client-id")
+	t.Setenv("OIDC_CLIENT_SECRET", "client-secret")
+	t.Setenv("OIDC_REDIRECT_URL", "https://app.example.com/auth/callback")
+	t.Setenv("OIDC_ROLES_CLAIM", "roles")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load with all OIDC vars: %v", err)
+	}
+	if c.OIDC.Issuer != "https://idp.example.com" {
+		t.Errorf("OIDC.Issuer = %q", c.OIDC.Issuer)
+	}
+	if len(c.OIDC.Scopes) == 0 {
+		t.Error("OIDC.Scopes must default to openid profile email")
+	}
+}
+
+func TestOIDCRoleMap(t *testing.T) {
+	setBase(t)
+	t.Setenv("AUTH_MODE", "oidc")
+	t.Setenv("OIDC_ISSUER", "https://idp.example.com")
+	t.Setenv("OIDC_CLIENT_ID", "client-id")
+	t.Setenv("OIDC_CLIENT_SECRET", "client-secret")
+	t.Setenv("OIDC_REDIRECT_URL", "https://app.example.com/auth/callback")
+	t.Setenv("OIDC_ROLES_CLAIM", "roles")
+	t.Setenv("OIDC_ROLE_MAP", "admins:airllm_admin,devs:airllm_user")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.OIDC.RoleMap["admins"] != "airllm_admin" {
+		t.Errorf("RoleMap[admins] = %q", c.OIDC.RoleMap["admins"])
+	}
+	if c.OIDC.RoleMap["devs"] != "airllm_user" {
+		t.Errorf("RoleMap[devs] = %q", c.OIDC.RoleMap["devs"])
 	}
 }

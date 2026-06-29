@@ -20,4 +20,5 @@ type UserStore interface {
 	ByUsername(ctx context.Context, username string) (UserRow, bool, error) // match subject (ci) or email
 	CountAdmins(ctx context.Context) (int, error)
 	CreateLocal(ctx context.Context, u UserRow) (string, error) // returns id
+	UpsertOIDC(ctx context.Context, p Principal) (string, error)
 }

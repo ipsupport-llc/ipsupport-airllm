@@ -8,9 +8,22 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"golang.org/x/crypto/hkdf"
 )
+
+// OIDCConfig holds the OIDC relying-party configuration (mirrors auth.OIDCConfig
+// to avoid an import cycle between config and auth).
+type OIDCConfig struct {
+	Issuer       string
+	ClientID     string
+	ClientSecret string
+	RedirectURL  string
+	Scopes       []string
+	RolesClaim   string
+	RoleMap      map[string]string
+}
 
 // Config is the validated runtime configuration.
 type Config struct {
@@ -23,6 +36,8 @@ type Config struct {
 	MasterKey    []byte // 32-byte AES key for sealing provider credentials
 	MasterKeyDev bool   // true when a deterministic dev key was derived (insecure)
 	SessionKey   []byte // 32-byte HMAC key for signing session cookies
+
+	OIDC OIDCConfig // populated when AuthMode == "oidc"
 }
 
 // Load reads configuration from the environment and validates it.
@@ -48,6 +63,14 @@ func Load() (*Config, error) {
 		// ok
 	default:
 		return nil, fmt.Errorf("AUTH_MODE must be \"local\" or \"oidc\", got %q", c.AuthMode)
+	}
+
+	if c.AuthMode == "oidc" {
+		oidcCfg, err := loadOIDC()
+		if err != nil {
+			return nil, err
+		}
+		c.OIDC = oidcCfg
 	}
 
 	key, dev, err := loadMasterKey(c.Env)
@@ -113,4 +136,38 @@ func env(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// loadOIDC reads and validates OIDC relying-party config from the environment.
+func loadOIDC() (OIDCConfig, error) {
+	required := []string{"OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "OIDC_REDIRECT_URL", "OIDC_ROLES_CLAIM"}
+	for _, k := range required {
+		if os.Getenv(k) == "" {
+			return OIDCConfig{}, fmt.Errorf("%s is required when AUTH_MODE=oidc", k)
+		}
+	}
+
+	scopesRaw := env("OIDC_SCOPES", "openid profile email")
+	scopes := strings.Fields(scopesRaw)
+
+	return OIDCConfig{
+		Issuer:       os.Getenv("OIDC_ISSUER"),
+		ClientID:     os.Getenv("OIDC_CLIENT_ID"),
+		ClientSecret: os.Getenv("OIDC_CLIENT_SECRET"),
+		RedirectURL:  os.Getenv("OIDC_REDIRECT_URL"),
+		Scopes:       scopes,
+		RolesClaim:   os.Getenv("OIDC_ROLES_CLAIM"),
+		RoleMap:      parseRoleMap(os.Getenv("OIDC_ROLE_MAP")),
+	}, nil
+}
+
+// parseRoleMap parses a comma-separated "idp_role:airllm_role" mapping string.
+func parseRoleMap(s string) map[string]string {
+	out := map[string]string{}
+	for _, pair := range strings.Split(s, ",") {
+		if k, v, ok := strings.Cut(strings.TrimSpace(pair), ":"); ok && k != "" {
+			out[k] = v
+		}
+	}
+	return out
 }

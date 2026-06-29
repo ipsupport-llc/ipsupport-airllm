@@ -61,6 +61,10 @@ func run() error {
 	// Wire the auth mode. AUTH_MODE=mock is a deprecated alias for local.
 	var authImpl auth.Authenticator
 	var loginImpl auth.LoginProvider
+	var oidcImpl interface {
+		LoginStart(http.ResponseWriter, *http.Request)
+		Callback(http.ResponseWriter, *http.Request)
+	}
 	session := auth.NewSession(cfg.SessionKey)
 	switch cfg.AuthMode {
 	case "local":
@@ -81,7 +85,20 @@ func run() error {
 				"username", envOr("AIRLLM_ADMIN_USERNAME", "admin"), "password", gen)
 		}
 	case "oidc":
-		// wired in Task 6
+		oa, err := auth.NewOIDCAuth(ctx, auth.OIDCConfig{
+			Issuer:       cfg.OIDC.Issuer,
+			ClientID:     cfg.OIDC.ClientID,
+			ClientSecret: cfg.OIDC.ClientSecret,
+			RedirectURL:  cfg.OIDC.RedirectURL,
+			Scopes:       cfg.OIDC.Scopes,
+			RolesClaim:   cfg.OIDC.RolesClaim,
+			RoleMap:      cfg.OIDC.RoleMap,
+		}, store.NewPGUsers(st), session)
+		if err != nil {
+			return fmt.Errorf("oidc init: %w", err)
+		}
+		authImpl = oa
+		oidcImpl = oa
 	}
 
 	// Local-mode convenience: seed demo data + a fixed dev API key.
@@ -148,6 +165,7 @@ func run() error {
 		Sealer:    sealer,
 		Auth:      authImpl,
 		Login:     loginImpl,
+		OIDC:      oidcImpl,
 		Capture:   capturePipeline,
 		Blob:      blobStore,
 	}
