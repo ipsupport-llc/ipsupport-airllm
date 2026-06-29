@@ -37,6 +37,28 @@ migrations. A clean re-bootstrap is `make compose-down && make compose-up`.
   credentials and capture bodies. It is **required in `prod`**; `dev` derives a
   deterministic insecure key for convenience. Generate one with
   `openssl rand -base64 32` and deliver it out of band — never commit it.
+- **Session key stability.** The HMAC session signing key is derived from the
+  master key via HKDF-SHA256 (`AIRLLM_SESSION_KEY` overrides it explicitly).
+  Sessions survive restarts and work across replicas without any extra secret to
+  manage. The key is never logged.
+- **Bootstrap admin.** On first boot (`local` mode), the gateway creates one
+  persistent admin user. If `AIRLLM_ADMIN_PASSWORD` is set, the password is
+  stored silently and never logged. If unset, a random password is logged once
+  at `WARN` and never regenerated. The bootstrap is a no-op once an admin
+  account exists.
+- **OIDC behind the ingress.** In `AUTH_MODE=oidc`, the gateway listens on
+  `0.0.0.0:8080` behind your ingress (same as without OIDC). The IdP redirect
+  and callback (`/auth/sso`, `/auth/callback`) must be reachable at the public
+  URL configured in `OIDC_REDIRECT_URL`. PKCE, `state`, and `nonce` are all
+  enforced; ID-token signature, `iss`, `aud`, `exp`, and `nonce` are all
+  verified. Set `OIDC_ROLE_MAP` to map IdP role names to AirLLM roles if they
+  differ.
+- **Disabling a user.** Setting `disabled=true` on a user blocks new logins
+  immediately. However, an existing session cookie remains valid until its 12-hour
+  TTL expires (stateless HMAC; no per-request DB lookup). The user's API keys
+  keep working until individually revoked — disabling does **not** auto-revoke
+  keys. Revoke keys explicitly via **Admin → Keys** or
+  `POST /api/admin/keys/{id}/revoke`.
 - **Secrets stay out of git.** The repository is written public-grade: no
   secrets, English-only. `deploy/.env` is git-ignored; use
   [`deploy/.env.example`](../deploy/.env.example) as the template.
@@ -59,10 +81,13 @@ migrations. A clean re-bootstrap is `make compose-down && make compose-up`.
 
 ## Deploy notes (kubernetes)
 
-The local mock substitutes two things that change on a real deploy:
+The default `AUTH_MODE=local` (password login) is suitable for self-hosted
+deploys. Two things typically change for a production kubernetes deploy:
 
-- **Auth:** set `AUTH_MODE=oidc` and wire generic OIDC (configurable roles-claim
-  path; Zitadel/Okta/etc. by configuration). The mock password login is dev-only.
+- **Auth:** set `AUTH_MODE=oidc` and supply the `OIDC_*` vars (issuer, client
+  ID/secret, redirect URL, roles claim). Any OIDC-compliant IdP works; role
+  mapping is configurable via `OIDC_ROLE_MAP`. `AUTH_MODE=local` remains fully
+  supported if you prefer to manage users directly.
 - **Providers:** add real providers (OpenAI, OpenRouter, xAI, Anthropic) with
   credentials entered through the console; they are sealed with the master key
   before storage and never returned or logged.
@@ -75,6 +100,7 @@ ordered-on-boot migrator.
 ## Observability
 
 - `GET /healthz` — liveness. `GET /readyz` — readiness (datastore reachability).
-- Logs are structured JSON (`slog`). The mock login credentials are logged at
-  `WARN` on boot in dev; treat any log containing credentials as dev-only.
+- Logs are structured JSON (`slog`). Bootstrap and demo-user passwords (when not
+  supplied via env vars) are logged once at `WARN` on first boot; treat any log
+  containing credentials as dev-only. Env-provided passwords are never logged.
 - The capture pipeline exposes a dropped-records counter for overload visibility.
