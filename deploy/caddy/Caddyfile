@@ -1,0 +1,13 @@
+# Caddy config for the AirLLM `tls` profile. DOMAIN and ACME_EMAIL come from
+# deploy/.env. Caddy obtains and renews Let's Encrypt certificates automatically.
+#
+# Private / offline deploy (no public domain)? Replace the site line with:
+#   https://your.internal.host { tls internal
+#                                reverse_proxy app:8080 }
+{
+	email {$ACME_EMAIL}
+}
+
+{$DOMAIN} {
+	reverse_proxy app:8080
+}

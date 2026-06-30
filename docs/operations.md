@@ -79,7 +79,13 @@ migrations. A clean re-bootstrap is `make compose-down && make compose-up`.
   the filesystem; back it with a volume or object store on deploy. Capture
   retention and the raw-window TTL bound its growth.
 
-## Deploy notes (kubernetes)
+## Deploy notes
+
+For a single-host install, use the **standalone Docker Compose** stack
+(`deploy/compose.prod.yaml`): bundled Postgres + Redis, production mode, persistent
+volumes, a permanent admin, and optional auto-HTTPS — see
+[Standalone deployment](deployment.md). For a cluster, use the Helm chart
+([Kubernetes (Helm chart)](#kubernetes-helm-chart)). The notes below apply to both.
 
 The default `AUTH_MODE=local` (password login) is suitable for self-hosted
 deploys. Two things typically change for a production kubernetes deploy:
