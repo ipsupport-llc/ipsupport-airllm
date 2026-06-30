@@ -40,8 +40,9 @@ only way in is the admin account.
 
 Open the bound address (default `http://127.0.0.1:8080`), sign in as `admin` with the
 generated password, **change it in the console**, then create API keys and add providers.
-The admin is permanent (it survives restarts; it is re-asserted from `AIRLLM_ADMIN_PASSWORD`
-on boot — change that value too when you rotate).
+The admin user persists across restarts. `AIRLLM_ADMIN_PASSWORD` is used **only** to
+create the admin on first boot (and to re-create it if the database is wiped); after that,
+the env value is ignored — rotate the password in the console.
 
 ## 4. Optional: automatic HTTPS (`tls` profile)
 

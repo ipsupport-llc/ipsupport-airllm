@@ -9,5 +9,11 @@
 }
 
 {$DOMAIN} {
-	reverse_proxy app:8080
+	# /metrics is unauthenticated (internal-scrape only) — never serve it publicly.
+	handle /metrics* {
+		respond 404
+	}
+	handle {
+		reverse_proxy app:8080
+	}
 }

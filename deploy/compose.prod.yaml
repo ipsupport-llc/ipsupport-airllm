@@ -46,6 +46,8 @@ services:
       HTTP_ADDR: ":8080"
       ENV: "prod"
       AUTH_MODE: "local"
+      # sslmode=disable is fine here: Postgres is on the internal compose network only
+      # (no host port, no MITM surface) and postgres-alpine ships no TLS.
       DATABASE_URL: "postgres://airllm:${POSTGRES_PASSWORD}@postgres:5432/airllm?sslmode=disable"
       REDIS_URL: "redis://redis:6379/0"
       AIRLLM_MASTER_KEY: ${AIRLLM_MASTER_KEY:?set AIRLLM_MASTER_KEY in deploy/.env (run make gen-secrets)}
@@ -54,8 +56,9 @@ services:
       CAPTURE_BLOB_DIR: "/var/lib/airllm/captures"
     volumes:
       - captures:/var/lib/airllm/captures
-    # Loopback by default. With --profile tls, Caddy is the public entry — keep this
-    # on loopback (or remove it) so the app is not also exposed on a public NIC.
+    # Loopback by default. With --profile tls, Caddy is the public entry — keep
+    # APP_BIND on loopback so the app is not also exposed on a public NIC (Caddy
+    # reaches it internally as app:8080).
     ports:
       - "${APP_BIND:-127.0.0.1:8080}:8080"
     depends_on:
@@ -64,7 +67,8 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null 2>&1 || exit 1"]
+      # /readyz pings Postgres + Redis (vs /healthz which is always 200).
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/readyz >/dev/null 2>&1 || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -95,6 +99,9 @@ services:
     build:
       context: ./dlp-bert
     profiles: ["bert"]
+    # The model is memory-hungry (torch + weights). Bound it for your host, e.g.:
+    #   mem_limit: 4g
+    #   cpus: "2"
     restart: unless-stopped
 
 volumes:
