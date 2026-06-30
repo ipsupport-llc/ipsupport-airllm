@@ -1,0 +1,28 @@
+AirLLM {{ .Chart.AppVersion }} installed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+1. Reach the console:
+{{- if .Values.app.ingress.enabled }}
+   http{{ if .Values.app.ingress.tls.enabled }}s{{ end }}://{{ .Values.app.ingress.host }}/
+{{- else }}
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "airllm.fullname" . }} 8080:{{ .Values.app.service.port }}
+   then open http://127.0.0.1:8080/
+{{- end }}
+
+{{- if .Values.dlpBert.enabled }}
+
+2. Wire the DLP BERT sidecar pool (Admin -> DLP in the console):
+   Sidecar URL:                   http://{{ include "airllm.dlpBertServiceName" . }}:{{ .Values.dlpBert.service.port }}
+   Max concurrent scans/endpoint: {{ .Values.dlpBert.modelMaxConcurrency }}
+{{- if eq .Values.dlpBert.autoscaling.kind "keda" }}
+   Autoscaling: KEDA — min {{ .Values.dlpBert.autoscaling.minReplicaCount }} / max {{ .Values.dlpBert.autoscaling.maxReplicaCount }}{{ if eq (int .Values.dlpBert.autoscaling.minReplicaCount) 0 }} (scale-to-zero){{ end }}, on the skip-rate signal.
+   NOTE: KEDA (keda.sh) must be installed for the ScaledObject to take effect.
+{{- else if eq .Values.dlpBert.autoscaling.kind "hpa" }}
+   Autoscaling: HPA on CPU — min {{ max .Values.dlpBert.autoscaling.minReplicaCount 1 }} / max {{ .Values.dlpBert.autoscaling.maxReplicaCount }}.
+{{- else }}
+   Autoscaling: off — fixed {{ .Values.dlpBert.replicaCount }} replica(s).
+{{- end }}
+{{- end }}
+
+3. Secrets: this release reads sensitive config from Secret "{{ .Values.existingSecret }}"
+   (keys: database-url, redis-url, master-key, session-key{{ if eq .Values.config.authMode "oidc" }}, oidc-client-secret{{ end }}, admin-password [optional]).
+   It is NOT managed by this chart — create/rotate it with your secret tooling.

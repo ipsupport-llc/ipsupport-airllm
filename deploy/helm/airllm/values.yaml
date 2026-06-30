@@ -1,0 +1,116 @@
+# AirLLM Helm values. Everything here is a PLACEHOLDER — supply real values at deploy
+# time (or via an ArgoCD Application / a values file kept out of this public repo).
+# Secrets are NEVER set here: the chart references an existing Secret by name.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/OWNER/ipsupport-airllm   # placeholder
+  tag: ""                                       # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+imagePullSecrets: []                            # e.g. [{ name: regcred }]
+
+# Secret-tool-agnostic: create this Secret out-of-band (Vault/VSO/ESO/SealedSecrets).
+# Required keys:  database-url, redis-url, master-key, session-key
+# Conditional:    oidc-client-secret (when config.authMode=oidc), admin-password (optional bootstrap)
+existingSecret: ""                              # REQUIRED — templating fails if empty
+
+config:                                         # non-secret env (rendered into a ConfigMap)
+  env: dev                                      # ENV: dev | prod
+  httpAddr: ":8080"
+  authMode: local                               # local | oidc
+  adminUsername: admin
+  captureBlobDir: /var/lib/airllm/captures
+  oidc:                                         # used only when authMode: oidc (non-secret parts)
+    issuer: ""
+    clientId: ""
+    redirectUrl: ""
+    scopes: "openid,profile,email"
+    rolesClaim: ""
+    roleMap: ""
+
+app:
+  replicaCount: 2                               # used only when app.autoscaling.enabled=false
+  service:
+    type: ClusterIP
+    port: 8080
+  ingress:
+    enabled: false
+    className: ""
+    host: airllm.example.com                    # placeholder
+    annotations: {}
+    tls:
+      enabled: false
+      secretName: ""
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: "1", memory: 512Mi }
+  podSecurityContext:
+    runAsNonRoot: true
+    seccompProfile: { type: RuntimeDefault }
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities: { drop: ["ALL"] }
+    readOnlyRootFilesystem: true
+  capture:                                      # writable path for capture blobs
+    persistence:
+      enabled: false                            # false → emptyDir; true → PVC
+      size: 1Gi
+      storageClass: ""
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+dlpBert:
+  enabled: true
+  image:
+    repository: ghcr.io/OWNER/ipsupport-airllm-dlp-bert   # placeholder
+    tag: ""
+    pullPolicy: IfNotPresent
+  service:
+    headless: false                             # true → one pool endpoint per pod; false → kube-proxy LB
+    port: 8000
+  replicaCount: 1                               # used only when autoscaling.kind=none
+  modelMaxConcurrency: 4                        # surfaced in NOTES as the console value to set
+  autoscaling:
+    kind: hpa                                   # hpa | keda | none
+    minReplicaCount: 1                          # set 0 for scale-to-zero (keda only)
+    maxReplicaCount: 10
+    cpu:
+      targetUtilizationPercentage: 70
+    keda:
+      prometheusServerAddress: http://prometheus-operated.monitoring.svc:9090  # placeholder
+      # Scale on the pool DROPPING scans. Default counts BOTH skip reasons so it works
+      # for always-warm (minReplicaCount>=1; all_busy dominates) AND scale-to-zero
+      # (minReplicaCount: 0 — the no_endpoints rate wakes the pool from 0; a CPU/memory
+      # trigger alone cannot scale up from 0). Narrow to {reason="all_busy"} if you only
+      # want to react to saturation and never run scale-to-zero.
+      query: sum(rate(airllm_dlp_model_skipped_total[2m]))
+      threshold: "1"                            # add replicas when the query exceeds this
+      pollingInterval: 30
+      cooldownPeriod: 300
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }        # placeholder (torch + model weights)
+    limits: { cpu: "2", memory: 4Gi }
+    # GPU example: add `nvidia.com/gpu: "1"` under limits and a matching nodeSelector/tolerations.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+metrics:
+  serviceMonitor:                               # requires the Prometheus Operator CRDs
+    enabled: false
+    namespace: ""
+    interval: 30s
+    labels: {}                                  # e.g. { release: kube-prometheus-stack }
+  dashboards:                                   # ConfigMap for the Grafana dashboards sidecar
+    enabled: false
+    labels:
+      grafana_dashboard: "1"

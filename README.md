@@ -65,6 +65,13 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 
 Full walkthrough: [docs/getting-started.md](docs/getting-started.md).
 
+## Kubernetes
+
+A production Helm chart lives at `deploy/helm/airllm` (gateway + DLP BERT sidecar
+pool, autoscaling via HPA or KEDA, secrets by reference, ServiceMonitor + Grafana
+dashboard, sample ArgoCD Application). `make helm-lint` renders every permutation
+without a cluster. See [Operations → Kubernetes (Helm chart)](docs/operations.md#kubernetes-helm-chart).
+
 ## Documentation
 
 | Guide | What it covers |

@@ -1,0 +1,2 @@
+# Default permutation: BERT autoscaled by HPA (CPU), app HPA on, no ingress/metrics.
+existingSecret: airllm-secrets

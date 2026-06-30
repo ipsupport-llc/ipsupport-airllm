@@ -1,0 +1,24 @@
+{{- if and .Values.dlpBert.enabled (eq .Values.dlpBert.autoscaling.kind "hpa") -}}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "airllm.dlpBertServiceName" . }}
+  labels:
+    {{- include "airllm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dlp-bert
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "airllm.dlpBertServiceName" . }}
+  # HPA cannot scale to zero (use autoscaling.kind=keda for scale-to-zero); floor at 1.
+  minReplicas: {{ max .Values.dlpBert.autoscaling.minReplicaCount 1 }}
+  maxReplicas: {{ .Values.dlpBert.autoscaling.maxReplicaCount }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.dlpBert.autoscaling.cpu.targetUtilizationPercentage }}
+{{- end }}

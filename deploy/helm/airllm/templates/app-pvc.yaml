@@ -1,0 +1,18 @@
+{{- if .Values.app.capture.persistence.enabled -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "airllm.fullname" . }}-captures
+  labels:
+    {{- include "airllm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.app.capture.persistence.size | quote }}
+  {{- with .Values.app.capture.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+{{- end }}

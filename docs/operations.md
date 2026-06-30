@@ -97,6 +97,73 @@ loopback rule is about not exposing an unauthenticated port directly on a host).
 Run a single writer for the migration step or rely on the idempotent,
 ordered-on-boot migrator.
 
+## Kubernetes (Helm chart)
+
+The chart lives at `deploy/helm/airllm` and deploys two workloads — the gateway
+(`app`) and the DLP BERT sidecar pool (`dlp-bert`) — plus optional Ingress,
+HPA/KEDA autoscaling, a `ServiceMonitor`, and the Grafana dashboard. Postgres and
+Redis are **external** (managed); the chart only references them.
+
+It is **public-clean**: every value is a placeholder and **no secret is templated**.
+The chart references an existing Secret by name — create it with your own tooling
+(Vault/VSO/ESO/SealedSecrets):
+
+```sh
+kubectl -n airllm create secret generic airllm-secrets \
+  --from-literal=database-url='postgres://…' \
+  --from-literal=redis-url='redis://…' \
+  --from-literal=master-key='…' \
+  --from-literal=session-key='…'
+# + oidc-client-secret (when authMode=oidc), admin-password (optional bootstrap)
+
+helm install airllm deploy/helm/airllm -n airllm --create-namespace \
+  --set existingSecret=airllm-secrets \
+  --set image.repository=ghcr.io/OWNER/ipsupport-airllm
+```
+
+Templating **fails fast** if `existingSecret` is empty. After install, `NOTES.txt`
+prints the in-cluster Sidecar URL to paste into **Admin → DLP**:
+`http://<release>-airllm-dlp-bert:8000`.
+
+### Autoscaling
+
+- **Gateway (`app`)** — HPA v2 on CPU + memory (`app.autoscaling.{minReplicas,
+  maxReplicas,targetCPUUtilizationPercentage,targetMemoryUtilizationPercentage}`),
+  on by default. Set `app.autoscaling.enabled=false` for a fixed `replicaCount`.
+- **BERT pool** — `dlpBert.autoscaling.kind`:
+  - `hpa` (default) — HPA on CPU. Works on any cluster, no extra operator.
+  - `keda` — a `ScaledObject` driven by the **skip-rate** Prometheus signal
+    (`sum(rate(airllm_dlp_model_skipped_total[2m]))`) plus CPU. This reacts to the
+    pool actually dropping scans. **Supports scale-to-zero** (`minReplicaCount: 0`):
+    the `no_endpoints` skip rate wakes the pool from zero (a CPU trigger alone
+    cannot). Requires **KEDA** (keda.sh) installed in the cluster.
+  - `none` — fixed `dlpBert.replicaCount`.
+  A normal `dlp-bert` Service uses kube-proxy load-balancing; a headless one
+  (`dlpBert.service.headless=true`) gives the pool one endpoint per pod.
+
+### Observability wiring
+
+- `metrics.serviceMonitor.enabled=true` renders a `ServiceMonitor` scraping the
+  app's `/metrics` (requires the Prometheus Operator CRDs).
+- `metrics.dashboards.enabled=true` renders a `ConfigMap` (labeled
+  `grafana_dashboard: "1"`) carrying the same dashboard JSON, for the Grafana
+  sidecar to auto-import.
+
+### ArgoCD
+
+`deploy/argocd/application.yaml` is a sample `Application` (placeholders for
+`repoURL`/`destination`/values, automated sync + prune). Copy and edit it — keep
+real values and the Secret out of the public repo.
+
+### Verifying the chart (no cluster)
+
+```sh
+make helm-lint   # helm lint + helm template across deploy/helm/airllm/ci/*-values.yaml
+```
+
+This lints and renders every permutation (hpa / keda / minimal / full) — pure
+template rendering, no cluster contact.
+
 ## Observability
 
 - `GET /healthz` — liveness. `GET /readyz` — readiness (datastore reachability).
@@ -143,9 +210,11 @@ loopback-only):
 docker compose -f deploy/docker-compose.yml --profile metrics up
 ```
 
-On a real deploy, use the cluster's existing Prometheus and Grafana instead
-(a `ServiceMonitor` + the same dashboard JSON ship in the Helm chart, a later
-sub-project). Nothing in the repo is environment-specific.
+On a real deploy, use the cluster's existing Prometheus and Grafana instead: the
+Helm chart ships a `ServiceMonitor` and the same dashboard JSON as a `ConfigMap`
+(enable with `metrics.serviceMonitor.enabled` / `metrics.dashboards.enabled` — see
+[Kubernetes (Helm chart)](#kubernetes-helm-chart)). Nothing in the repo is
+environment-specific.
 
 ### In-console sparklines
 
@@ -182,13 +251,12 @@ http://dlp-bert-3:8000
 
 ### Kubernetes
 
-Deploy `dlp-bert` as a `Deployment` with `replicas: N` behind a Kubernetes
-`Service`. A standard Service uses kube-proxy load-balancing; a headless Service
-(`.spec.clusterIP: None`) creates one pool endpoint per pod. Add a horizontal
-pod autoscaler (HPA) on CPU utilization to scale automatically.
-
-(The Helm chart for AirLLM ships in phase P5 and includes the `dlp-bert`
-Deployment, Service, and HPA templates.)
+The Helm chart deploys `dlp-bert` as a `Deployment` behind a `Service` (standard =
+kube-proxy load-balancing; headless via `dlpBert.service.headless=true` = one pool
+endpoint per pod) with configurable autoscaling. Set `dlpBert.autoscaling.kind` to
+`hpa` (CPU), `keda` (the skip-rate signal, with scale-to-zero), or `none` — see
+[Kubernetes (Helm chart) → Autoscaling](#autoscaling). The pool picks up scaled
+replicas automatically via the Service's resolved endpoints.
 
 ### Monitoring saturation
 

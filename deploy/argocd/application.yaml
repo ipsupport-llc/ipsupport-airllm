@@ -1,0 +1,34 @@
+# Sample ArgoCD Application for AirLLM. COPY this and edit the placeholders
+# (repoURL, targetRevision, destination, the values you supply) — do not apply
+# as-is. Real values + the existingSecret are supplied out-of-band; nothing
+# environment-specific belongs in this public repo.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: airllm
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/OWNER/ipsupport-airllm.git   # placeholder
+    targetRevision: main
+    path: deploy/helm/airllm
+    helm:
+      # Prefer a values file kept OUTSIDE this public repo (valueFiles / multiple
+      # sources) over inline parameters. existingSecret must name a Secret you manage.
+      parameters:
+        - name: existingSecret
+          value: airllm-secrets            # placeholder — your Secret's name
+        - name: image.repository
+          value: ghcr.io/OWNER/ipsupport-airllm
+        - name: dlpBert.autoscaling.kind
+          value: hpa                        # hpa | keda | none
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: airllm                       # placeholder
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
