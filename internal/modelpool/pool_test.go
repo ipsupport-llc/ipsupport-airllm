@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"sync"
 	"testing"
 )
 
@@ -156,5 +157,46 @@ func TestScanLazyResolvesWhenEmpty(t *testing.T) {
 	}
 	if p.Size() == 0 {
 		t.Fatalf("Scan did not lazily resolve")
+	}
+}
+
+func TestScanNoEndpoints(t *testing.T) {
+	// Configured URL whose host never resolves → 0 endpoints. resolved=true after
+	// Resolve, so Scan must NOT re-resolve on the hot path and must return ErrNoEndpoints.
+	p := New(cfg([]string{"http://bert:8000"}, 0), func(string) ([]string, error) { return nil, errors.New("nxdomain") })
+	p.Resolve()
+	if _, err := p.Scan(context.Background(), http.DefaultClient, "x", 0.5); !errors.Is(err, ErrNoEndpoints) {
+		t.Fatalf("Scan err = %v, want ErrNoEndpoints", err)
+	}
+}
+
+func TestConcurrentPickReleaseAndResolve(t *testing.T) {
+	resolve := func(string) ([]string, error) { return []string{"1.1.1.1", "2.2.2.2", "3.3.3.3"}, nil }
+	p := New(cfg([]string{"http://bert:8000"}, 4), resolve)
+	p.Resolve()
+	var wg sync.WaitGroup
+	for w := 0; w < 8; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 2000; i++ {
+				if e, ok := p.pick(); ok {
+					e.release()
+				}
+			}
+		}()
+	}
+	for r := 0; r < 2; r++ { // concurrent re-resolvers swap the endpoint set
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 500; i++ {
+				p.Resolve()
+			}
+		}()
+	}
+	wg.Wait()
+	if n := p.Inflight(); n != 0 {
+		t.Fatalf("Inflight = %d after concurrent pick/release, want 0", n)
 	}
 }

@@ -197,12 +197,15 @@ Watch these `/metrics` signals to detect when the pool needs more capacity:
 - `airllm_dlp_model_endpoints` — current pool size (number of resolved endpoints)
 - `airllm_dlp_model_requests_inflight` — in-flight scans (saturation indicator)
 - `airllm_dlp_model_duration_seconds` — per-message scan latency (histogram)
-- `airllm_dlp_model_skipped_total{reason="all_busy"}` — rising counter when all
-  endpoints are at the per-endpoint concurrency cap and the pool skips the model
-  scan (only deterministic redaction applies). **If this counter is rising,
-  scale up the pool.**
+- `airllm_dlp_model_skipped_total{reason="all_busy"}` — rising when all
+  endpoints are at the per-endpoint concurrency cap; the pool skips the model
+  scan and only deterministic redaction applies (this is fixed fail-open behavior,
+  not a setting). **If this counter is rising, scale up the pool.**
+- `airllm_dlp_model_skipped_total{reason="no_endpoints"}` — rising when the
+  configured sidecar URL isn't resolving; the pool has zero endpoints. **Scaling
+  up will not help — fix the DNS/config problem first.**
 
 Set **Max concurrent scans per endpoint** (under **Admin → DLP**) to cap load per
-replica (0 = unlimited). The gateway can be configured to skip the model scan
-entirely when capacity is exhausted, always passing the request through with
-deterministic redaction applied.
+replica (0 = unlimited). When capacity is exhausted or no endpoints are reachable,
+the gateway automatically skips the model scan (fail-open) and always passes the
+request through with deterministic redaction applied.

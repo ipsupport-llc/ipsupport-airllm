@@ -296,6 +296,8 @@ func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, r
 			switch {
 			case errors.Is(err, modelpool.ErrAllBusy):
 				s.metrics.DLPModelSkipped("all_busy")
+			case errors.Is(err, modelpool.ErrNoEndpoints):
+				s.metrics.DLPModelSkipped("no_endpoints")
 			case err != nil:
 				s.metrics.DLPModelObserve(time.Since(mstart))
 				slog.Error("dlp model scan failed; deterministic layer only", "err", err)

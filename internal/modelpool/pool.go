@@ -23,6 +23,11 @@ import (
 // fail open (skip the model scan; the deterministic layer still runs).
 var ErrAllBusy = errors.New("modelpool: all endpoints busy")
 
+// ErrNoEndpoints means the pool has no resolved endpoints (e.g. the configured
+// hostname does not resolve yet). Like ErrAllBusy the caller fails open, but it
+// is a distinct reason: scaling up the pool will not help — fix DNS/config.
+var ErrNoEndpoints = errors.New("modelpool: no resolved endpoints")
+
 // resolveInterval is how often Start re-resolves configured hostnames so
 // scaled-up/down replicas are picked up without a restart.
 const resolveInterval = 30 * time.Second
@@ -73,8 +78,9 @@ type Pool struct {
 	cfgFn   func() (urls []string, maxConc int)
 	resolve func(host string) ([]string, error)
 
-	eps atomic.Pointer[[]*endpoint]
-	rr  atomic.Uint64
+	eps      atomic.Pointer[[]*endpoint]
+	rr       atomic.Uint64
+	resolved atomic.Bool // set true after the first Resolve (initial or lazy)
 }
 
 // New builds a pool. cfgFn supplies the live endpoint URLs and per-endpoint
@@ -175,6 +181,7 @@ func (p *Pool) Resolve() {
 		}
 	}
 	p.eps.Store(&next)
+	p.resolved.Store(true)
 }
 
 // pick returns an acquired endpoint using round-robin, or false if all are at
@@ -196,15 +203,20 @@ func (p *Pool) pick() (*endpoint, bool) {
 }
 
 // Scan picks a free endpoint and runs a sidecar scan against it. It returns
-// ErrAllBusy when every endpoint is at capacity. If the pool is empty it
-// lazily resolves once, so a never-Started pool still works. Any sidecar error
-// is returned to the caller (which fails open).
+// ErrNoEndpoints when the pool has no resolved endpoints and ErrAllBusy when
+// every endpoint is at capacity — both fail open. The pool lazily resolves
+// once if it has never resolved (so a never-Started pool still works); a
+// Start()-ed pool never resolves on this hot path. Any sidecar error is
+// returned to the caller (which fails open).
 func (p *Pool) Scan(ctx context.Context, hc *http.Client, content string, minScore float64) ([]dlp.Finding, error) {
-	if p.Size() == 0 {
+	if !p.resolved.Load() {
 		p.Resolve()
 	}
 	e, ok := p.pick()
 	if !ok {
+		if p.Size() == 0 {
+			return nil, ErrNoEndpoints
+		}
 		return nil, ErrAllBusy
 	}
 	defer e.release()
