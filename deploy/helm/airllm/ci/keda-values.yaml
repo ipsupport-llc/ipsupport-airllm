@@ -1,0 +1,7 @@
+# BERT autoscaled by KEDA on the skip-rate signal, with scale-to-zero.
+existingSecret: airllm-secrets
+dlpBert:
+  autoscaling:
+    kind: keda
+    minReplicaCount: 0
+    maxReplicaCount: 8

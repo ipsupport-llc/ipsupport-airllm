@@ -1,0 +1,21 @@
+{{- if .Values.dlpBert.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "airllm.dlpBertServiceName" . }}
+  labels:
+    {{- include "airllm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dlp-bert
+spec:
+  {{- if .Values.dlpBert.service.headless }}
+  clusterIP: None
+  {{- end }}
+  selector:
+    {{- include "airllm.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: dlp-bert
+  ports:
+    - name: http
+      port: {{ .Values.dlpBert.service.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

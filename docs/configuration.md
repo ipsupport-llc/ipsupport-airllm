@@ -136,3 +136,24 @@ snapshotted onto each API key at issue time (`GET/PUT /api/admin/roles`):
   Windows are `5h`, `24h`, `7d`; dimensions are `tokens` and `cost_usd`.
 
 See the [API reference](api.md) for request/response shapes.
+
+## Kubernetes (Helm chart)
+
+On kubernetes the env vars above are supplied by the Helm chart
+(`deploy/helm/airllm`) rather than set by hand: non-secret config comes from a
+`ConfigMap` (chart `config.*` values) and sensitive values are read from an
+**existing Secret** you create out-of-band (`existingSecret`). The Secret keys map
+to env vars as:
+
+| Secret key | Env var | Required |
+|------------|---------|----------|
+| `database-url` | `DATABASE_URL` | yes |
+| `redis-url` | `REDIS_URL` | yes |
+| `master-key` | `AIRLLM_MASTER_KEY` | yes |
+| `session-key` | `AIRLLM_SESSION_KEY` | yes |
+| `oidc-client-secret` | `OIDC_CLIENT_SECRET` | when `config.authMode=oidc` |
+| `admin-password` | `AIRLLM_ADMIN_PASSWORD` | optional (else generated on first boot) |
+
+See [Operations → Kubernetes (Helm chart)](operations.md#kubernetes-helm-chart)
+for install, autoscaling (`app` HPA; `dlpBert.autoscaling.kind` = hpa/keda/none),
+observability toggles, and ArgoCD.

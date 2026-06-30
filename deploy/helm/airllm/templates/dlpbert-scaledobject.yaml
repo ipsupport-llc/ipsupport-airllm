@@ -1,0 +1,29 @@
+{{- if and .Values.dlpBert.enabled (eq .Values.dlpBert.autoscaling.kind "keda") -}}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "airllm.dlpBertServiceName" . }}
+  labels:
+    {{- include "airllm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dlp-bert
+spec:
+  scaleTargetRef:
+    name: {{ include "airllm.dlpBertServiceName" . }}
+  minReplicaCount: {{ .Values.dlpBert.autoscaling.minReplicaCount }}
+  maxReplicaCount: {{ .Values.dlpBert.autoscaling.maxReplicaCount }}
+  pollingInterval: {{ .Values.dlpBert.autoscaling.keda.pollingInterval }}
+  cooldownPeriod: {{ .Values.dlpBert.autoscaling.keda.cooldownPeriod }}
+  triggers:
+    # Primary, scale-from-zero-capable: the pool is dropping scans (P3 signal).
+    - type: prometheus
+      metadata:
+        serverAddress: {{ .Values.dlpBert.autoscaling.keda.prometheusServerAddress | quote }}
+        query: {{ .Values.dlpBert.autoscaling.keda.query | quote }}
+        threshold: {{ .Values.dlpBert.autoscaling.keda.threshold | quote }}
+        activationThreshold: {{ .Values.dlpBert.autoscaling.keda.activationThreshold | quote }}
+    # Secondary: CPU (cannot scale up from zero on its own — the prometheus trigger does that).
+    - type: cpu
+      metricType: Utilization
+      metadata:
+        value: {{ .Values.dlpBert.autoscaling.cpu.targetUtilizationPercentage | quote }}
+{{- end }}

@@ -1,0 +1,65 @@
+{{- if .Values.dlpBert.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "airllm.dlpBertServiceName" . }}
+  labels:
+    {{- include "airllm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dlp-bert
+spec:
+  {{- if eq .Values.dlpBert.autoscaling.kind "none" }}
+  replicas: {{ .Values.dlpBert.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "airllm.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: dlp-bert
+  template:
+    metadata:
+      labels:
+        {{- include "airllm.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: dlp-bert
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: dlp-bert
+          image: {{ include "airllm.image" (dict "image" .Values.dlpBert.image "root" .) }}
+          imagePullPolicy: {{ .Values.dlpBert.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.dlpBert.service.port }}
+              protocol: TCP
+          startupProbe:
+            # The model can take a while to load (torch + weights, first image pull).
+            # Allow up to ~5min before liveness/readiness kick in, so a slow load
+            # never CrashLoops the pod.
+            tcpSocket:
+              port: http
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.dlpBert.resources | nindent 12 }}
+      {{- with .Values.dlpBert.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.dlpBert.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.dlpBert.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

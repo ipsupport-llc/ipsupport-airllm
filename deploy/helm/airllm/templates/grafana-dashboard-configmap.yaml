@@ -1,0 +1,14 @@
+{{- if .Values.metrics.dashboards.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "airllm.fullname" . }}-dashboards
+  labels:
+    {{- include "airllm.labels" . | nindent 4 }}
+    {{- with .Values.metrics.dashboards.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+data:
+  airllm-overview.json: |-
+{{ .Files.Get "files/airllm-overview.json" | indent 4 }}
+{{- end }}

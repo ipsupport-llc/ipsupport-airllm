@@ -1,0 +1,13 @@
+# Smallest footprint: no BERT sidecar, fixed app replicas, no ingress/metrics.
+existingSecret: airllm-secrets
+app:
+  autoscaling:
+    enabled: false
+  replicaCount: 1
+dlpBert:
+  enabled: false
+metrics:
+  serviceMonitor:
+    enabled: false
+  dashboards:
+    enabled: false

@@ -1,0 +1,28 @@
+# Everything on: OIDC, ingress+TLS, KEDA, ServiceMonitor, Grafana dashboard.
+existingSecret: airllm-secrets
+config:
+  authMode: oidc
+  oidc:
+    issuer: https://issuer.example.com
+    clientId: airllm
+    redirectUrl: https://airllm.example.com/auth/callback
+    rolesClaim: roles
+app:
+  ingress:
+    enabled: true
+    className: nginx
+    host: airllm.example.com
+    tls:
+      enabled: true
+      secretName: airllm-tls
+dlpBert:
+  autoscaling:
+    kind: keda
+metrics:
+  serviceMonitor:
+    enabled: true
+    namespace: monitoring
+    labels:
+      release: kube-prometheus-stack
+  dashboards:
+    enabled: true

@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "airllm.fullname" . }}-env
+  labels:
+    {{- include "airllm.labels" . | nindent 4 }}
+data:
+  ENV: {{ .Values.config.env | quote }}
+  HTTP_ADDR: {{ .Values.config.httpAddr | quote }}
+  AUTH_MODE: {{ .Values.config.authMode | quote }}
+  AIRLLM_ADMIN_USERNAME: {{ .Values.config.adminUsername | quote }}
+  CAPTURE_BLOB_DIR: {{ .Values.config.captureBlobDir | quote }}
+{{- if eq .Values.config.authMode "oidc" }}
+  OIDC_ISSUER: {{ .Values.config.oidc.issuer | quote }}
+  OIDC_CLIENT_ID: {{ .Values.config.oidc.clientId | quote }}
+  OIDC_REDIRECT_URL: {{ .Values.config.oidc.redirectUrl | quote }}
+  OIDC_SCOPES: {{ .Values.config.oidc.scopes | quote }}
+  OIDC_ROLES_CLAIM: {{ .Values.config.oidc.rolesClaim | quote }}
+  OIDC_ROLE_MAP: {{ .Values.config.oidc.roleMap | quote }}
+{{- end }}
