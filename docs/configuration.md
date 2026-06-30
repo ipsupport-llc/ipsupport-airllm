@@ -99,7 +99,9 @@ request/job without a restart.
 | `scan_responses` | `false` | **Reserved and not enforced.** DLP scans prompts only by design — see [DLP, capture & audit](dlp-capture-audit.md#prompts-only). |
 | `model_enabled` | `false` | Enable the BERT-NER sidecar (layer 2) |
 | `model_url` | — | Sidecar URL, e.g. `http://dlp-bert:8000` |
+| `model_urls` | — | Array of sidecar URLs; overrides `model_url` when non-empty. A single hostname is resolved to all its A-records (one pool endpoint per IP), so `docker compose --scale` and k8s Services fan out automatically. |
 | `model_min_score` | `0` | Minimum sidecar confidence to accept a span (the console pre-fills `0.5` as a suggested starting value) |
+| `model_max_concurrency` | `0` | Per-endpoint cap on concurrent scans (0 = unlimited); when every endpoint is at the cap the scan is skipped and only the deterministic layer runs. |
 | `patterns` | `{}` | Sensitive Info Detection toggles: built-in pattern label → on/off. A label absent from the map uses its default (secrets on, PII off), so a partial map is fine. See [DLP, capture & audit](dlp-capture-audit.md#sensitive-info-detection). |
 | `custom_patterns` | `[]` | Operator regexes: `[{ "label", "regex", "enabled" }]`. Validated on save (must compile, ≤ 512 chars, ≤ 50 entries). |
 
