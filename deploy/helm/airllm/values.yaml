@@ -26,7 +26,7 @@ config:                                         # non-secret env (rendered into 
     issuer: ""
     clientId: ""
     redirectUrl: ""
-    scopes: "openid,profile,email"
+    scopes: "openid profile email"           # SPACE-delimited (the app parses with strings.Fields)
     rolesClaim: ""
     roleMap: ""
 
@@ -54,6 +54,7 @@ app:
     limits: { cpu: "1", memory: 512Mi }
   podSecurityContext:
     runAsNonRoot: true
+    fsGroup: 10001                              # matches the image user (uid 10001) so a mounted PVC is writable
     seccompProfile: { type: RuntimeDefault }
   securityContext:
     allowPrivilegeEscalation: false
@@ -64,6 +65,10 @@ app:
       enabled: false                            # false → emptyDir; true → PVC
       size: 1Gi
       storageClass: ""
+      # ReadWriteOnce works for a single writer only. If you enable persistence,
+      # EITHER set app.autoscaling.enabled=false (and replicaCount: 1) OR use a
+      # ReadWriteMany storage class here — otherwise replicas 2+ fail to mount.
+      accessMode: ReadWriteOnce
   nodeSelector: {}
   tolerations: []
   affinity: {}
@@ -72,7 +77,7 @@ dlpBert:
   enabled: true
   image:
     repository: ghcr.io/OWNER/ipsupport-airllm-dlp-bert   # placeholder
-    tag: ""
+    tag: ""                                     # defaults to the chart appVersion — pin explicitly (separate artifact from the gateway)
     pullPolicy: IfNotPresent
   service:
     headless: false                             # true → one pool endpoint per pod; false → kube-proxy LB
@@ -86,14 +91,24 @@ dlpBert:
     cpu:
       targetUtilizationPercentage: 70
     keda:
+      # KEDA reads a GATEWAY metric, so Prometheus MUST be scraping the gateway's
+      # /metrics for this to work — enable metrics.serviceMonitor (or another scrape
+      # config) and point prometheusServerAddress at that Prometheus. With keda +
+      # minReplicaCount:0 and nothing scraping the gateway, the trigger gets no data
+      # and the pool stays pinned at 0 (DLP model layer silently off).
       prometheusServerAddress: http://prometheus-operated.monitoring.svc:9090  # placeholder
       # Scale on the pool DROPPING scans. Default counts BOTH skip reasons so it works
       # for always-warm (minReplicaCount>=1; all_busy dominates) AND scale-to-zero
       # (minReplicaCount: 0 — the no_endpoints rate wakes the pool from 0; a CPU/memory
-      # trigger alone cannot scale up from 0). Narrow to {reason="all_busy"} if you only
-      # want to react to saturation and never run scale-to-zero.
+      # trigger alone cannot scale up from 0).
+      # CAVEAT: a PERSISTENT no_endpoints cause unrelated to capacity (wrong DLP
+      # model_url, DNS failure, NetworkPolicy) will ramp BERT to maxReplicaCount and
+      # stay there uselessly (bounded cost, not an outage). Mitigate by alerting on
+      # skipped_total{reason="no_endpoints"}, keeping maxReplicaCount modest, or
+      # narrowing query to {reason="all_busy"} when you don't run scale-to-zero.
       query: sum(rate(airllm_dlp_model_skipped_total[2m]))
       threshold: "1"                            # add replicas when the query exceeds this
+      activationThreshold: "0"                  # query must exceed this to scale 0->1 (keep 0 so any demand wakes it)
       pollingInterval: 30
       cooldownPeriod: 300
   resources:

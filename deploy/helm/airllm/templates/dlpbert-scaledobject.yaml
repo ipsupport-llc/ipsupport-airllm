@@ -18,9 +18,9 @@ spec:
     - type: prometheus
       metadata:
         serverAddress: {{ .Values.dlpBert.autoscaling.keda.prometheusServerAddress | quote }}
-        metricName: airllm_dlp_model_skipped_rate
         query: {{ .Values.dlpBert.autoscaling.keda.query | quote }}
         threshold: {{ .Values.dlpBert.autoscaling.keda.threshold | quote }}
+        activationThreshold: {{ .Values.dlpBert.autoscaling.keda.activationThreshold | quote }}
     # Secondary: CPU (cannot scale up from zero on its own — the prometheus trigger does that).
     - type: cpu
       metricType: Utilization

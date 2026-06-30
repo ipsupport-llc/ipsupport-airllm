@@ -32,15 +32,21 @@ spec:
             - name: http
               containerPort: {{ .Values.dlpBert.service.port }}
               protocol: TCP
+          startupProbe:
+            # The model can take a while to load (torch + weights, first image pull).
+            # Allow up to ~5min before liveness/readiness kick in, so a slow load
+            # never CrashLoops the pod.
+            tcpSocket:
+              port: http
+            periodSeconds: 10
+            failureThreshold: 30
           readinessProbe:
             tcpSocket:
               port: http
-            initialDelaySeconds: 10
             periodSeconds: 10
           livenessProbe:
             tcpSocket:
               port: http
-            initialDelaySeconds: 30
             periodSeconds: 20
           resources:
             {{- toYaml .Values.dlpBert.resources | nindent 12 }}

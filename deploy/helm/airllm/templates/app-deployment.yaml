@@ -76,17 +76,23 @@ spec:
                   name: {{ .Values.existingSecret }}
                   key: oidc-client-secret
             {{- end }}
+          startupProbe:
+            # Gates liveness until the app has booted (migrations run on start);
+            # allows up to ~60s before liveness takes over.
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 3
+            failureThreshold: 20
           livenessProbe:
             httpGet:
               path: /healthz
               port: http
-            initialDelaySeconds: 5
             periodSeconds: 10
           readinessProbe:
             httpGet:
               path: /readyz
               port: http
-            initialDelaySeconds: 5
             periodSeconds: 10
           resources:
             {{- toYaml .Values.app.resources | nindent 12 }}

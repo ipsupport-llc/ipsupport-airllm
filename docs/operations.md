@@ -130,13 +130,28 @@ prints the in-cluster Sidecar URL to paste into **Admin → DLP**:
 - **Gateway (`app`)** — HPA v2 on CPU + memory (`app.autoscaling.{minReplicas,
   maxReplicas,targetCPUUtilizationPercentage,targetMemoryUtilizationPercentage}`),
   on by default. Set `app.autoscaling.enabled=false` for a fixed `replicaCount`.
+  Capture blobs default to a per-pod `emptyDir`; if you enable
+  `app.capture.persistence`, its PVC is `ReadWriteOnce` (single writer) — either
+  disable app autoscaling or set `persistence.accessMode: ReadWriteMany`, else
+  replicas 2+ can't mount it.
 - **BERT pool** — `dlpBert.autoscaling.kind`:
   - `hpa` (default) — HPA on CPU. Works on any cluster, no extra operator.
   - `keda` — a `ScaledObject` driven by the **skip-rate** Prometheus signal
     (`sum(rate(airllm_dlp_model_skipped_total[2m]))`) plus CPU. This reacts to the
     pool actually dropping scans. **Supports scale-to-zero** (`minReplicaCount: 0`):
     the `no_endpoints` skip rate wakes the pool from zero (a CPU trigger alone
-    cannot). Requires **KEDA** (keda.sh) installed in the cluster.
+    cannot). Requires **KEDA** (keda.sh) installed.
+    - **The query reads a _gateway_ metric**, so Prometheus must be scraping the
+      gateway — enable `metrics.serviceMonitor.enabled` (or another scrape config)
+      and point `dlpBert.autoscaling.keda.prometheusServerAddress` at that
+      Prometheus. With `minReplicaCount: 0` and nothing scraping the gateway, the
+      trigger gets no data and the pool stays pinned at 0 (DLP model layer off).
+    - **Caveat:** a persistent `no_endpoints` cause unrelated to capacity (a wrong
+      DLP `model_url`, DNS failure, a NetworkPolicy) ramps BERT to
+      `maxReplicaCount` and holds it there uselessly (bounded cost, not an outage).
+      Alert on `skipped_total{reason="no_endpoints"}`, keep `maxReplicaCount`
+      modest, or narrow the query to `{reason="all_busy"}` when not using
+      scale-to-zero.
   - `none` — fixed `dlpBert.replicaCount`.
   A normal `dlp-bert` Service uses kube-proxy load-balancing; a headless one
   (`dlpBert.service.headless=true`) gives the pool one endpoint per pod.

@@ -8,7 +8,7 @@ metadata:
     app.kubernetes.io/component: gateway
 spec:
   accessModes:
-    - ReadWriteOnce
+    - {{ .Values.app.capture.persistence.accessMode | default "ReadWriteOnce" }}
   resources:
     requests:
       storage: {{ .Values.app.capture.persistence.size | quote }}

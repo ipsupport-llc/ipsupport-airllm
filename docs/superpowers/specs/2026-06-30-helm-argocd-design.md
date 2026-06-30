@@ -16,8 +16,10 @@ P3 BERT-scale ✅ · P4 standalone packaging · **P5 Helm/ArgoCD**). Spec/plan h
 - **BERT autoscaling:** a switch `dlpBert.autoscaling.kind: hpa | keda | none`.
   - Default **`hpa`** (CPU) — works on any cluster, no extra operator.
   - **`keda`** — `ScaledObject` with a Prometheus trigger on the rate of
-    `airllm_dlp_model_skipped_total{reason="all_busy"}` (the purpose-built
-    "pool is dropping scans → add replicas" signal) **plus** a CPU trigger.
+    `airllm_dlp_model_skipped_total` — total skip rate, **both reasons** (the
+    purpose-built "pool is dropping scans → add replicas" signal) **plus** a CPU
+    trigger. Counting both reasons (not just `all_busy`) is what lets scale-to-zero
+    work: at 0 replicas the `no_endpoints` rate is the only available wake signal.
   - **`none`** — fixed `replicaCount`.
   - `minReplicaCount`/`maxReplicaCount` are values; **scale-to-zero** = set
     `minReplicaCount: 0` (KEDA only). Default `minReplicaCount: 1` (always warm).
@@ -161,7 +163,7 @@ metrics:
   `autoscaling.kind == hpa`.
 - **`dlpbert-scaledobject.yaml`** — keda.sh/v1alpha1 `ScaledObject`; rendered only when
   `autoscaling.kind == keda`. Triggers: (1) `prometheus` on
-  `sum(rate(airllm_dlp_model_skipped_total{reason="all_busy"}[2m]))` ≥ `skipRateThreshold`;
+  `sum(rate(airllm_dlp_model_skipped_total[2m]))` (both reasons) ≥ `threshold`;
   (2) `cpu` Utilization. `minReplicaCount`/`maxReplicaCount` from values
   (0 = scale-to-zero). `pollingInterval`/`cooldownPeriod` from values.
 - **`servicemonitor.yaml`** — monitoring.coreos.com/v1; only when
@@ -213,7 +215,7 @@ the controller runs these as the gate (pure template rendering, no cluster conta
   (ingress + ServiceMonitor + dashboard + oidc) — each renders without error and
   omits/includes the right objects.
 - Spot assertions on rendered output (grep): secret env uses `secretKeyRef` (never a literal
-  value); the ScaledObject query is exactly the `all_busy` skip-rate expression; the app HPA
+  value); the ScaledObject query is the total skip-rate expression (both reasons); the app HPA
   has both CPU and memory metrics; `existingSecret: ""` makes templating **fail** with the
   required-message.
 - **`kubeconform`** schema validation is recommended but **not installed locally** (no
