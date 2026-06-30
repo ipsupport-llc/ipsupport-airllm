@@ -163,10 +163,22 @@ func TestScanLazyResolvesWhenEmpty(t *testing.T) {
 func TestScanNoEndpoints(t *testing.T) {
 	// Configured URL whose host never resolves → 0 endpoints. resolved=true after
 	// Resolve, so Scan must NOT re-resolve on the hot path and must return ErrNoEndpoints.
-	p := New(cfg([]string{"http://bert:8000"}, 0), func(string) ([]string, error) { return nil, errors.New("nxdomain") })
+	resolves := 0
+	p := New(cfg([]string{"http://bert:8000"}, 0), func(string) ([]string, error) {
+		resolves++
+		return nil, errors.New("nxdomain")
+	})
 	p.Resolve()
+	if resolves != 1 {
+		t.Fatalf("setup: resolves = %d, want 1", resolves)
+	}
 	if _, err := p.Scan(context.Background(), http.DefaultClient, "x", 0.5); !errors.Is(err, ErrNoEndpoints) {
 		t.Fatalf("Scan err = %v, want ErrNoEndpoints", err)
+	}
+	// The resolved-once guard means a Start()-ed/Resolve()-d pool must not re-run
+	// the synchronous resolver on the hot path, even while empty.
+	if resolves != 1 {
+		t.Fatalf("Scan re-resolved on the hot path: resolves = %d, want 1 (resolved-once guard)", resolves)
 	}
 }
 
