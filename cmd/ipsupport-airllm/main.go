@@ -173,6 +173,7 @@ func run() error {
 	apiSrv := httpapi.NewServer(cfg, st, deps)
 	apiSrvPtr.Store(apiSrv)
 	apiSrv.Metrics().RegisterCaptureDropped(func() float64 { return float64(capturePipeline.Dropped()) })
+	apiSrv.StartModelPool(ctx)
 
 	// Build and start the second-pass background job. It uses an atomic
 	// pointer for the config (same pattern as capturePipeline) so model /
