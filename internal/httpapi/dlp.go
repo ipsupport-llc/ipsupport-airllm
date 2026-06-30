@@ -30,6 +30,11 @@ type dlpConfig struct {
 	ModelEnabled  bool    `json:"model_enabled"`
 	ModelURL      string  `json:"model_url"`
 	ModelMinScore float64 `json:"model_min_score"`
+	// ModelURLs is the sidecar endpoint list; when empty the single ModelURL is
+	// used (back-compat). ModelMaxConcurrency caps concurrent scans per endpoint
+	// (0 = unlimited). See internal/modelpool.
+	ModelURLs           []string `json:"model_urls,omitempty"`
+	ModelMaxConcurrency int      `json:"model_max_concurrency,omitempty"`
 
 	// Sensitive Info Detection (guardrails). Patterns maps a built-in pattern
 	// label (including the model toggles person_name/address/organization and
@@ -173,6 +178,23 @@ func validatePatternLabels(p map[string]bool) error {
 
 func defaultDLPConfig() dlpConfig {
 	return dlpConfig{Enabled: true, Action: "redact"}
+}
+
+// effectiveModelURLs returns the configured sidecar URLs, falling back to the
+// single ModelURL for back-compat. Blank entries are dropped.
+func (c dlpConfig) effectiveModelURLs() []string {
+	var out []string
+	for _, u := range c.ModelURLs {
+		if u = strings.TrimSpace(u); u != "" {
+			out = append(out, u)
+		}
+	}
+	if len(out) == 0 {
+		if u := strings.TrimSpace(c.ModelURL); u != "" {
+			out = append(out, u)
+		}
+	}
+	return out
 }
 
 func validDLPAction(a string) bool {
