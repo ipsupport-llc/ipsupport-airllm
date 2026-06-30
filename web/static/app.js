@@ -1007,6 +1007,10 @@ async function adminDLP(c) {
           <input id="dlp-murl" value="${esc(d.model_url || "http://dlp-bert:8000")}" /></label>
         <label class="field"><span class="lab">Min score (0–1)</span>
           <input id="dlp-mscore" type="number" step="0.05" min="0" max="1" value="${d.model_min_score ?? 0.5}" /></label>
+        <label class="field"><span class="lab">Sidecar URLs (one per line — overrides the single URL above)</span>
+          <textarea id="dlp-murls" rows="3" class="mono" placeholder="http://dlp-bert:8000">${esc((d.model_urls || []).join("\n"))}</textarea></label>
+        <label class="field"><span class="lab">Max concurrent scans per endpoint (0 = unlimited)</span>
+          <input id="dlp-mconc" type="number" min="0" value="${d.model_max_concurrency ?? 0}" /></label>
         <button class="btn" id="dlp-save">Save policy</button>
       </div>
     </div>
@@ -1062,6 +1066,8 @@ async function adminDLP(c) {
       enabled: $("#dlp-en").checked, action: $("#dlp-act").value, scan_responses: false,
       model_enabled: $("#dlp-men").checked, model_url: $("#dlp-murl").value.trim(),
       model_min_score: Number($("#dlp-mscore").value) || 0,
+      model_urls: $("#dlp-murls").value.split("\n").map((s) => s.trim()).filter(Boolean),
+      model_max_concurrency: Number($("#dlp-mconc").value) || 0,
     };
     // Only send patterns/custom when the panel actually rendered, so a failed
     // catalog fetch can't silently wipe the operator's toggles on save.

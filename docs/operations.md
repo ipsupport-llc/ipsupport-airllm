@@ -155,3 +155,57 @@ p95 latency/hour) without requiring Prometheus. They are fed by the
 
 - `GET /api/usage/series` — current user's data (last 24 h, hourly buckets).
 - `GET /api/admin/usage/series` — gateway-wide data (admin only).
+
+## Scaling the DLP BERT sidecar
+
+The BERT-NER model layer runs as an external sidecar and is load-balanced by a
+pool (configured under **Admin → DLP**). Multiple replicas improve throughput,
+and the pool distributes scans round-robin across endpoints.
+
+### Docker Compose
+
+```sh
+docker compose --profile bert up -d --scale dlp-bert=3
+```
+
+Then set **Sidecar URL** (under **Admin → DLP**) to the service name:
+`http://dlp-bert:8000`. The pool resolves the hostname to all three container
+IPs and balances requests across them automatically.
+
+Alternatively, add explicit sidecar services in `docker-compose.yml` and list
+each URL in **Sidecar URLs** (one per line), e.g.:
+```
+http://dlp-bert-1:8000
+http://dlp-bert-2:8000
+http://dlp-bert-3:8000
+```
+
+### Kubernetes
+
+Deploy `dlp-bert` as a `Deployment` with `replicas: N` behind a Kubernetes
+`Service`. A standard Service uses kube-proxy load-balancing; a headless Service
+(`.spec.clusterIP: None`) creates one pool endpoint per pod. Add a horizontal
+pod autoscaler (HPA) on CPU utilization to scale automatically.
+
+(The Helm chart for AirLLM ships in phase P5 and includes the `dlp-bert`
+Deployment, Service, and HPA templates.)
+
+### Monitoring saturation
+
+Watch these `/metrics` signals to detect when the pool needs more capacity:
+
+- `airllm_dlp_model_endpoints` — current pool size (number of resolved endpoints)
+- `airllm_dlp_model_requests_inflight` — in-flight scans (saturation indicator)
+- `airllm_dlp_model_duration_seconds` — per-message scan latency (histogram)
+- `airllm_dlp_model_skipped_total{reason="all_busy"}` — rising when all
+  endpoints are at the per-endpoint concurrency cap; the pool skips the model
+  scan and only deterministic redaction applies (this is fixed fail-open behavior,
+  not a setting). **If this counter is rising, scale up the pool.**
+- `airllm_dlp_model_skipped_total{reason="no_endpoints"}` — rising when the
+  configured sidecar URL isn't resolving; the pool has zero endpoints. **Scaling
+  up will not help — fix the DNS/config problem first.**
+
+Set **Max concurrent scans per endpoint** (under **Admin → DLP**) to cap load per
+replica (0 = unlimited). When capacity is exhausted or no endpoints are reachable,
+the gateway automatically skips the model scan (fail-open) and always passes the
+request through with deterministic redaction applied.

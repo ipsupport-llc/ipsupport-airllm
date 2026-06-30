@@ -39,7 +39,10 @@ Two layers behind one `Scan` API:
    deterministic layer can't catch. It runs as the `dlp-bert` compose service
    under the `bert` profile; enable it and set its URL under **Admin → DLP**.
    See [`deploy/dlp-bert/README.md`](../deploy/dlp-bert/README.md). Sidecar
-   failures degrade gracefully to the deterministic layer.
+   failures degrade gracefully to the deterministic layer. The gateway
+   load-balances requests across a pool of sidecar endpoints and fails open
+   (skips the model scan) when all endpoints are busy, applying deterministic
+   redaction only.
 
 ### Enforcement actions
 

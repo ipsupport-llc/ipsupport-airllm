@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/dlp"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/modelpool"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/webhook"
 )
@@ -30,6 +32,11 @@ type dlpConfig struct {
 	ModelEnabled  bool    `json:"model_enabled"`
 	ModelURL      string  `json:"model_url"`
 	ModelMinScore float64 `json:"model_min_score"`
+	// ModelURLs is the sidecar endpoint list; when empty the single ModelURL is
+	// used (back-compat). ModelMaxConcurrency caps concurrent scans per endpoint
+	// (0 = unlimited). See internal/modelpool.
+	ModelURLs           []string `json:"model_urls,omitempty"`
+	ModelMaxConcurrency int      `json:"model_max_concurrency,omitempty"`
 
 	// Sensitive Info Detection (guardrails). Patterns maps a built-in pattern
 	// label (including the model toggles person_name/address/organization and
@@ -175,6 +182,23 @@ func defaultDLPConfig() dlpConfig {
 	return dlpConfig{Enabled: true, Action: "redact"}
 }
 
+// effectiveModelURLs returns the configured sidecar URLs, falling back to the
+// single ModelURL for back-compat. Blank entries are dropped.
+func (c dlpConfig) effectiveModelURLs() []string {
+	var out []string
+	for _, u := range c.ModelURLs {
+		if u = strings.TrimSpace(u); u != "" {
+			out = append(out, u)
+		}
+	}
+	if len(out) == 0 {
+		if u := strings.TrimSpace(c.ModelURL); u != "" {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
 func validDLPAction(a string) bool {
 	switch a {
 	case "off", "flag", "redact", "block":
@@ -248,6 +272,7 @@ func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, r
 	// capture pipeline can build an un-redacted raw-window body.
 	original := snapshotOriginals(cfg.Action, req.Messages)
 
+	modelOn := cfg.ModelEnabled && len(cfg.effectiveModelURLs()) > 0
 	labelSet := map[string]bool{}
 	total := 0
 	sample := ""
@@ -263,17 +288,24 @@ func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, r
 			Custom:  cfg.compiledCustom,
 			Entropy: dlpToggle(cfg.Patterns, "high_entropy", true),
 		})
-		if cfg.ModelEnabled && cfg.ModelURL != "" {
+		if modelOn {
 			mctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 			mstart := time.Now()
-			s.metrics.DLPModelInc()
-			mf, err := dlp.ModelScan(mctx, s.httpc, cfg.ModelURL, cfg.ModelMinScore, content)
-			s.metrics.DLPModelDone(time.Since(mstart))
+			mf, err := s.modelPool.Scan(mctx, s.httpc, content, cfg.ModelMinScore)
 			cancel()
-			if err != nil {
+			switch {
+			case errors.Is(err, modelpool.ErrAllBusy):
+				s.metrics.DLPModelSkipped("all_busy")
+			case errors.Is(err, modelpool.ErrNoEndpoints):
+				s.metrics.DLPModelSkipped("no_endpoints")
+			case err != nil:
+				s.metrics.DLPModelObserve(time.Since(mstart))
 				slog.Error("dlp model scan failed; deterministic layer only", "err", err)
-			} else if mf = filterModelFindings(mf, cfg.Patterns); len(mf) > 0 {
-				findings = dlp.Merge(append(findings, mf...))
+			default:
+				s.metrics.DLPModelObserve(time.Since(mstart))
+				if mf = filterModelFindings(mf, cfg.Patterns); len(mf) > 0 {
+					findings = dlp.Merge(append(findings, mf...))
+				}
 			}
 		}
 		if len(findings) == 0 {

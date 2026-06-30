@@ -5,6 +5,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/ledger"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/limits"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/metrics"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/modelpool"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/pricing"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
@@ -64,6 +66,7 @@ type Server struct {
 	blobStore     blob.Store        // nil when blob store is not configured
 	captureIdx    captureReader     // nil until first audit route access (set in NewServer)
 	metrics       *metrics.Metrics
+	modelPool     *modelpool.Pool
 
 	// Test hooks: non-nil values replace the real implementations in tests.
 	auditHook    func(ctx context.Context, actor, action, target string, detail any)
@@ -89,6 +92,12 @@ func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 	}
 	s.regPtr.Store(deps.Providers)
 	s.loadDLP(context.Background())
+	s.modelPool = modelpool.New(func() ([]string, int) {
+		c := s.dlpCfg()
+		return c.effectiveModelURLs(), c.ModelMaxConcurrency
+	}, net.LookupHost)
+	s.metrics.RegisterModelInflight(func() float64 { return float64(s.modelPool.Inflight()) })
+	s.metrics.RegisterModelEndpoints(func() float64 { return float64(s.modelPool.Size()) })
 	s.loadCapture(context.Background())
 	s.loadSecondpass(context.Background())
 	if deps.Capture != nil {
@@ -104,6 +113,10 @@ func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 
 // Metrics exposes the server's metrics for wiring external gauge sources in main.
 func (s *Server) Metrics() *metrics.Metrics { return s.metrics }
+
+// StartModelPool kicks off the DLP model pool's resolver (initial + periodic
+// re-resolve) until ctx is cancelled.
+func (s *Server) StartModelPool(ctx context.Context) { s.modelPool.Start(ctx) }
 
 // reg returns the current provider registry.
 func (s *Server) reg() *providers.Registry { return s.regPtr.Load() }

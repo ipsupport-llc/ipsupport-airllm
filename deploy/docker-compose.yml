@@ -53,8 +53,14 @@ services:
         condition: service_healthy
 
   # DLP BERT-NER sidecar (layer 2). Opt-in: `--profile bert`. Heavy image
-  # (torch + model weights). Set the gateway's DLP model_url to
-  # http://dlp-bert:8000 in the console. Loopback-only on the host.
+  # (torch + model weights). Loopback-only on the host.
+  #
+  # Scale it two ways (configure under Admin → DLP in the console):
+  #   * one URL, N replicas — `docker compose --profile bert up -d --scale dlp-bert=3`,
+  #     then set Sidecar URL = http://dlp-bert:8000 (the pool resolves all 3 IPs).
+  #   * explicit list — add more sidecar services and list each in "Sidecar URLs".
+  # Set "Max concurrent scans per endpoint" to cap load per replica; a saturated
+  # pool skips the model scan (deterministic redaction still applies).
   dlp-bert:
     build:
       context: ./dlp-bert
