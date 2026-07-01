@@ -45,6 +45,16 @@ provides self-service key management and an admin area.
 - **Console** — login, dashboard, self-service keys, usage, and an admin area
   (users, keys, roles, aliases, providers, pricing, DLP, capture, audit).
 
+## Deployment options
+
+Three ways to run it — all public-clean, secrets kept out of the repo:
+
+| Mode | Command | Use for |
+|------|---------|---------|
+| **Dev / mock** | `make compose-up` | Local development against a mock provider ([Quickstart](#quickstart-local-mock)) |
+| **Standalone prod** | `make gen-secrets && make compose-prod-up` | Single-host self-hosting; persistent, permanent admin, optional auto-HTTPS ([guide](docs/deployment.md)) |
+| **Kubernetes** | `helm install airllm deploy/helm/airllm …` | Clusters; HPA/KEDA autoscaling, secrets by reference, ArgoCD ([guide](docs/operations.md#kubernetes-helm-chart)) |
+
 ## Quickstart (local mock)
 
 ```sh
