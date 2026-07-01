@@ -1,5 +1,9 @@
 # ipsupport-airllm
 
+[![CI](https://github.com/ipsupport-llc/ipsupport-airllm/actions/workflows/ci.yml/badge.svg)](https://github.com/ipsupport-llc/ipsupport-airllm/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![Site](https://img.shields.io/badge/site-ipsupport--llc.github.io-6ea8fe)](https://ipsupport-llc.github.io/ipsupport-airllm/)
+
 **AirLLM** — short for **AI Router LLM** — is a self-hosted, OIDC-governed LLM
 gateway: it routes internal coding agents to upstream language models through a
 single, policed entry point.

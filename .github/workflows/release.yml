@@ -1,0 +1,47 @@
+name: Release
+
+# On a semver tag (e.g. v1.2.3), build and push the container images to GHCR.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60   # dlp-bert pulls torch + a model at build time
+    strategy:
+      fail-fast: false    # one image failing shouldn't cancel the other
+      matrix:
+        include:
+          - image: ghcr.io/ipsupport-llc/ipsupport-airllm
+            context: .
+            dockerfile: deploy/Dockerfile
+          - image: ghcr.io/ipsupport-llc/ipsupport-airllm-dlp-bert
+            context: deploy/dlp-bert
+            dockerfile: deploy/dlp-bert/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ matrix.image }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
