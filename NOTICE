@@ -1,0 +1,12 @@
+AirLLM (ipsupport-airllm)
+Copyright 2026 IPSupport LLC, Utah, USA
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+this software except in compliance with the License. See the LICENSE file for
+the full license text, or obtain a copy at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+This product is built with open-source Go libraries and other third-party
+components, each distributed under its own license; those licenses continue to
+apply to their respective components.

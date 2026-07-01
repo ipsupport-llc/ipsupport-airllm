@@ -154,8 +154,9 @@
       <div class="mode">
         <h3>Kubernetes</h3>
         <p>HPA/KEDA autoscaling, secrets by reference, ArgoCD.</p>
-<pre><span class="k">helm</span> install airllm \
-  deploy/helm/airllm</pre>
+<pre><span class="k">helm</span> install airllm deploy/helm/airllm \
+  --set image.repository=\
+ghcr.io/ipsupport-llc/ipsupport-airllm</pre>
       </div>
     </div>
   </div>

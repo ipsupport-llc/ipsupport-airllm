@@ -12,7 +12,9 @@ permissions:
 jobs:
   images:
     runs-on: ubuntu-latest
+    timeout-minutes: 60   # dlp-bert pulls torch + a model at build time
     strategy:
+      fail-fast: false    # one image failing shouldn't cancel the other
       matrix:
         include:
           - image: ghcr.io/ipsupport-llc/ipsupport-airllm
@@ -35,7 +37,7 @@ jobs:
           images: ${{ matrix.image }}
           tags: |
             type=semver,pattern={{version}}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
       - uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
