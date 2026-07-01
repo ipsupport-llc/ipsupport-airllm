@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AirLLM — self-hosted, OIDC-governed LLM gateway</title>
+<meta name="description" content="AirLLM (AI Router LLM) is a self-hosted LLM gateway: OpenAI- and Anthropic-compatible, per-key policy and usage limits, provider routing with fallback, DLP, capture/audit, and autoscaling. One Go binary." />
+<meta property="og:title" content="AirLLM — self-hosted LLM gateway" />
+<meta property="og:description" content="One Go binary: OpenAI/Anthropic-compatible gateway with policy, usage limits, DLP, and autoscaling." />
+<style>
+  :root{
+    --bg:#0b0e14; --bg-elev:#11151f; --bg-soft:#161b28; --rule:#232a3a;
+    --fg:#dbe3f0; --muted:#8b95a7; --accent:#6ea8fe; --accent-2:#7ee7c7;
+    --code:#0f1420; --warn:#ffca7a;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--sans);line-height:1.6;
+       -webkit-font-smoothing:antialiased}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:960px;margin:0 auto;padding:0 1.25rem}
+  code,pre{font-family:var(--mono)}
+  header.top{border-bottom:1px solid var(--rule);position:sticky;top:0;background:rgba(11,14,20,.86);
+             backdrop-filter:blur(8px);z-index:10}
+  header.top .wrap{display:flex;align-items:center;gap:1rem;height:56px}
+  .brand{font-family:var(--mono);font-weight:600;letter-spacing:.02em}
+  .brand .a{color:var(--accent)}
+  header.top nav{margin-left:auto;display:flex;gap:1.25rem;font-size:.92rem}
+  header.top nav a{color:var(--muted)}
+  header.top nav a:hover{color:var(--fg);text-decoration:none}
+
+  .hero{padding:4.5rem 0 2rem;border-bottom:1px solid var(--rule)}
+  .hero h1{font-family:var(--mono);font-size:clamp(2.2rem,6vw,3.4rem);margin:0 0 .3rem;line-height:1.1}
+  .hero h1 .a{color:var(--accent)}
+  .hero .sub{font-size:1.2rem;color:var(--fg);margin:.4rem 0 .8rem;max-width:44ch}
+  .hero .tag{color:var(--muted);font-family:var(--mono);font-size:.9rem}
+  .badges{display:flex;flex-wrap:wrap;gap:.4rem;margin:1.4rem 0 .2rem}
+  .badges img{height:20px}
+  .cta{display:flex;flex-wrap:wrap;gap:.6rem;margin-top:1.4rem}
+  .btn{display:inline-block;padding:.55rem 1rem;border-radius:8px;font-weight:600;font-size:.95rem}
+  .btn.primary{background:var(--accent);color:#08101f}
+  .btn.primary:hover{filter:brightness(1.08);text-decoration:none}
+  .btn.ghost{border:1px solid var(--rule);color:var(--fg)}
+  .btn.ghost:hover{border-color:var(--accent);text-decoration:none}
+
+  section{padding:2.6rem 0;border-bottom:1px solid var(--rule)}
+  section h2{font-family:var(--mono);font-size:1.35rem;margin:0 0 1.1rem;color:var(--fg)}
+  section h2 .hash{color:var(--muted);font-weight:400}
+  .lead{color:var(--muted);max-width:66ch;margin:-.4rem 0 1.4rem}
+
+  pre{background:var(--code);border:1px solid var(--rule);border-radius:10px;padding:1rem 1.1rem;
+      overflow:auto;font-size:.86rem;line-height:1.55;margin:0}
+  pre .c{color:var(--muted)}
+  pre .k{color:var(--accent-2)}
+
+  .modes{display:grid;grid-template-columns:repeat(3,1fr);gap:1rem}
+  .mode{background:var(--bg-elev);border:1px solid var(--rule);border-radius:12px;padding:1.1rem}
+  .mode h3{font-family:var(--mono);font-size:1rem;margin:.1rem 0 .5rem}
+  .mode p{color:var(--muted);font-size:.9rem;margin:.2rem 0 .8rem;min-height:2.4em}
+  .mode pre{font-size:.8rem;padding:.7rem .8rem}
+
+  .features{display:grid;grid-template-columns:1fr 1fr;gap:.9rem 1.6rem}
+  .feat{display:flex;gap:.7rem;align-items:flex-start}
+  .feat .i{color:var(--accent);font-family:var(--mono);flex:0 0 auto;margin-top:.15rem}
+  .feat b{font-weight:600}
+  .feat span{color:var(--muted);font-size:.92rem}
+
+  .steps{counter-reset:s;display:grid;gap:.7rem;max-width:70ch}
+  .step{display:flex;gap:.8rem;align-items:baseline}
+  .step::before{counter-increment:s;content:counter(s);font-family:var(--mono);color:#08101f;
+    background:var(--accent);border-radius:50%;width:1.5rem;height:1.5rem;display:inline-flex;
+    align-items:center;justify-content:center;font-size:.8rem;flex:0 0 auto}
+  .step code{background:var(--bg-soft);padding:.1rem .35rem;border-radius:5px;font-size:.85em}
+
+  .doclinks{display:grid;grid-template-columns:1fr 1fr;gap:.5rem 1.4rem}
+  .doclinks a{padding:.35rem 0;border-bottom:1px solid transparent}
+  .doclinks .d{color:var(--muted);font-size:.88rem}
+
+  footer{padding:2.4rem 0 3rem}
+  footer .row{display:flex;flex-wrap:wrap;gap:1.4rem;align-items:center}
+  footer nav{display:flex;gap:1.2rem;flex-wrap:wrap}
+  footer .meta{color:var(--muted);font-size:.85rem;margin-top:1rem}
+  footer .disc{color:var(--muted);font-size:.8rem;margin-top:.4rem;max-width:70ch}
+
+  @media (max-width:720px){
+    .modes{grid-template-columns:1fr}
+    .features{grid-template-columns:1fr}
+    .doclinks{grid-template-columns:1fr}
+    header.top nav a:not(.gh){display:none}
+  }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <span class="brand"><span class="a">Air</span>LLM</span>
+    <nav>
+      <a href="#install">Install</a>
+      <a href="#features">Features</a>
+      <a href="#docs">Docs</a>
+      <a class="gh" href="https://github.com/ipsupport-llc/ipsupport-airllm">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+<div class="hero">
+  <div class="wrap">
+    <h1><span class="a">Air</span>LLM</h1>
+    <div class="sub">A self-hosted, OIDC-governed LLM gateway — one policed entry point between your coding agents and the models.</div>
+    <div class="tag">AI Router LLM · one Go binary · OpenAI- &amp; Anthropic-compatible · Apache-2.0</div>
+    <div class="badges">
+      <img src="https://img.shields.io/badge/build-Go%201.26-00ADD8?logo=go&amp;logoColor=white" alt="Go 1.26" />
+      <img src="https://img.shields.io/badge/license-Apache--2.0-6ea8fe" alt="Apache-2.0" />
+      <img src="https://img.shields.io/badge/deploy-compose%20%C2%B7%20helm-7ee7c7" alt="deploy: compose · helm" />
+    </div>
+    <div class="cta">
+      <a class="btn primary" href="#install">Get started</a>
+      <a class="btn ghost" href="https://github.com/ipsupport-llc/ipsupport-airllm">View on GitHub →</a>
+    </div>
+  </div>
+</div>
+
+<section id="what">
+  <div class="wrap">
+    <p class="lead">A single Go service exposes OpenAI- and Anthropic-compatible endpoints to internal
+    coding agents, authenticates them by API key, enforces per-key model policy and rolling usage
+    limits, routes to upstream providers with balancing and fallback, and meters tokens and cost.
+    It can scan prompts for secrets and PII (DLP), capture traffic for audit, and feed
+    reviewer-corrected captures back into the detector. A static console, served by the same
+    binary, handles keys, usage, and administration.</p>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <h2><span class="hash">#</span> Three ways to run it</h2>
+    <p class="lead">All public-clean — secrets are supplied at deploy time, never committed.</p>
+    <div class="modes">
+      <div class="mode">
+        <h3>Dev / mock</h3>
+        <p>Local development against a mock provider.</p>
+<pre><span class="k">make</span> compose-up</pre>
+      </div>
+      <div class="mode">
+        <h3>Standalone prod</h3>
+        <p>Single-host: persistent, permanent admin, optional auto-HTTPS.</p>
+<pre><span class="k">make</span> gen-secrets
+<span class="k">make</span> compose-prod-up</pre>
+      </div>
+      <div class="mode">
+        <h3>Kubernetes</h3>
+        <p>HPA/KEDA autoscaling, secrets by reference, ArgoCD.</p>
+<pre><span class="k">helm</span> install airllm \
+  deploy/helm/airllm</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="features">
+  <div class="wrap">
+    <h2><span class="hash">#</span> What it does</h2>
+    <div class="features">
+      <div class="feat"><span class="i">⇄</span><span><b>Dual ingress.</b> OpenAI (<code>/v1/chat/completions</code>, <code>/v1/models</code>) and Anthropic (<code>/v1/messages</code>) — non-streaming and SSE.</span></div>
+      <div class="feat"><span class="i">⚖</span><span><b>Routing &amp; balancing.</b> Alias catalog with priority fallback and per-provider concurrency; explicit <code>provider/model</code> passthrough. All-busy → 429, never a crash.</span></div>
+      <div class="feat"><span class="i">◷</span><span><b>Policy &amp; limits.</b> Per-role allowed models snapshotted onto each key; rolling 5h / 24h / 7d windows in tokens and USD.</span></div>
+      <div class="feat"><span class="i">🛡</span><span><b>DLP.</b> Deterministic (regex + entropy) plus an opt-in BERT-NER sidecar; <code>off</code>/<code>flag</code>/<code>redact</code>/<code>block</code>. Prompts only, by design.</span></div>
+      <div class="feat"><span class="i">⟳</span><span><b>Capture, flywheel &amp; audit.</b> Async redacted-by-default capture, a second-pass that finds misses, a review queue, JSONL export, and an access-logged auditor role.</span></div>
+      <div class="feat"><span class="i">📈</span><span><b>Observability.</b> Prometheus <code>/metrics</code>, per-component latency, in-console sparklines, and Grafana dashboards as code.</span></div>
+      <div class="feat"><span class="i">⤢</span><span><b>Autoscaling.</b> The DLP sidecar pool scales on its own saturation signal — HPA or KEDA (with scale-to-zero) on kubernetes.</span></div>
+      <div class="feat"><span class="i">🔒</span><span><b>Governed.</b> Generic OIDC or local auth; provider credentials sealed with AES-GCM; secrets stay out of the repo.</span></div>
+    </div>
+  </div>
+</section>
+
+<section id="quickstart">
+  <div class="wrap">
+    <h2><span class="hash">#</span> Quickstart (local mock)</h2>
+    <div class="steps">
+      <div class="step"><span>Run <code>make compose-up</code> — builds and starts Postgres, Redis, and the gateway on <code>127.0.0.1:8080</code>.</span></div>
+      <div class="step"><span>Grab the admin password from the logs, sign in, and create an API key.</span></div>
+      <div class="step"><span>Point your agent at the OpenAI or Anthropic endpoint with that key:</span></div>
+    </div>
+<pre style="margin-top:1rem"><span class="c"># OpenAI-compatible</span>
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H <span class="k">"Authorization: Bearer &lt;your-token&gt;"</span> \
+  -d '{"model":"mock-gpt","messages":[{"role":"user","content":"hello"}]}'</pre>
+  </div>
+</section>
+
+<section id="docs">
+  <div class="wrap">
+    <h2><span class="hash">#</span> Documentation</h2>
+    <div class="doclinks">
+      <a href="https://github.com/ipsupport-llc/ipsupport-airllm/blob/main/docs/getting-started.md">Getting started <span class="d">— run the mock, first API call, console tour</span></a>
+      <a href="https://github.com/ipsupport-llc/ipsupport-airllm/blob/main/docs/deployment.md">Standalone deployment <span class="d">— prod compose, secrets, auto-HTTPS</span></a>
+      <a href="https://github.com/ipsupport-llc/ipsupport-airllm/blob/main/docs/operations.md">Operations <span class="d">— k8s/Helm, autoscaling, security posture</span></a>
+      <a href="https://github.com/ipsupport-llc/ipsupport-airllm/blob/main/docs/configuration.md">Configuration <span class="d">— every env var and runtime setting</span></a>
+      <a href="https://github.com/ipsupport-llc/ipsupport-airllm/blob/main/docs/api.md">API reference <span class="d">— data-plane, control-plane, admin, audit</span></a>
+      <a href="https://github.com/ipsupport-llc/ipsupport-airllm/blob/main/docs/dlp-capture-audit.md">DLP, capture &amp; audit <span class="d">— scanning, the flywheel, the audit trail</span></a>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="row">
+      <span class="brand"><span class="a">Air</span>LLM</span>
+      <nav>
+        <a href="https://github.com/ipsupport-llc/ipsupport-airllm">GitHub</a>
+        <a href="https://github.com/ipsupport-llc/ipsupport-airllm/tree/main/docs">Docs</a>
+        <a href="https://github.com/ipsupport-llc/ipsupport-airllm/releases">Releases</a>
+        <a href="https://github.com/ipsupport-llc/ipsupport-airllm/issues">Issues</a>
+      </nav>
+    </div>
+    <div class="meta">Apache-2.0 · one Go binary · self-hosted. Built for internal coding-agent traffic.</div>
+    <div class="disc">Not affiliated with OpenAI or Anthropic; “OpenAI-compatible” and “Anthropic-compatible” refer to wire-format compatibility only.</div>
+  </div>
+</footer>
+</body>
+</html>

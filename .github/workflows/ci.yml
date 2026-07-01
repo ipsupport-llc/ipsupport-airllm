@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "These files need gofmt:"; echo "$out"; exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: go build
+        run: go build ./...
+      - name: go test (race)
+        run: go test -race ./...
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+      - name: helm lint + template (all value permutations)
+        run: make helm-lint
+
+  compose:
+    runs-on: ubuntu-latest
+    env:
+      # dummy values so the prod compose's required-vars interpolate for `config`
+      POSTGRES_PASSWORD: ci-postgres
+      AIRLLM_MASTER_KEY: ci-master-key
+      AIRLLM_ADMIN_PASSWORD: ci-admin
+      DOMAIN: ci.example.com
+      ACME_EMAIL: ci@example.com
+    steps:
+      - uses: actions/checkout@v4
+      - name: validate dev compose
+        run: docker compose -f deploy/docker-compose.yml config >/dev/null
+      - name: validate prod compose (default + tls + bert)
+        run: |
+          docker compose -f deploy/compose.prod.yaml config >/dev/null
+          docker compose -f deploy/compose.prod.yaml --profile tls --profile bert config >/dev/null
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: check doc links
+        run: python3 scripts/check-links.py

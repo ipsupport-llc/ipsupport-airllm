@@ -1,4 +1,4 @@
-.PHONY: build test test-race vet tidy run compose-up compose-down fmt helm-lint gen-secrets compose-prod-up compose-prod-down
+.PHONY: build test test-race vet tidy run compose-up compose-down fmt helm-lint gen-secrets compose-prod-up compose-prod-down check-links
 
 build:
 	go build -o bin/ipsupport-airllm ./cmd/ipsupport-airllm
@@ -51,6 +51,10 @@ gen-secrets:
 	echo "  admin username: $$(grep '^AIRLLM_ADMIN_USERNAME=' deploy/.env | cut -d= -f2)"; \
 	echo "  admin password: $$AP"; \
 	echo "Set DOMAIN/ACME_EMAIL in deploy/.env before using --profile tls."
+
+# Check internal Markdown links + heading anchors across README + docs.
+check-links:
+	python3 scripts/check-links.py
 
 # Production standalone stack (run `make gen-secrets` first).
 compose-prod-up:
