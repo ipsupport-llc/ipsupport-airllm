@@ -65,6 +65,18 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 
 Full walkthrough: [docs/getting-started.md](docs/getting-started.md).
 
+## Standalone deployment
+
+For a turnkey self-hosted install (bundled Postgres + Redis, production mode,
+persistent volumes, permanent admin, optional auto-HTTPS):
+
+```sh
+make gen-secrets      # writes deploy/.env with generated secrets
+make compose-prod-up  # docker compose -f deploy/compose.prod.yaml up -d --build
+```
+
+Full guide: [docs/deployment.md](docs/deployment.md).
+
 ## Kubernetes
 
 A production Helm chart lives at `deploy/helm/airllm` (gateway + DLP BERT sidecar
@@ -81,6 +93,7 @@ without a cluster. See [Operations → Kubernetes (Helm chart)](docs/operations.
 | [API reference](docs/api.md) | Every endpoint — data-plane, control-plane, admin, audit |
 | [Architecture](docs/architecture.md) | Components, request flow, storage, concurrency |
 | [DLP, capture & audit](docs/dlp-capture-audit.md) | Scanning, the capture store, the flywheel, the audit trail |
+| [Standalone deployment](docs/deployment.md) | Production Docker Compose: secrets, persistence, permanent admin, auto-HTTPS |
 | [Operations](docs/operations.md) | Building, testing, migrations, deploy, security posture |
 
 ## Development
