@@ -25,6 +25,12 @@ type Provider interface {
 	ChatStream(ctx context.Context, req llm.ChatRequest, yield func(llm.StreamChunk) error) error
 }
 
+// ModelLister is implemented by providers that can enumerate their upstream
+// model ids. Providers without a listing endpoint simply do not implement it.
+type ModelLister interface {
+	ListModels(ctx context.Context) ([]string, error)
+}
+
 // Entry wraps a provider with a concurrency limit. A request must Acquire a
 // slot before calling and Release it after; when the limit is reached Acquire
 // fails so the router can fall back to another target.

@@ -31,6 +31,11 @@ func (m *Mock) Name() string     { return m.name }
 func (m *Mock) Kind() string     { return "mock" }
 func (m *Mock) Protocol() string { return "openai" }
 
+// ListModels returns a fixed, deterministic model list for dev and tests.
+func (m *Mock) ListModels(_ context.Context) ([]string, error) {
+	return []string{"mock-gpt", "mock-large", "mock-small"}, nil
+}
+
 // Chat returns a deterministic mock completion for req. An upstream model
 // containing "fail" yields a retryable error, used to exercise routing
 // fallback.
