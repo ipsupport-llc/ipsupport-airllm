@@ -46,18 +46,33 @@ func (p *PGUsers) CreateLocal(ctx context.Context, u auth.UserRow) (string, erro
 	return id, err
 }
 
+// UpsertOIDC creates/refreshes an OIDC user from IdP claims. Roles may change
+// at any login, so the user's key snapshots are rebuilt in the same
+// transaction.
 func (p *PGUsers) UpsertOIDC(ctx context.Context, pr auth.Principal) (string, error) {
+	tx, err := p.st.PG.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
 	var id string
-	err := p.st.PG.QueryRow(ctx, `
+	if err := tx.QueryRow(ctx, `
 		INSERT INTO users (subject, email, display, roles, auth_source)
 		VALUES ($1, $2, $1, $3, 'oidc')
 		ON CONFLICT (subject) DO UPDATE SET email=EXCLUDED.email, roles=EXCLUDED.roles, auth_source='oidc', updated_at=now()
-		RETURNING id::text`, pr.Subject, pr.Email, pr.Roles).Scan(&id)
-	return id, err
+		RETURNING id::text`, pr.Subject, pr.Email, pr.Roles).Scan(&id); err != nil {
+		return "", err
+	}
+	if err := RebuildKeySnapshotsUser(ctx, tx, id); err != nil {
+		return "", err
+	}
+	return id, tx.Commit(ctx)
 }
 
-func (p *PGUsers) Update(ctx context.Context, id, email, display string, roles []string, disabled bool) error {
-	tag, err := p.st.PG.Exec(ctx, `
+// Update modifies a user's profile/roles. q lets the caller run it inside a
+// transaction (pass p.st.PG when no tx is needed).
+func (p *PGUsers) Update(ctx context.Context, q Querier, id, email, display string, roles []string, disabled bool) error {
+	tag, err := q.Exec(ctx, `
 		UPDATE users SET email=$2, display=$3, roles=$4, disabled=$5, updated_at=now() WHERE id=$1`,
 		id, email, display, roles, disabled)
 	if err == nil && tag.RowsAffected() == 0 {

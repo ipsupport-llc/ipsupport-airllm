@@ -135,6 +135,10 @@ snapshotted onto each API key at issue time (`GET/PUT /api/admin/roles`):
 - `limits` — rolling-window caps, shaped as `{ "tokens": {"24h": 200000}, "cost_usd": {"7d": 5} }`.
   Windows are `5h`, `24h`, `7d`; dimensions are `tokens` and `cost_usd`.
 
+Snapshots are rebuilt automatically — in the same transaction — when a role
+policy or a user's role list changes, and on every OIDC login; existing keys
+pick up policy edits immediately, no re-issue needed.
+
 See the [API reference](api.md) for request/response shapes.
 
 ## Kubernetes (Helm chart)

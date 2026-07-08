@@ -64,8 +64,10 @@ one listener.
 
 - **Control-plane** uses an HMAC-signed session cookie (mock) or generic OIDC
   (deploy). The SPA only ever calls `/api/*`; it never touches a datastore.
-- **Data-plane** uses API keys whose role policy is snapshotted at issue time,
-  so revoking or editing a role does not silently change an existing key.
+- **Data-plane** uses API keys whose role policy is snapshotted onto the key
+  and automatically re-snapshotted whenever an admin edits a role or a user's
+  role list (and on OIDC login, where roles come from IdP claims) — one
+  lookup on the hot path, never stale after a policy change.
 
 ## Storage
 
