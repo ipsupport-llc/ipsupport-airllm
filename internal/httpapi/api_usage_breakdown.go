@@ -43,6 +43,9 @@ const breakdownProviderQuery = `
 	GROUP BY provider_name
 	ORDER BY 4 DESC, 2 DESC`
 
+// The model query keeps rows with an empty provider_name: a request that
+// exhausted every target is ledgered without a provider, and hiding it would
+// make failures invisible in the breakdown.
 const breakdownModelQuery = `
 	SELECT alias, provider_name, upstream_model,
 	       count(*),
@@ -51,7 +54,7 @@ const breakdownModelQuery = `
 	       COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms), 0)::bigint,
 	       count(*) FILTER (WHERE status >= 400)
 	FROM usage_ledger
-	WHERE ts > now() - make_interval(hours => $1) AND provider_name <> '' %s
+	WHERE ts > now() - make_interval(hours => $1) %s
 	GROUP BY alias, provider_name, upstream_model
 	ORDER BY 6 DESC, 4 DESC`
 

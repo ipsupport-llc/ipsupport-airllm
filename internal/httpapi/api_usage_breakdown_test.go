@@ -59,9 +59,11 @@ func TestUsageBreakdownQueries(t *testing.T) {
 	// so it must sort first under ORDER BY cost DESC.
 	mustExec(insert, "alias-b", "bp-mock", "mock-1", 10, 10, 5.00, 200, 50)
 
-	// Row with an empty provider_name must be excluded entirely, despite its
-	// large cost — if it leaked in it would sort first and inflate group count.
-	mustExec(insert, "alias-c", "", "untracked", 999, 999, 100.00, 200, 10)
+	// Row with an empty provider_name: a request that exhausted every target
+	// (ledgered as a failure with no provider). Must be excluded from the
+	// provider breakdown but VISIBLE in the model breakdown — otherwise
+	// failures disappear from the report.
+	mustExec(insert, "alias-c", "", "untracked", 999, 999, 100.00, 502, 10)
 
 	// Scope to this test's fixture providers via the where-clause injection
 	// point (mirroring how handleUsageBreakdown adds "AND user_id = $2") so
@@ -114,7 +116,10 @@ func TestUsageBreakdownQueries(t *testing.T) {
 	}
 
 	// --- model breakdown ---
-	modelRows, err := tx.Query(ctx, fmt.Sprintf(breakdownModelQuery, scopeToFixtures), 24)
+	// The model query has no provider filter, so scope by the fixture aliases
+	// to keep the failed (empty-provider) row in view.
+	const scopeToFixtureAliases = `AND alias IN ('alias-a', 'alias-b', 'alias-c')`
+	modelRows, err := tx.Query(ctx, fmt.Sprintf(breakdownModelQuery, scopeToFixtureAliases), 24)
 	if err != nil {
 		t.Fatalf("model query: %v", err)
 	}
@@ -132,11 +137,15 @@ func TestUsageBreakdownQueries(t *testing.T) {
 		t.Fatalf("model rows err: %v", err)
 	}
 
-	if len(models) != 2 {
-		t.Fatalf("models = %d groups, want 2 (got %+v)", len(models), models)
+	if len(models) != 3 {
+		t.Fatalf("models = %d groups, want 3 (got %+v)", len(models), models)
 	}
-	if models[0].Alias != "alias-b" || models[0].Provider != "bp-mock" || models[0].UpstreamModel != "mock-1" {
-		t.Errorf("top model = %+v, want alias-b/bp-mock/mock-1 (cost DESC)", models[0])
+	// cost DESC: the failed no-provider row (100.00) first, then alias-b (5.00).
+	if models[0].Alias != "alias-c" || models[0].Provider != "" || models[0].Errors != 1 {
+		t.Errorf("top model = %+v, want alias-c with empty provider and errors=1 (failures must stay visible)", models[0])
+	}
+	if models[1].Alias != "alias-b" || models[1].Provider != "bp-mock" || models[1].UpstreamModel != "mock-1" {
+		t.Errorf("second model = %+v, want alias-b/bp-mock/mock-1 (cost DESC)", models[1])
 	}
 	var gotOpenaiModel bool
 	for _, m := range models {
@@ -145,9 +154,6 @@ func TestUsageBreakdownQueries(t *testing.T) {
 			if m.Requests != 3 {
 				t.Errorf("alias-a model requests = %d, want 3", m.Requests)
 			}
-		}
-		if m.Provider == "" {
-			t.Errorf("empty-provider row leaked into model results: %+v", m)
 		}
 	}
 	if !gotOpenaiModel {
