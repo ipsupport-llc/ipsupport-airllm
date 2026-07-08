@@ -886,6 +886,9 @@ async function editAlias(c, a) {
   const pr = await api("GET", "/api/admin/providers");
   let providers = ((pr.data && pr.data.providers) || []).map((p) => p.name);
   if (providers.length === 0) providers = ["mock"];
+  // Existing alias names, for the rename-collision guard on save.
+  const ar = await api("GET", "/api/admin/aliases");
+  const existingAliases = ((ar.data && ar.data.aliases) || []).map((x) => x.alias);
 
   const targets = (a.targets && a.targets.length)
     ? a.targets
@@ -972,6 +975,11 @@ async function editAlias(c, a) {
   $("#al-save", bg).addEventListener("click", async () => {
     const alias = $("#al-alias", bg).value.trim();
     if (!alias) { toast("Alias is required", "err"); return; }
+    // PUT is an upsert: renaming (or creating) onto another existing alias
+    // would silently overwrite it. Block the collision instead.
+    if (alias !== a.alias && existingAliases.includes(alias)) {
+      toast(`Alias ${alias} already exists`, "err"); return;
+    }
     const tlist = [...tdiv.querySelectorAll(".tgt")].map((r) => ({
       priority: Number(r.querySelector(".t-prio").value) || 0,
       provider: r.querySelector(".t-prov").value,
@@ -987,7 +995,7 @@ async function editAlias(c, a) {
     if (a.alias && a.alias !== alias) {
       const d = await api("DELETE", `/api/admin/aliases/${encodeURIComponent(a.alias)}`);
       if (!d.ok) { toast(`Saved as ${alias}, but deleting old ${a.alias} failed`, "err"); close(); adminAliases(c); return; }
-      toast(`Renamed to ${alias} — update role policies/pricing that referenced ${a.alias}`);
+      toast(`Renamed to ${alias} — update role policies that referenced ${a.alias}`);
     } else {
       toast("Alias saved");
     }
