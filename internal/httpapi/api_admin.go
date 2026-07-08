@@ -26,6 +26,7 @@ func (s *Server) adminRoutes() {
 	s.mux.HandleFunc("PUT /api/admin/roles/{role}", a(s.handleAdminPutRole))
 	s.mux.HandleFunc("GET /api/admin/providers", a(s.handleAdminProviders))
 	s.mux.HandleFunc("PUT /api/admin/providers/{name}", a(s.handleAdminPutProvider))
+	s.mux.HandleFunc("GET /api/admin/providers/{name}/models", a(s.handleAdminProviderModels))
 	s.mux.HandleFunc("GET /api/admin/aliases", a(s.handleAdminAliases))
 	s.mux.HandleFunc("PUT /api/admin/aliases/{alias}", a(s.handleAdminPutAlias))
 	s.mux.HandleFunc("DELETE /api/admin/aliases/{alias}", a(s.handleAdminDeleteAlias))

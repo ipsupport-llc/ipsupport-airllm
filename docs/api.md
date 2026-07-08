@@ -79,6 +79,7 @@ than failing.
 | `GET`/`PUT` | `/api/admin/roles` · `/api/admin/roles/{role}` | Role policies (allowed models, passthrough, limits) |
 | `GET`/`PUT`/`DELETE` | `/api/admin/aliases` · `/api/admin/aliases/{alias}` | Model alias catalog (targets, strategy, fallback tiers) |
 | `GET`/`PUT` | `/api/admin/providers` · `/api/admin/providers/{name}` | Providers (kind, base URL, sealed credential, max concurrency, enabled) |
+| `GET` | `/api/admin/providers/{name}/models` | Live upstream model ids for one provider (5-min cache; `unsupported: true` when the kind cannot list) |
 | `GET`/`PUT` | `/api/admin/pricing` · `/api/admin/pricing/{model}` | Per-model input/output pricing (USD per 1M tokens) |
 | `GET`/`PUT` | `/api/admin/dlp` | DLP policy (incl. Sensitive Info Detection patterns + custom patterns) |
 | `GET` | `/api/admin/dlp/patterns` | Catalog of toggleable detection patterns (built-ins + model toggles) |
