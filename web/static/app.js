@@ -896,7 +896,7 @@ async function editAlias(c, a) {
   bg.innerHTML = `<div class="modal" style="max-width:560px">
     <h3>${esc(a.alias ? "Edit alias " + a.alias : "New alias")}</h3>
     <label class="field"><span class="lab">Alias (the model name clients request)</span>
-      <input id="al-alias" value="${esc(a.alias || "")}" ${a.alias ? "disabled" : ""} /></label>
+      <input id="al-alias" value="${esc(a.alias || "")}" /></label>
     <label class="field"><span class="lab">Client protocol</span>
       <select id="al-proto">
         <option ${a.protocol !== "anthropic" ? "selected" : ""}>openai</option>
@@ -935,8 +935,11 @@ async function editAlias(c, a) {
     }
     return modelLists[prov];
   }
-  async function loadModels(prov, dl) {
+  async function loadModels(prov, dl, provSel) {
     const models = await fetchModels(prov);
+    // Stale guard: the user may have switched provider again while this
+    // fetch was in flight — never overwrite a newer selection's list.
+    if (provSel && provSel.value !== prov) return;
     dl.innerHTML = models.map((m) => `<option value="${esc(m)}">`).join("");
   }
   function addRow(t) {
@@ -957,8 +960,8 @@ async function editAlias(c, a) {
     rowSeq++;
     const dl = row.querySelector("datalist");
     const provSel = row.querySelector(".t-prov");
-    loadModels(provSel.value, dl);
-    provSel.addEventListener("change", () => loadModels(provSel.value, dl));
+    loadModels(provSel.value, dl, provSel);
+    provSel.addEventListener("change", () => loadModels(provSel.value, dl, provSel));
     tdiv.appendChild(row);
   }
   targets.forEach(addRow);
@@ -978,8 +981,17 @@ async function editAlias(c, a) {
     if (tlist.length === 0) { toast("Add at least one target with a model", "err"); return; }
     const x = await api("PUT", `/api/admin/aliases/${encodeURIComponent(alias)}`,
       { protocol: $("#al-proto", bg).value, strategy: $("#al-strategy", bg).value, targets: tlist });
-    if (x.ok) { toast("Alias saved"); close(); adminAliases(c); }
-    else toast((x.data && x.data.error) || "Failed", "err");
+    if (!x.ok) { toast((x.data && x.data.error) || "Failed", "err"); return; }
+    // Rename = save under the new name, then drop the old one. Role
+    // policies and pricing that reference the old name are NOT rewritten.
+    if (a.alias && a.alias !== alias) {
+      const d = await api("DELETE", `/api/admin/aliases/${encodeURIComponent(a.alias)}`);
+      if (!d.ok) { toast(`Saved as ${alias}, but deleting old ${a.alias} failed`, "err"); close(); adminAliases(c); return; }
+      toast(`Renamed to ${alias} — update role policies/pricing that referenced ${a.alias}`);
+    } else {
+      toast("Alias saved");
+    }
+    close(); adminAliases(c);
   });
 }
 

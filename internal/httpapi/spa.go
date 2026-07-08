@@ -32,6 +32,10 @@ func (s *Server) registerSPA() {
 		}
 		if f, err := sub.Open(p); err == nil {
 			_ = f.Close()
+			// Assets are not content-hashed, so force revalidation: without
+			// this, CDN/proxy layers (e.g. Cloudflare) cache .js by default
+			// and browsers keep serving a stale console after an upgrade.
+			w.Header().Set("Cache-Control", "no-cache")
 			fileServer.ServeHTTP(w, r)
 			return
 		}
