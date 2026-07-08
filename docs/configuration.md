@@ -98,7 +98,7 @@ request/job without a restart.
 | `action` | `redact` | `off` \| `flag` \| `redact` \| `block` — what to do on a detection |
 | `scan_responses` | `false` | **Reserved and not enforced.** DLP scans prompts only by design — see [DLP, capture & audit](dlp-capture-audit.md#prompts-only). |
 | `model_enabled` | `false` | Enable the BERT-NER sidecar (layer 2) |
-| `model_url` | — | Sidecar URL, e.g. `http://dlp-bert:8000` |
+| `model_url` | — | Sidecar URL; pre-seeded on first boot from the deployment's DLP_MODEL_URL_DEFAULT (chart/compose set it automatically) — set manually only for custom setups |
 | `model_urls` | — | Array of sidecar URLs; overrides `model_url` when non-empty. A single hostname is resolved to all its A-records (one pool endpoint per IP), so `docker compose --scale` and k8s Services fan out automatically. |
 | `model_min_score` | `0` | Minimum sidecar confidence to accept a span (the console pre-fills `0.5` as a suggested starting value) |
 | `model_max_concurrency` | `0` | Per-endpoint cap on concurrent scans (0 = unlimited); when every endpoint is at the cap the scan is skipped and only the deterministic layer runs. |

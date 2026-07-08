@@ -63,6 +63,7 @@ than failing.
 | `POST` | `/api/keys` | Create a key (token returned once). Body: `{"name"}` |
 | `POST` | `/api/keys/{id}/revoke` | Revoke one of the caller's keys |
 | `GET` | `/api/usage` | The caller's rolling-window usage (tokens + cost) |
+| `GET` | `/api/usage/breakdown` | The caller's usage grouped by provider and by model over the last `hours` (default 24, max 168). Returns `{"providers":[...],"models":[...]}` |
 
 ## Control-plane — admin (`airllm_admin`)
 
@@ -76,6 +77,7 @@ than failing.
 | `GET` | `/api/admin/keys` | List all keys |
 | `POST` | `/api/admin/keys/{id}/revoke` | Revoke any key |
 | `GET` | `/api/admin/usage` | Usage across all keys |
+| `GET` | `/api/admin/usage/breakdown` | Usage across all keys grouped by provider and by model over the last `hours` (default 24, max 168). Returns `{"providers":[...],"models":[...]}` |
 | `GET`/`PUT` | `/api/admin/roles` · `/api/admin/roles/{role}` | Role policies (allowed models, passthrough, limits) |
 | `GET`/`PUT`/`DELETE` | `/api/admin/aliases` · `/api/admin/aliases/{alias}` | Model alias catalog (targets, strategy, fallback tiers) |
 | `GET`/`PUT` | `/api/admin/providers` · `/api/admin/providers/{name}` | Providers (kind, base URL, sealed credential, max concurrency, enabled) |

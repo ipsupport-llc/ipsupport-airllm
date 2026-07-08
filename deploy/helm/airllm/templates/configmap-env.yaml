@@ -10,6 +10,9 @@ data:
   AUTH_MODE: {{ .Values.config.authMode | quote }}
   AIRLLM_ADMIN_USERNAME: {{ .Values.config.adminUsername | quote }}
   CAPTURE_BLOB_DIR: {{ .Values.config.captureBlobDir | quote }}
+{{- if .Values.dlpBert.enabled }}
+  DLP_MODEL_URL_DEFAULT: {{ printf "http://%s:%d" (include "airllm.dlpBertServiceName" .) (int .Values.dlpBert.service.port) | quote }}
+{{- end }}
 {{- if eq .Values.config.authMode "oidc" }}
   OIDC_ISSUER: {{ .Values.config.oidc.issuer | quote }}
   OIDC_CLIENT_ID: {{ .Values.config.oidc.clientId | quote }}

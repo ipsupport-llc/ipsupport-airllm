@@ -255,9 +255,13 @@ function connectPanel() {
 // ---------- usage ----------
 async function viewUsage(view) {
   view.innerHTML = `<h1 class="page-title">Usage</h1><div id="u"></div>`;
-  const u = await api("GET", "/api/usage");
+  const [u, b] = await Promise.all([
+    api("GET", "/api/usage"),
+    api("GET", "/api/usage/breakdown?hours=24"),
+  ]);
   $("#u").innerHTML = usageCards(u.data || {}) +
-    `<p class="card-sub" style="color:var(--muted)">Rolling windows, enforced per API key. Limits are configured by your role policy.</p>`;
+    `<p class="card-sub" style="color:var(--muted)">Rolling windows, enforced per API key. Limits are configured by your role policy.</p>` +
+    breakdownTables(b.data || {});
 }
 
 // ---------- captures (auditor view) ----------
@@ -670,8 +674,12 @@ function viewAdmin(view, tab) {
 }
 
 async function adminUsage(c) {
-  const u = await api("GET", "/api/admin/usage");
-  c.innerHTML = `<h2 style="font-size:1.05rem">Organization usage</h2>` + usageCards(u.data || {});
+  const [u, b] = await Promise.all([
+    api("GET", "/api/admin/usage"),
+    api("GET", "/api/admin/usage/breakdown?hours=24"),
+  ]);
+  c.innerHTML = `<h2 style="font-size:1.05rem">Organization usage</h2>` + usageCards(u.data || {}) +
+    breakdownTables(b.data || {});
 }
 
 async function adminUsers(c) {
@@ -1190,6 +1198,28 @@ function editWebhook(c) {
 }
 
 // ---------- generic table + modal ----------
+// breakdownTables renders the by-provider and by-model usage breakdown
+// tables from a GET /api/usage/breakdown (or /api/admin/usage/breakdown)
+// response.
+function breakdownTables(d) {
+  const provRows = (d.providers || []).map((p) => `<tr>
+    <td>${esc(p.provider)}</td><td>${p.requests}</td><td>${p.tokens}</td>
+    <td>$${(+p.cost_usd).toFixed(4)}</td><td>${p.p95_ms} ms</td><td>${p.errors}</td></tr>`);
+  const modelRows = (d.models || []).map((m) => `<tr>
+    <td class="mono">${esc(m.alias)}</td><td>${esc(m.provider)}</td><td class="mono">${esc(m.upstream_model)}</td>
+    <td>${m.requests}</td><td>${m.tokens}</td><td>$${(+m.cost_usd).toFixed(4)}</td>
+    <td>${m.p95_ms} ms</td><td>${m.errors}</td></tr>`);
+  const empty = (title) => `<div class="panel">
+    <div class="panel-head"><h2>${esc(title)}</h2></div>
+    <div class="empty">No traffic in this window.</div></div>`;
+  return (provRows.length
+    ? panelTable("By provider", ["Provider", "Requests", "Tokens", "Cost", "p95", "Errors"], provRows)
+    : empty("By provider"))
+    + (modelRows.length
+    ? panelTable("By model", ["Alias", "Provider", "Upstream model", "Requests", "Tokens", "Cost", "p95", "Errors"], modelRows)
+    : empty("By model"));
+}
+
 function panelTable(title, cols, rowsHtml) {
   return `<div class="panel">
     <div class="panel-head"><h2>${esc(title)}</h2></div>
