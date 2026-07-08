@@ -921,6 +921,24 @@ async function editAlias(c, a) {
 
   const provOpts = (sel) => providers.map((p) =>
     `<option value="${esc(p)}" ${p === sel ? "selected" : ""}>${esc(p)}</option>`).join("");
+  // Upstream model suggestions: fetched per provider, memoized (as an
+  // in-flight promise, so concurrent requests for the same provider share
+  // one fetch) for the lifetime of this modal. Failure or unsupported ->
+  // empty list; the input stays free-text either way.
+  const modelLists = {};
+  let rowSeq = 0;
+  function fetchModels(prov) {
+    if (!(prov in modelLists)) {
+      modelLists[prov] = api("GET", `/api/admin/providers/${encodeURIComponent(prov)}/models`)
+        .then((r) => (r.ok && r.data && r.data.models) || [])
+        .catch(() => []);
+    }
+    return modelLists[prov];
+  }
+  async function loadModels(prov, dl) {
+    const models = await fetchModels(prov);
+    dl.innerHTML = models.map((m) => `<option value="${esc(m)}">`).join("");
+  }
   function addRow(t) {
     const row = document.createElement("div");
     row.className = "row tgt";
@@ -928,13 +946,19 @@ async function editAlias(c, a) {
     row.innerHTML = `
       <input class="t-prio" type="number" min="0" value="${Number(t.priority) || 0}" title="priority / tier (same number = load-balanced)" style="width:64px" />
       <select class="t-prov" style="width:auto">${provOpts(t.provider)}</select>
-      <input class="t-model" placeholder="upstream model" value="${esc(t.upstream_model || "")}" style="flex:1;min-width:120px" />
+      <input class="t-model" list="al-models-${rowSeq}" placeholder="upstream model" value="${esc(t.upstream_model || "")}" style="flex:1;min-width:120px" />
+      <datalist id="al-models-${rowSeq}"></datalist>
       <select class="t-proto" style="width:auto">
         <option ${t.upstream_protocol !== "anthropic" ? "selected" : ""}>openai</option>
         <option ${t.upstream_protocol === "anthropic" ? "selected" : ""}>anthropic</option>
       </select>
       <button type="button" class="btn danger sm t-del" title="remove">×</button>`;
     row.querySelector(".t-del").addEventListener("click", () => row.remove());
+    rowSeq++;
+    const dl = row.querySelector("datalist");
+    const provSel = row.querySelector(".t-prov");
+    loadModels(provSel.value, dl);
+    provSel.addEventListener("change", () => loadModels(provSel.value, dl));
     tdiv.appendChild(row);
   }
   targets.forEach(addRow);

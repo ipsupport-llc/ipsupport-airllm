@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -130,4 +132,44 @@ func (p *OpenAICompat) ChatStream(ctx context.Context, in llm.ChatRequest, yield
 		}
 	}
 	return sc.Err()
+}
+
+// ListModels fetches GET {base}/models and returns the sorted, de-duplicated
+// model ids. All OpenAI-compatible upstreams expose this endpoint.
+func (p *OpenAICompat) ListModels(ctx context.Context) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	if p.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
+	resp, err := p.hc.Do(req)
+	if err != nil {
+		return nil, &Error{Status: http.StatusBadGateway, Retryable: true, Message: err.Error()}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return nil, httpError(p.name, resp.StatusCode, b)
+	}
+	var out struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode %s models: %w", p.name, err)
+	}
+	seen := map[string]bool{}
+	var ids []string
+	for _, m := range out.Data {
+		if m.ID == "" || seen[m.ID] {
+			continue
+		}
+		seen[m.ID] = true
+		ids = append(ids, m.ID)
+	}
+	sort.Strings(ids)
+	return ids, nil
 }

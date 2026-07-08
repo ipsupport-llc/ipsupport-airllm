@@ -67,6 +67,7 @@ type Server struct {
 	captureIdx    captureReader     // nil until first audit route access (set in NewServer)
 	metrics       *metrics.Metrics
 	modelPool     *modelpool.Pool
+	catalog       catalogCache // per-provider upstream model list micro-cache
 
 	// Test hooks: non-nil values replace the real implementations in tests.
 	auditHook    func(ctx context.Context, actor, action, target string, detail any)

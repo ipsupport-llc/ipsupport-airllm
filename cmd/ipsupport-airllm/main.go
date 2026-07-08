@@ -58,6 +58,10 @@ func run() error {
 		return err
 	}
 
+	if err := seed.EnsureBuiltinRoles(ctx, st); err != nil {
+		return fmt.Errorf("ensure builtin roles: %w", err)
+	}
+
 	// Wire the auth mode. AUTH_MODE=mock is a deprecated alias for local.
 	var authImpl auth.Authenticator
 	var loginImpl auth.LoginProvider
