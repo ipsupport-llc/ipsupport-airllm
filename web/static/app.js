@@ -921,19 +921,23 @@ async function editAlias(c, a) {
 
   const provOpts = (sel) => providers.map((p) =>
     `<option value="${esc(p)}" ${p === sel ? "selected" : ""}>${esc(p)}</option>`).join("");
-  // Upstream model suggestions: fetched per provider, memoized for the
-  // lifetime of this modal. Failure or unsupported -> empty list; the input
-  // stays free-text either way.
+  // Upstream model suggestions: fetched per provider, memoized (as an
+  // in-flight promise, so concurrent requests for the same provider share
+  // one fetch) for the lifetime of this modal. Failure or unsupported ->
+  // empty list; the input stays free-text either way.
   const modelLists = {};
   let rowSeq = 0;
-  async function loadModels(prov, dl) {
+  function fetchModels(prov) {
     if (!(prov in modelLists)) {
-      try {
-        const r = await api("GET", `/api/admin/providers/${encodeURIComponent(prov)}/models`);
-        modelLists[prov] = (r.ok && r.data && r.data.models) || [];
-      } catch { modelLists[prov] = []; }
+      modelLists[prov] = api("GET", `/api/admin/providers/${encodeURIComponent(prov)}/models`)
+        .then((r) => (r.ok && r.data && r.data.models) || [])
+        .catch(() => []);
     }
-    dl.innerHTML = modelLists[prov].map((m) => `<option value="${esc(m)}">`).join("");
+    return modelLists[prov];
+  }
+  async function loadModels(prov, dl) {
+    const models = await fetchModels(prov);
+    dl.innerHTML = models.map((m) => `<option value="${esc(m)}">`).join("");
   }
   function addRow(t) {
     const row = document.createElement("div");
