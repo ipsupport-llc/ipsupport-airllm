@@ -1209,8 +1209,15 @@ function breakdownTables(d) {
     <td class="mono">${esc(m.alias)}</td><td>${esc(m.provider)}</td><td class="mono">${esc(m.upstream_model)}</td>
     <td>${m.requests}</td><td>${m.tokens}</td><td>$${(+m.cost_usd).toFixed(4)}</td>
     <td>${m.p95_ms} ms</td><td>${m.errors}</td></tr>`);
-  return panelTable("By provider", ["Provider", "Requests", "Tokens", "Cost", "p95", "Errors"], provRows)
-    + panelTable("By model", ["Alias", "Provider", "Upstream model", "Requests", "Tokens", "Cost", "p95", "Errors"], modelRows);
+  const empty = (title) => `<div class="panel">
+    <div class="panel-head"><h2>${esc(title)}</h2></div>
+    <div class="empty">No traffic in this window.</div></div>`;
+  return (provRows.length
+    ? panelTable("By provider", ["Provider", "Requests", "Tokens", "Cost", "p95", "Errors"], provRows)
+    : empty("By provider"))
+    + (modelRows.length
+    ? panelTable("By model", ["Alias", "Provider", "Upstream model", "Requests", "Tokens", "Cost", "p95", "Errors"], modelRows)
+    : empty("By model"));
 }
 
 function panelTable(title, cols, rowsHtml) {
