@@ -130,6 +130,10 @@ request/job without a restart.
 Roles (`airllm_admin`, `airllm_user`, `airllm_auditor`) carry a policy that is
 snapshotted onto each API key at issue time (`GET/PUT /api/admin/roles`):
 
+Snapshots are rebuilt automatically — in the same transaction — when a role
+policy or a user's role list changes, and on every OIDC login; existing keys
+pick up policy edits immediately, no re-issue needed.
+
 - `allowed_models` — list of permitted aliases; `*` means all.
 - `allow_passthrough` — whether explicit `provider/model` passthrough is allowed.
 - `limits` — rolling-window caps, shaped as `{ "tokens": {"24h": 200000}, "cost_usd": {"7d": 5} }`.
