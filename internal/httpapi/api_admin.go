@@ -22,6 +22,7 @@ func (s *Server) adminRoutes() {
 	s.mux.HandleFunc("POST /api/admin/keys/{id}/revoke", a(s.handleAdminRevokeKey))
 	s.mux.HandleFunc("GET /api/admin/usage", a(s.handleAdminUsage))
 	s.mux.HandleFunc("GET /api/admin/usage/series", a(s.handleAdminUsageSeries))
+	s.mux.HandleFunc("GET /api/admin/usage/breakdown", a(s.handleAdminUsageBreakdown))
 	s.mux.HandleFunc("GET /api/admin/audit", a(s.handleAdminAudit))
 	s.mux.HandleFunc("GET /api/admin/roles", a(s.handleAdminRoles))
 	s.mux.HandleFunc("PUT /api/admin/roles/{role}", a(s.handleAdminPutRole))
