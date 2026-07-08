@@ -2,14 +2,12 @@ package httpapi
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
-	"sort"
 	"strconv"
 	"time"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/apikey"
-	"github.com/ipsupport-llc/ipsupport-airllm/internal/policy"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 )
 
 // handleAuthMode reports the active auth mode so the login screen can render
@@ -74,7 +72,7 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		body.Name = "key"
 	}
 
-	snapshot, err := s.effectivePolicyJSON(r.Context(), sess.principal.Roles)
+	snapshot, err := store.EffectivePolicy(r.Context(), s.st.PG, sess.principal.Roles)
 	if err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to resolve policy")
 		return
@@ -243,44 +241,4 @@ func (s *Server) handleUsageSeries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"series": series})
-}
-
-// effectivePolicyJSON merges the policies of the caller's roles into one
-// snapshot: union of allowed models, OR of passthrough, first non-empty
-// limits.
-func (s *Server) effectivePolicyJSON(ctx context.Context, roles []string) ([]byte, error) {
-	eff := policy.KeyPolicy{}
-	if len(roles) > 0 {
-		rows, err := s.st.PG.Query(ctx, `
-			SELECT allowed_models, allow_passthrough, limits
-			FROM roles_policy WHERE role = ANY($1)`, roles)
-		if err != nil {
-			return nil, err
-		}
-		defer rows.Close()
-		modelSet := map[string]bool{}
-		for rows.Next() {
-			var models []string
-			var passthrough bool
-			var limits json.RawMessage
-			if err := rows.Scan(&models, &passthrough, &limits); err != nil {
-				return nil, err
-			}
-			for _, m := range models {
-				modelSet[m] = true
-			}
-			eff.AllowPassthrough = eff.AllowPassthrough || passthrough
-			if len(eff.Limits) == 0 && len(limits) > 0 && string(limits) != "{}" {
-				eff.Limits = limits
-			}
-		}
-		if err := rows.Err(); err != nil {
-			return nil, err
-		}
-		for m := range modelSet {
-			eff.AllowedModels = append(eff.AllowedModels, m)
-		}
-		sort.Strings(eff.AllowedModels)
-	}
-	return json.Marshal(eff)
 }

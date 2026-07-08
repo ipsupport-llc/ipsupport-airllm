@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/pricing"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 )
 
 func (s *Server) adminRoutes() {
@@ -210,7 +211,13 @@ func (s *Server) handleAdminPutRole(w http.ResponseWriter, r *http.Request) {
 	if len(body.Limits) == 0 {
 		body.Limits = json.RawMessage("{}")
 	}
-	_, err := s.st.PG.Exec(r.Context(), `
+	tx, err := s.st.PG.Begin(r.Context())
+	if err != nil {
+		writeControlError(w, http.StatusInternalServerError, "failed to save role")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	if _, err := tx.Exec(r.Context(), `
 		INSERT INTO roles_policy (role, allowed_models, allow_passthrough, limits)
 		VALUES ($1, $2, $3, $4::jsonb)
 		ON CONFLICT (role) DO UPDATE SET
@@ -218,8 +225,17 @@ func (s *Server) handleAdminPutRole(w http.ResponseWriter, r *http.Request) {
 			allow_passthrough = EXCLUDED.allow_passthrough,
 			limits = EXCLUDED.limits,
 			updated_at = now()`,
-		role, body.AllowedModels, body.AllowPassthrough, string(body.Limits))
-	if err != nil {
+		role, body.AllowedModels, body.AllowPassthrough, string(body.Limits)); err != nil {
+		writeControlError(w, http.StatusInternalServerError, "failed to save role")
+		return
+	}
+	// Keep existing keys honest: re-snapshot every affected user's active
+	// keys in the same transaction (the missing half of the original design).
+	if err := store.RebuildKeySnapshotsRole(r.Context(), tx, role); err != nil {
+		writeControlError(w, http.StatusInternalServerError, "failed to rebuild key snapshots")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to save role")
 		return
 	}

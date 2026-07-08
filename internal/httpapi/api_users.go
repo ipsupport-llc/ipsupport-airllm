@@ -119,8 +119,22 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		writeControlError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := s.users().Update(r.Context(), id, body.Email, body.Display, body.Roles, body.Disabled); err != nil {
+	tx, err := s.st.PG.Begin(r.Context())
+	if err != nil {
+		writeControlError(w, http.StatusInternalServerError, "operation failed")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	if err := s.users().Update(r.Context(), tx, id, body.Email, body.Display, body.Roles, body.Disabled); err != nil {
 		s.writeUserErr(w, err)
+		return
+	}
+	if err := store.RebuildKeySnapshotsUser(r.Context(), tx, id); err != nil {
+		writeControlError(w, http.StatusInternalServerError, "failed to rebuild key snapshots")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeControlError(w, http.StatusInternalServerError, "operation failed")
 		return
 	}
 	s.audit(r.Context(), sess.principal.Subject, "user.update", id, map[string]any{"disabled": body.Disabled, "roles": body.Roles})
