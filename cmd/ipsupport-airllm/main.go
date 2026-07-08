@@ -62,6 +62,10 @@ func run() error {
 		return fmt.Errorf("ensure builtin roles: %w", err)
 	}
 
+	if err := seed.EnsureDLPDefaults(ctx, st.PG, os.Getenv("DLP_MODEL_URL_DEFAULT")); err != nil {
+		return fmt.Errorf("ensure dlp defaults: %w", err)
+	}
+
 	// Wire the auth mode. AUTH_MODE=mock is a deprecated alias for local.
 	var authImpl auth.Authenticator
 	var loginImpl auth.LoginProvider

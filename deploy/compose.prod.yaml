@@ -54,6 +54,8 @@ services:
       AIRLLM_ADMIN_USERNAME: ${AIRLLM_ADMIN_USERNAME:-admin}
       AIRLLM_ADMIN_PASSWORD: ${AIRLLM_ADMIN_PASSWORD:?set AIRLLM_ADMIN_PASSWORD in deploy/.env (run make gen-secrets)}
       CAPTURE_BLOB_DIR: "/var/lib/airllm/captures"
+      # First-boot default for the DLP sidecar URL; ignored once DLP config is saved.
+      DLP_MODEL_URL_DEFAULT: "http://dlp-bert:8000"
     volumes:
       - captures:/var/lib/airllm/captures
     # Loopback by default. With --profile tls, Caddy is the public entry — keep
