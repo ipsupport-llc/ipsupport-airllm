@@ -262,7 +262,9 @@ func snapshotOriginals(action string, msgs []llm.Message) []llm.Message {
 // are recorded and alerted regardless of action (except "off").
 // It also returns a dlpResult for the capture pipeline (findings are collected
 // across all messages; offsets are per-message and meaningful only in context).
-func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, req *llm.ChatRequest) (blocked bool, message string, result dlpResult) {
+// modelScan gates only the layer-2 BERT sidecar scan (per-alias passthrough
+// toggle); the layer-1 deterministic patterns always run regardless.
+func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, req *llm.ChatRequest, modelScan bool) (blocked bool, message string, result dlpResult) {
 	cfg := s.dlpCfg()
 	if !cfg.Enabled || cfg.Action == "off" {
 		return false, "", dlpResult{}
@@ -272,7 +274,7 @@ func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, r
 	// capture pipeline can build an un-redacted raw-window body.
 	original := snapshotOriginals(cfg.Action, req.Messages)
 
-	modelOn := cfg.ModelEnabled && len(cfg.effectiveModelURLs()) > 0
+	modelOn := cfg.ModelEnabled && modelScan && len(cfg.effectiveModelURLs()) > 0
 	labelSet := map[string]bool{}
 	total := 0
 	sample := ""

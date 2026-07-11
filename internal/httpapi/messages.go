@@ -43,7 +43,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	s.metrics.ObserveComponent("limits", time.Since(t0))
 	t0 = time.Now()
-	blocked, msg, dlpRes := s.dlpEnforce(r.Context(), ak, "anthropic", &req)
+	blocked, msg, dlpRes := s.dlpEnforce(r.Context(), ak, "anthropic", &req, plan.DLPModelScan)
 	s.metrics.ObserveComponent("dlp", time.Since(t0))
 	if blocked {
 		writeProtocolError(w, r, http.StatusBadRequest, "invalid_request_error", msg)
