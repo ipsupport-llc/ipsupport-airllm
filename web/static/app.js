@@ -1211,21 +1211,24 @@ function editWebhook(c) {
 // tables from a GET /api/usage/breakdown (or /api/admin/usage/breakdown)
 // response.
 function breakdownTables(d) {
+  const tok = (n) => (+n || 0).toLocaleString("en-US");
   const provRows = (d.providers || []).map((p) => `<tr>
-    <td>${esc(p.provider)}</td><td>${p.requests}</td><td>${p.tokens}</td>
+    <td>${esc(p.provider)}</td><td>${p.requests}</td>
+    <td class="mono">${tok(p.tokens_in)} / ${tok(p.tokens_out)}</td>
     <td>$${(+p.cost_usd).toFixed(4)}</td><td>${p.p95_ms} ms</td><td>${p.errors}</td></tr>`);
   const modelRows = (d.models || []).map((m) => `<tr>
     <td class="mono">${esc(m.alias)}</td><td>${esc(m.provider)}</td><td class="mono">${esc(m.upstream_model)}</td>
-    <td>${m.requests}</td><td>${m.tokens}</td><td>$${(+m.cost_usd).toFixed(4)}</td>
+    <td>${m.requests}</td><td class="mono">${tok(m.tokens_in)} / ${tok(m.tokens_out)}</td>
+    <td>$${(+m.cost_usd).toFixed(4)}</td>
     <td>${m.p95_ms} ms</td><td>${m.errors}</td></tr>`);
   const empty = (title) => `<div class="panel">
     <div class="panel-head"><h2>${esc(title)}</h2></div>
     <div class="empty">No traffic in this window.</div></div>`;
   return (provRows.length
-    ? panelTable("By provider", ["Provider", "Requests", "Tokens", "Cost", "p95", "Errors"], provRows)
+    ? panelTable("By provider", ["Provider", "Requests", "Tokens in / out", "Cost", "p95", "Errors"], provRows)
     : empty("By provider"))
     + (modelRows.length
-    ? panelTable("By model", ["Alias", "Provider", "Upstream model", "Requests", "Tokens", "Cost", "p95", "Errors"], modelRows)
+    ? panelTable("By model", ["Alias", "Provider", "Upstream model", "Requests", "Tokens in / out", "Cost", "p95", "Errors"], modelRows)
     : empty("By model"));
 }
 
