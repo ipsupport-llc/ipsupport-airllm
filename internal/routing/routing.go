@@ -27,9 +27,10 @@ type Target struct {
 // Plan is the ordered set of priority tiers for a request, plus the within-
 // tier balancing strategy.
 type Plan struct {
-	Alias    string
-	Strategy string     // round_robin | least_busy
-	Tiers    [][]Target // index 0 = highest priority (tried first)
+	Alias        string
+	Strategy     string     // round_robin | least_busy
+	DLPModelScan bool       // run the layer-2 BERT scan for this alias
+	Tiers        [][]Target // index 0 = highest priority (tried first)
 }
 
 // Ordered flattens the tiers into the try-order for one request: tier by tier,
@@ -99,11 +100,12 @@ func (r *Router) Resolve(ctx context.Context, model string, allowPassthrough boo
 		if err != nil {
 			return nil, err
 		}
-		return &Plan{Alias: model, Strategy: "round_robin", Tiers: [][]Target{{t}}}, nil
+		return &Plan{Alias: model, Strategy: "round_robin", DLPModelScan: true, Tiers: [][]Target{{t}}}, nil
 	}
 
 	var strategy string
-	err := r.st.PG.QueryRow(ctx, `SELECT strategy FROM model_aliases WHERE alias = $1`, model).Scan(&strategy)
+	var dlpModelScan bool
+	err := r.st.PG.QueryRow(ctx, `SELECT strategy, dlp_model_scan FROM model_aliases WHERE alias = $1`, model).Scan(&strategy, &dlpModelScan)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("model %q not found", model)
@@ -142,7 +144,7 @@ func (r *Router) Resolve(ctx context.Context, model string, allowPassthrough boo
 	if len(tiers) == 0 {
 		return nil, fmt.Errorf("model %q has no available targets", model)
 	}
-	return &Plan{Alias: model, Strategy: strategy, Tiers: tiers}, nil
+	return &Plan{Alias: model, Strategy: strategy, DLPModelScan: dlpModelScan, Tiers: tiers}, nil
 }
 
 func (r *Router) passthroughTarget(ctx context.Context, provider, upstreamModel string) (Target, error) {
