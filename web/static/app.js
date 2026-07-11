@@ -877,9 +877,10 @@ async function adminAliases(c) {
   const r = await api("GET", "/api/admin/aliases");
   const al = (r.data && r.data.aliases) || [];
   c.innerHTML = `<div class="row" style="margin-bottom:1rem"><button class="btn sm" id="new-alias">New alias</button></div>` +
-    panelTable("Model aliases", ["Alias", "Protocol", "Strategy", "Targets", ""],
+    panelTable("Model aliases", ["Alias", "Protocol", "Strategy", "BERT", "Targets", ""],
       al.map((a) => `<tr><td class="mono">${esc(a.alias)}</td><td>${esc(a.protocol)}</td>
         <td>${esc(a.strategy || "round_robin")}</td>
+        <td>${a.dlp_model_scan ? `<span class="badge neutral">on</span>` : `<span class="badge revoked">off</span>`}</td>
         <td class="mono">${(a.targets || []).map((t) => `${esc(t.provider)}/${esc(t.upstream_model)} (p${t.priority})`).join(", ") || "—"}</td>
         <td style="text-align:right"><button class="btn ghost sm" data-edit='${esc(JSON.stringify(a))}'>Edit</button>
           <button class="btn danger sm" data-del="${esc(a.alias)}">Delete</button></td></tr>`));
@@ -921,6 +922,8 @@ async function editAlias(c, a) {
         <option value="round_robin" ${a.strategy !== "least_busy" ? "selected" : ""}>round_robin</option>
         <option value="least_busy" ${a.strategy === "least_busy" ? "selected" : ""}>least_busy</option>
       </select></label>
+    <label class="field"><span class="lab">Layer-2 BERT scan (fuzzy PII)</span>
+      <input id="al-bert" type="checkbox" ${a.dlp_model_scan === false ? "" : "checked"} style="width:auto" /></label>
     <div class="lab" style="color:var(--muted);font-size:.82rem;margin-bottom:.3rem">Targets: same priority = load-balanced tier; higher number = fallback tier</div>
     <div id="al-targets"></div>
     <button type="button" class="btn ghost sm" id="al-add" style="margin-top:.3rem">+ Add target</button>
@@ -1005,7 +1008,8 @@ async function editAlias(c, a) {
     })).filter((t) => t.upstream_model);
     if (tlist.length === 0) { toast("Add at least one target with a model", "err"); return; }
     const x = await api("PUT", `/api/admin/aliases/${encodeURIComponent(alias)}`,
-      { protocol: $("#al-proto", bg).value, strategy: $("#al-strategy", bg).value, targets: tlist });
+      { protocol: $("#al-proto", bg).value, strategy: $("#al-strategy", bg).value, targets: tlist,
+        dlp_model_scan: $("#al-bert", bg).checked });
     if (!x.ok) { toast((x.data && x.data.error) || "Failed", "err"); return; }
     // Rename = save under the new name, then drop the old one. Role
     // policies and pricing that reference the old name are NOT rewritten.
