@@ -1,10 +1,20 @@
 package httpapi
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/dlp"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/modelpool"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 )
 
 func TestCompileCustomPatterns(t *testing.T) {
@@ -134,5 +144,95 @@ func TestFilterModelFindings(t *testing.T) {
 	got := filterModelFindings(append([]dlp.Finding(nil), in...), map[string]bool{"person_name": true})
 	if len(got) != 1 || got[0].Label != "pii:PER" {
 		t.Fatalf("expected only pii:PER, got %+v", got)
+	}
+}
+
+// newDLPEnforceTestServer builds a minimal *Server wired for dlpEnforce: DLP +
+// model scanning enabled, model URLs pointed at the given sidecar, and a store
+// backed by an unreachable (but structurally valid) Postgres pool. dlpEnforce's
+// best-effort incident/webhook lookups then fail with a connection error
+// (fast: localhost connection-refused) instead of a nil-pointer panic, so the
+// test needs no real database.
+func newDLPEnforceTestServer(t *testing.T, sidecarURL string) *Server {
+	t.Helper()
+	pgPool, err := pgxpool.New(context.Background(), "postgres://user:pass@127.0.0.1:1/db?connect_timeout=1")
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	t.Cleanup(pgPool.Close)
+
+	cfg := dlpConfig{
+		Enabled:       true,
+		Action:        "flag",
+		ModelEnabled:  true,
+		ModelURLs:     []string{sidecarURL},
+		ModelMinScore: 0.5,
+	}
+	s := &Server{
+		st:    &store.Store{PG: pgPool},
+		httpc: http.DefaultClient,
+	}
+	s.dlpPtr.Store(&cfg)
+	s.modelPool = modelpool.New(
+		func() ([]string, int) { return []string{sidecarURL}, 0 },
+		func(host string) ([]string, error) {
+			t.Fatalf("unexpected DNS resolution for host %q; the test sidecar is an IP literal", host)
+			return nil, nil
+		},
+	)
+	return s
+}
+
+// TestDlpEnforceModelScanGate proves modelScan gates ONLY the layer-2 BERT
+// sidecar call: with model scanning enabled config-wise, dlpEnforce(...,
+// false) must never hit the sidecar, while the layer-1 deterministic scan
+// still fires on a message containing a detectable secret. The true case is
+// a positive control proving the same setup DOES hit the sidecar when the
+// alias opts in, so the false-case result isn't just an artifact of a
+// misconfigured pool.
+func TestDlpEnforceModelScanGate(t *testing.T) {
+	const secret = "sk-ant-api03-aaaabbbbccccddddeeee1234"
+
+	for _, tc := range []struct {
+		name      string
+		modelScan bool
+		wantHits  int32
+	}{
+		{"modelScan=false skips sidecar", false, 0},
+		{"modelScan=true hits sidecar", true, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var hits atomic.Int32
+			sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"findings": []any{}})
+			}))
+			defer sidecar.Close()
+
+			s := newDLPEnforceTestServer(t, sidecar.URL)
+			req := &llm.ChatRequest{Messages: []llm.Message{{Role: "user", Content: "key: " + secret}}}
+
+			blocked, _, result := s.dlpEnforce(context.Background(), authedKey{KeyID: "k1", UserID: "u1"}, "openai", req, tc.modelScan)
+
+			if blocked {
+				t.Error("action=flag must never block")
+			}
+			if !result.HadIncident || len(result.Findings) == 0 {
+				t.Fatalf("expected layer-1 findings on a message with a detectable secret, got %+v", result)
+			}
+			found := false
+			for _, f := range result.Findings {
+				if f.Label == "anthropic_key" {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("expected an anthropic_key finding, got %+v", result.Findings)
+			}
+			if got := hits.Load(); got != tc.wantHits {
+				t.Errorf("sidecar hits = %d, want %d", got, tc.wantHits)
+			}
+		})
 	}
 }

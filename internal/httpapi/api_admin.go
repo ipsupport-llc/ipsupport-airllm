@@ -348,7 +348,7 @@ type aliasTarget struct {
 
 func (s *Server) handleAdminAliases(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.st.PG.Query(r.Context(), `
-		SELECT a.alias, a.protocol, a.strategy,
+		SELECT a.alias, a.protocol, a.strategy, a.dlp_model_scan,
 			COALESCE(t.priority, 0), COALESCE(t.provider_name, ''),
 			COALESCE(t.upstream_model, ''), COALESCE(t.upstream_protocol, '')
 		FROM model_aliases a
@@ -360,23 +360,25 @@ func (s *Server) handleAdminAliases(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	type aliasView struct {
-		Alias    string        `json:"alias"`
-		Protocol string        `json:"protocol"`
-		Strategy string        `json:"strategy"`
-		Targets  []aliasTarget `json:"targets"`
+		Alias        string        `json:"alias"`
+		Protocol     string        `json:"protocol"`
+		Strategy     string        `json:"strategy"`
+		DLPModelScan bool          `json:"dlp_model_scan"`
+		Targets      []aliasTarget `json:"targets"`
 	}
 	byAlias := map[string]*aliasView{}
 	var order []string
 	for rows.Next() {
 		var alias, protocol, strategy, provider, upModel, upProto string
 		var priority int
-		if err := rows.Scan(&alias, &protocol, &strategy, &priority, &provider, &upModel, &upProto); err != nil {
+		var dlpModelScan bool
+		if err := rows.Scan(&alias, &protocol, &strategy, &dlpModelScan, &priority, &provider, &upModel, &upProto); err != nil {
 			writeControlError(w, http.StatusInternalServerError, "failed to read aliases")
 			return
 		}
 		av, ok := byAlias[alias]
 		if !ok {
-			av = &aliasView{Alias: alias, Protocol: protocol, Strategy: strategy, Targets: []aliasTarget{}}
+			av = &aliasView{Alias: alias, Protocol: protocol, Strategy: strategy, DLPModelScan: dlpModelScan, Targets: []aliasTarget{}}
 			byAlias[alias] = av
 			order = append(order, alias)
 		}
@@ -395,9 +397,10 @@ func (s *Server) handleAdminPutAlias(w http.ResponseWriter, r *http.Request) {
 	sess, _ := sessionFrom(r.Context())
 	alias := r.PathValue("alias")
 	var body struct {
-		Protocol string        `json:"protocol"`
-		Strategy string        `json:"strategy"`
-		Targets  []aliasTarget `json:"targets"`
+		Protocol     string        `json:"protocol"`
+		Strategy     string        `json:"strategy"`
+		DLPModelScan *bool         `json:"dlp_model_scan"`
+		Targets      []aliasTarget `json:"targets"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeControlError(w, http.StatusBadRequest, "invalid body")
@@ -409,6 +412,10 @@ func (s *Server) handleAdminPutAlias(w http.ResponseWriter, r *http.Request) {
 	if body.Strategy != "least_busy" {
 		body.Strategy = "round_robin"
 	}
+	scan := true
+	if body.DLPModelScan != nil {
+		scan = *body.DLPModelScan
+	}
 
 	tx, err := s.st.PG.Begin(r.Context())
 	if err != nil {
@@ -418,9 +425,9 @@ func (s *Server) handleAdminPutAlias(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 
 	if _, err := tx.Exec(r.Context(), `
-		INSERT INTO model_aliases (alias, protocol, strategy) VALUES ($1, $2, $3)
-		ON CONFLICT (alias) DO UPDATE SET protocol = EXCLUDED.protocol, strategy = EXCLUDED.strategy`,
-		alias, body.Protocol, body.Strategy); err != nil {
+		INSERT INTO model_aliases (alias, protocol, strategy, dlp_model_scan) VALUES ($1, $2, $3, $4)
+		ON CONFLICT (alias) DO UPDATE SET protocol = EXCLUDED.protocol, strategy = EXCLUDED.strategy, dlp_model_scan = EXCLUDED.dlp_model_scan`,
+		alias, body.Protocol, body.Strategy, scan); err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to save alias")
 		return
 	}
