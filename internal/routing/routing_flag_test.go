@@ -2,8 +2,10 @@ package routing
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -83,7 +85,10 @@ func TestDLPModelScanFlag(t *testing.T) {
 	}
 
 	// Passthrough branch: run the real Router.Resolve against the live pool.
-	const passthroughProvider = "flag-test-passthrough-provider"
+	// The fixture row lives outside the rolled-back tx (Resolve queries the
+	// pool), so give it a unique per-run name: an orphan from a killed test
+	// process must never collide with (and break) future runs.
+	passthroughProvider := fmt.Sprintf("flag-test-passthrough-%d", time.Now().UnixNano())
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO providers (name, kind, base_url, enabled) VALUES ($1, $2, $3, $4)`,
 		passthroughProvider, "openai", "http://example.invalid", true,
