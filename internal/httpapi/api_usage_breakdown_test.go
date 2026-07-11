@@ -79,7 +79,7 @@ func TestUsageBreakdownQueries(t *testing.T) {
 	var provs []providerUsage
 	for provRows.Next() {
 		var p providerUsage
-		if err := provRows.Scan(&p.Provider, &p.Requests, &p.Tokens, &p.CostUSD, &p.P95ms, &p.Errors); err != nil {
+		if err := provRows.Scan(&p.Provider, &p.Requests, &p.TokensIn, &p.TokensOut, &p.CostUSD, &p.P95ms, &p.Errors); err != nil {
 			provRows.Close()
 			t.Fatalf("scan provider row: %v", err)
 		}
@@ -111,6 +111,11 @@ func TestUsageBreakdownQueries(t *testing.T) {
 	if openai.Requests != 3 {
 		t.Errorf("bp-openai requests = %d, want 3", openai.Requests)
 	}
+	// Prompt and completion tokens are priced differently - the breakdown
+	// must report them separately (350 in / 175 out for the fixtures).
+	if openai.TokensIn != 350 || openai.TokensOut != 175 {
+		t.Errorf("bp-openai tokens = %d in / %d out, want 350/175", openai.TokensIn, openai.TokensOut)
+	}
 	if openai.Errors != 1 {
 		t.Errorf("bp-openai errors = %d, want 1", openai.Errors)
 	}
@@ -126,7 +131,7 @@ func TestUsageBreakdownQueries(t *testing.T) {
 	var models []modelUsage
 	for modelRows.Next() {
 		var m modelUsage
-		if err := modelRows.Scan(&m.Alias, &m.Provider, &m.UpstreamModel, &m.Requests, &m.Tokens, &m.CostUSD, &m.P95ms, &m.Errors); err != nil {
+		if err := modelRows.Scan(&m.Alias, &m.Provider, &m.UpstreamModel, &m.Requests, &m.TokensIn, &m.TokensOut, &m.CostUSD, &m.P95ms, &m.Errors); err != nil {
 			modelRows.Close()
 			t.Fatalf("scan model row: %v", err)
 		}

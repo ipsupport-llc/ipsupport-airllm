@@ -7,12 +7,13 @@ import (
 )
 
 type providerUsage struct {
-	Provider string  `json:"provider"`
-	Requests int64   `json:"requests"`
-	Tokens   int64   `json:"tokens"`
-	CostUSD  float64 `json:"cost_usd"`
-	P95ms    int64   `json:"p95_ms"`
-	Errors   int64   `json:"errors"`
+	Provider  string  `json:"provider"`
+	Requests  int64   `json:"requests"`
+	TokensIn  int64   `json:"tokens_in"`
+	TokensOut int64   `json:"tokens_out"`
+	CostUSD   float64 `json:"cost_usd"`
+	P95ms     int64   `json:"p95_ms"`
+	Errors    int64   `json:"errors"`
 }
 
 type modelUsage struct {
@@ -20,7 +21,8 @@ type modelUsage struct {
 	Provider      string  `json:"provider"`
 	UpstreamModel string  `json:"upstream_model"`
 	Requests      int64   `json:"requests"`
-	Tokens        int64   `json:"tokens"`
+	TokensIn      int64   `json:"tokens_in"`
+	TokensOut     int64   `json:"tokens_out"`
 	CostUSD       float64 `json:"cost_usd"`
 	P95ms         int64   `json:"p95_ms"`
 	Errors        int64   `json:"errors"`
@@ -34,14 +36,15 @@ type modelUsage struct {
 const breakdownProviderQuery = `
 	SELECT provider_name,
 	       count(*),
-	       COALESCE(SUM(prompt_tokens + completion_tokens), 0),
+	       COALESCE(SUM(prompt_tokens), 0),
+	       COALESCE(SUM(completion_tokens), 0),
 	       COALESCE(SUM(cost_usd), 0),
 	       COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms), 0)::bigint,
 	       count(*) FILTER (WHERE status >= 400)
 	FROM usage_ledger
 	WHERE ts > now() - make_interval(hours => $1) AND provider_name <> '' %s
 	GROUP BY provider_name
-	ORDER BY 4 DESC, 2 DESC`
+	ORDER BY 5 DESC, 2 DESC`
 
 // The model query keeps rows with an empty provider_name: a request that
 // exhausted every target is ledgered without a provider, and hiding it would
@@ -49,14 +52,15 @@ const breakdownProviderQuery = `
 const breakdownModelQuery = `
 	SELECT alias, provider_name, upstream_model,
 	       count(*),
-	       COALESCE(SUM(prompt_tokens + completion_tokens), 0),
+	       COALESCE(SUM(prompt_tokens), 0),
+	       COALESCE(SUM(completion_tokens), 0),
 	       COALESCE(SUM(cost_usd), 0),
 	       COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms), 0)::bigint,
 	       count(*) FILTER (WHERE status >= 400)
 	FROM usage_ledger
 	WHERE ts > now() - make_interval(hours => $1) %s
 	GROUP BY alias, provider_name, upstream_model
-	ORDER BY 6 DESC, 4 DESC`
+	ORDER BY 7 DESC, 4 DESC`
 
 // usageBreakdown aggregates the ledger by provider and by model over the last
 // `hours`. where is an optional "AND user_id = $2" clause bound after $1,
@@ -72,7 +76,7 @@ func (s *Server) usageBreakdown(ctx context.Context, where string, hours int, wh
 	provs := []providerUsage{}
 	for rows.Next() {
 		var p providerUsage
-		if err := rows.Scan(&p.Provider, &p.Requests, &p.Tokens, &p.CostUSD, &p.P95ms, &p.Errors); err != nil {
+		if err := rows.Scan(&p.Provider, &p.Requests, &p.TokensIn, &p.TokensOut, &p.CostUSD, &p.P95ms, &p.Errors); err != nil {
 			rows.Close()
 			return nil, nil, err
 		}
@@ -92,7 +96,7 @@ func (s *Server) usageBreakdown(ctx context.Context, where string, hours int, wh
 	models := []modelUsage{}
 	for rows.Next() {
 		var m modelUsage
-		if err := rows.Scan(&m.Alias, &m.Provider, &m.UpstreamModel, &m.Requests, &m.Tokens, &m.CostUSD, &m.P95ms, &m.Errors); err != nil {
+		if err := rows.Scan(&m.Alias, &m.Provider, &m.UpstreamModel, &m.Requests, &m.TokensIn, &m.TokensOut, &m.CostUSD, &m.P95ms, &m.Errors); err != nil {
 			return nil, nil, err
 		}
 		models = append(models, m)
