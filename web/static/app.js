@@ -80,6 +80,7 @@ function renderLogin() {
         <h1>Air<span>LLM</span></h1>
         <p>Sign in to the gateway console.</p>
         <a class="btn" href="${esc(authMode.sso_url || "/auth/sso")}" style="width:100%;text-align:center;display:block">Sign in with SSO</a>
+        <div class="copyright">© 2026 <a href="https://ipsupport.us" target="_blank" rel="noopener">IPSupport LLC</a></div>
       </div>
     </div>`;
     return;
@@ -97,6 +98,7 @@ function renderLogin() {
           <button class="btn" style="width:100%" type="submit">Sign in</button>
           <p class="err-text" id="login-err"></p>
         </form>
+        <div class="copyright">© 2026 <a href="https://ipsupport.us" target="_blank" rel="noopener">IPSupport LLC</a></div>
       </div>
     </div>`;
   $("#login-form").addEventListener("submit", async (e) => {
@@ -135,6 +137,7 @@ function renderShell() {
           <div>${esc((me.roles || []).join(", ")) || "no roles"}</div>
           ${authMode.mode !== "oidc" ? `<button class="btn ghost sm" id="change-pw" style="margin-top:.3rem">Change password</button>` : ""}
           <button class="btn ghost sm" id="logout" style="margin-top:.6rem">Sign out</button>
+          <div class="copyright">© 2026 <a href="https://ipsupport.us" target="_blank" rel="noopener">IPSupport LLC</a></div>
         </div>
       </aside>
       <main class="main"><div id="view"></div></main>
