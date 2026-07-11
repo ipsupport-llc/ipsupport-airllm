@@ -975,7 +975,13 @@ async function editAlias(c, a) {
     const dl = row.querySelector("datalist");
     const provSel = row.querySelector(".t-prov");
     loadModels(provSel.value, dl, provSel);
-    provSel.addEventListener("change", () => loadModels(provSel.value, dl, provSel));
+    provSel.addEventListener("change", () => {
+      // Clear the stale model name: it belongs to the previous provider, and
+      // the browser filters datalist suggestions by the input's text — with
+      // the old name left in place the refreshed list appears empty.
+      row.querySelector(".t-model").value = "";
+      loadModels(provSel.value, dl, provSel);
+    });
     tdiv.appendChild(row);
   }
   targets.forEach(addRow);
