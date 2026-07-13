@@ -851,23 +851,44 @@ function editProvider(c, p) {
 async function adminPricing(c) {
   const r = await api("GET", "/api/admin/pricing");
   const ps = (r.data && r.data.pricing) || [];
-  c.innerHTML = `<div class="row" style="margin-bottom:1rem"><button class="btn sm" id="new-price">New price</button></div>` +
-    panelTable("Pricing (USD / 1M tokens)", ["Model", "Input", "Output", ""],
-      ps.map((p) => `<tr><td class="mono">${esc(p.model)}</td><td>${p.input_per_1m}</td><td>${p.output_per_1m}</td>
+  const pr = await api("GET", "/api/admin/providers");
+  const providers = ((pr.data && pr.data.providers) || []).map((p) => p.name);
+  c.innerHTML = `<div class="row" style="margin-bottom:1rem;gap:.5rem">
+      <button class="btn sm" id="new-price">New price</button>
+      <select id="import-provider">${providers.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("")}</select>
+      <button class="btn ghost sm" id="import-prices">Import prices</button>
+    </div>` +
+    panelTable("Pricing (USD / 1M tokens)", ["Provider", "Model", "Input", "Output", ""],
+      ps.map((p) => `<tr><td class="mono">${esc(p.provider) || "(any)"}</td><td class="mono">${esc(p.model)}</td><td>${p.input_per_1m}</td><td>${p.output_per_1m}</td>
         <td style="text-align:right"><button class="btn ghost sm" data-edit='${esc(JSON.stringify(p))}'>Edit</button></td></tr>`));
   $("#new-price").addEventListener("click", () => editPrice(c, {}));
   document.querySelectorAll("[data-edit]").forEach((b) =>
     b.addEventListener("click", () => editPrice(c, JSON.parse(b.getAttribute("data-edit")))));
+  $("#import-prices").addEventListener("click", async () => {
+    const name = $("#import-provider").value;
+    if (!name) return;
+    const x = await api("POST", `/api/admin/pricing/import/${encodeURIComponent(name)}`);
+    if (x.ok) {
+      const n = (x.data && x.data.imported) || 0;
+      if ((x.data && x.data.unsupported) || n === 0) toast(`${name}'s catalog publishes no prices`);
+      else toast(`Imported ${n} prices from ${name}`);
+      adminPricing(c);
+    } else toast((x.data && x.data.error) || "Failed", "err");
+  });
 }
 
-function editPrice(c, p) {
+async function editPrice(c, p) {
+  const pr = await api("GET", "/api/admin/providers");
+  const providers = ((pr.data && pr.data.providers) || []).map((x) => x.name);
+  const providerOptions = [{ value: "", label: "(any)" }, ...providers.map((n) => ({ value: n, label: n }))];
   modalForm(p.model ? `Edit price ${p.model}` : "New price", [
     { name: "model", label: "Upstream model", value: p.model || "", disabled: !!p.model },
+    { name: "provider", label: "Provider", type: "select", options: providerOptions, value: p.provider || "", disabled: !!p.model },
     { name: "input_per_1m", label: "Input $ / 1M", value: p.input_per_1m ?? 0 },
     { name: "output_per_1m", label: "Output $ / 1M", value: p.output_per_1m ?? 0 },
   ], async (v) => {
     const x = await api("PUT", `/api/admin/pricing/${encodeURIComponent(v.model)}`,
-      { input_per_1m: Number(v.input_per_1m), output_per_1m: Number(v.output_per_1m) });
+      { provider: v.provider, input_per_1m: Number(v.input_per_1m), output_per_1m: Number(v.output_per_1m) });
     if (x.ok) { toast("Pricing saved"); adminPricing(c); return true; }
     toast((x.data && x.data.error) || "Failed", "err"); return false;
   });
@@ -1268,8 +1289,11 @@ function modalForm(title, fields, onSubmit) {
       }
       if (f.type === "select") {
         return `<label class="field"><span class="lab">${esc(f.label)}</span>
-          <select name="${f.name}" ${f.disabled ? "disabled" : ""}>${(f.options || []).map((o) =>
-            `<option value="${esc(o)}" ${o === f.value ? "selected" : ""}>${esc(o)}</option>`).join("")}</select></label>`;
+          <select name="${f.name}" ${f.disabled ? "disabled" : ""}>${(f.options || []).map((o) => {
+            const val = typeof o === "object" ? o.value : o;
+            const label = typeof o === "object" ? o.label : o;
+            return `<option value="${esc(val)}" ${val === f.value ? "selected" : ""}>${esc(label)}</option>`;
+          }).join("")}</select></label>`;
       }
       if (f.type === "password") {
         return `<label class="field"><span class="lab">${esc(f.label)}</span>

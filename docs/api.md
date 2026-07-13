@@ -82,7 +82,8 @@ than failing.
 | `GET`/`PUT`/`DELETE` | `/api/admin/aliases` · `/api/admin/aliases/{alias}` | Model alias catalog (targets, strategy, fallback tiers) |
 | `GET`/`PUT` | `/api/admin/providers` · `/api/admin/providers/{name}` | Providers (kind, base URL, sealed credential, max concurrency, enabled) |
 | `GET` | `/api/admin/providers/{name}/models` | Live upstream model ids for one provider (5-min cache; `unsupported: true` when the kind cannot list) |
-| `GET`/`PUT` | `/api/admin/pricing` · `/api/admin/pricing/{model}` | Per-model input/output pricing (USD per 1M tokens) |
+| `GET`/`PUT` | `/api/admin/pricing` · `/api/admin/pricing/{model}` | Per-provider/model pricing (USD per 1M tokens); provider `""` = any |
+| `POST` | `/api/admin/pricing/import/{provider}` | Import a provider's whole catalog pricing (e.g. OpenRouter, which publishes it) into the pricing table. `{"imported": N}`, or `{"imported": 0, "unsupported": true}` when the provider's kind doesn't publish pricing |
 | `GET`/`PUT` | `/api/admin/dlp` | DLP policy (incl. Sensitive Info Detection patterns + custom patterns) |
 | `GET` | `/api/admin/dlp/patterns` | Catalog of toggleable detection patterns (built-ins + model toggles) |
 | `GET` | `/api/admin/dlp/incidents` | Recent DLP incidents (secret-free samples) |

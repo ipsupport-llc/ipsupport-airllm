@@ -131,9 +131,9 @@ func Dev(ctx context.Context, st *store.Store) (string, error) {
 		{"custom-model-x", 1.00, 2.00},
 	} {
 		if _, err := st.PG.Exec(ctx, `
-			INSERT INTO pricing (model, input_per_1m, output_per_1m)
-			VALUES ($1, $2, $3)
-			ON CONFLICT (model) DO UPDATE SET input_per_1m = EXCLUDED.input_per_1m, output_per_1m = EXCLUDED.output_per_1m`,
+			INSERT INTO pricing (provider, model, input_per_1m, output_per_1m)
+			VALUES ('', $1, $2, $3)
+			ON CONFLICT (provider, model) DO UPDATE SET input_per_1m = EXCLUDED.input_per_1m, output_per_1m = EXCLUDED.output_per_1m`,
 			p.model, p.input, p.output); err != nil {
 			return "", fmt.Errorf("seed pricing: %w", err)
 		}

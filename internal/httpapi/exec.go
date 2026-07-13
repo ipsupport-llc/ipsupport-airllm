@@ -72,7 +72,7 @@ func limitMessage(d limits.Decision) string {
 func (s *Server) finalizeUsage(ctx context.Context, entry ledger.Entry, keyID, upstreamModel string, prompt, completion int) {
 	entry.PromptTokens = prompt
 	entry.CompletionTokens = completion
-	costMicro := s.pricing.CostMicroUSD(upstreamModel, prompt, completion)
+	costMicro := s.pricing.CostMicroUSD(entry.ProviderName, upstreamModel, prompt, completion)
 	entry.CostUSD = float64(costMicro) / 1e6
 	s.ledger.Record(ctx, entry)
 	s.metrics.RecordUsage(entry.IngressProtocol, prompt, completion, entry.CostUSD)

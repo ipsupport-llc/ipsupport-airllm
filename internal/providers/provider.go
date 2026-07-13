@@ -31,6 +31,19 @@ type ModelLister interface {
 	ListModels(ctx context.Context) ([]string, error)
 }
 
+// ModelPrice is a catalog entry's price in USD per 1M tokens.
+type ModelPrice struct {
+	ID          string
+	InputPer1M  float64
+	OutputPer1M float64
+}
+
+// PricedModelLister is implemented by providers whose catalog publishes
+// prices (OpenRouter). Entries without pricing are omitted.
+type PricedModelLister interface {
+	ListModelPricing(ctx context.Context) ([]ModelPrice, error)
+}
+
 // Entry wraps a provider with a concurrency limit. A request must Acquire a
 // slot before calling and Release it after; when the limit is reached Acquire
 // fails so the router can fall back to another target.
