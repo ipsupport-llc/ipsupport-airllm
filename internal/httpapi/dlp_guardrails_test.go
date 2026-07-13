@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -162,11 +164,12 @@ func newDLPEnforceTestServer(t *testing.T, sidecarURL string) *Server {
 	t.Cleanup(pgPool.Close)
 
 	cfg := dlpConfig{
-		Enabled:       true,
-		Action:        "flag",
-		ModelEnabled:  true,
-		ModelURLs:     []string{sidecarURL},
-		ModelMinScore: 0.5,
+		Enabled:           true,
+		Action:            "flag",
+		ModelEnabled:      true,
+		ModelURLs:         []string{sidecarURL},
+		ModelMinScore:     0.5,
+		ModelScanBudgetMS: 2000,
 	}
 	s := &Server{
 		st:    &store.Store{PG: pgPool},
@@ -235,4 +238,137 @@ func TestDlpEnforceModelScanGate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// recordingSidecar is an httptest sidecar that counts hits, records each
+// request body's decoded text, and (optionally) sleeps before responding —
+// used to prove scope selection and budget enforcement.
+type recordingSidecar struct {
+	*httptest.Server
+	hits  atomic.Int32
+	sleep time.Duration
+
+	mu     sync.Mutex
+	bodies []string
+}
+
+func newRecordingSidecar(sleep time.Duration) *recordingSidecar {
+	rs := &recordingSidecar{sleep: sleep}
+	rs.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rs.hits.Add(1)
+		var in struct {
+			Text string `json:"text"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		rs.mu.Lock()
+		rs.bodies = append(rs.bodies, in.Text)
+		rs.mu.Unlock()
+		if rs.sleep > 0 {
+			time.Sleep(rs.sleep)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"findings": []any{}})
+	}))
+	return rs
+}
+
+func (rs *recordingSidecar) lastBody() string {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	if len(rs.bodies) == 0 {
+		return ""
+	}
+	return rs.bodies[len(rs.bodies)-1]
+}
+
+// TestDlpEnforceScopeAndBudget covers the incident-response fix: coding
+// agents resend the full message history every turn, so scanning every
+// message against the layer-2 sidecar (each with its own 2s timeout)
+// multiplies latency by history length. ModelScanScope narrows the sidecar
+// scan to the last user message by default (layer-1 deterministic scanning
+// still covers everything), and ModelScanBudgetMS bounds the sidecar time
+// for the whole request instead of per message.
+func TestDlpEnforceScopeAndBudget(t *testing.T) {
+	const secret = "sk-ant-api03-aaaabbbbccccddddeeee1234"
+
+	t.Run("scope last_user (default)", func(t *testing.T) {
+		sidecar := newRecordingSidecar(0)
+		defer sidecar.Close()
+
+		s := newDLPEnforceTestServer(t, sidecar.URL) // ModelScanScope left unset -> defaults to last_user
+
+		req := &llm.ChatRequest{Messages: []llm.Message{
+			{Role: "system", Content: "you are a helpful assistant"},
+			{Role: "user", Content: "secret " + secret + " A"},
+			{Role: "assistant", Content: "ok"},
+			{Role: "user", Content: "plain B"},
+			{Role: "assistant", Content: "bye"},
+		}}
+
+		_, _, result := s.dlpEnforce(context.Background(), authedKey{KeyID: "k1", UserID: "u1"}, "openai", req, true)
+
+		if got := sidecar.hits.Load(); got != 1 {
+			t.Fatalf("sidecar hits = %d, want 1 (only the last user message)", got)
+		}
+		if got := sidecar.lastBody(); got != "plain B" {
+			t.Errorf("sidecar received %q, want the last user message %q", got, "plain B")
+		}
+		if !result.HadIncident {
+			t.Error("expected a layer-1 incident from the planted secret in the first user message")
+		}
+	})
+
+	t.Run("scope all", func(t *testing.T) {
+		sidecar := newRecordingSidecar(0)
+		defer sidecar.Close()
+
+		s := newDLPEnforceTestServer(t, sidecar.URL)
+		cfg := s.dlpCfg()
+		cfg.ModelScanScope = "all"
+		s.dlpPtr.Store(&cfg)
+
+		req := &llm.ChatRequest{Messages: []llm.Message{
+			{Role: "system", Content: "you are a helpful assistant"},
+			{Role: "user", Content: "secret " + secret + " A"},
+			{Role: "assistant", Content: "ok"},
+			{Role: "user", Content: "plain B"},
+			{Role: "assistant", Content: "bye"},
+		}}
+
+		s.dlpEnforce(context.Background(), authedKey{KeyID: "k1", UserID: "u1"}, "openai", req, true)
+
+		if got := sidecar.hits.Load(); got != 5 {
+			t.Fatalf("sidecar hits = %d, want 5 (one per non-empty message)", got)
+		}
+	})
+
+	t.Run("budget", func(t *testing.T) {
+		sidecar := newRecordingSidecar(300 * time.Millisecond)
+		defer sidecar.Close()
+
+		s := newDLPEnforceTestServer(t, sidecar.URL)
+		cfg := s.dlpCfg()
+		cfg.ModelScanScope = "all"
+		cfg.ModelScanBudgetMS = 400
+		s.dlpPtr.Store(&cfg)
+
+		req := &llm.ChatRequest{Messages: []llm.Message{
+			{Role: "user", Content: "secret " + secret + " A"},
+			{Role: "assistant", Content: "ok"},
+			{Role: "user", Content: "plain B"},
+			{Role: "assistant", Content: "bye"},
+		}}
+
+		blocked, _, result := s.dlpEnforce(context.Background(), authedKey{KeyID: "k1", UserID: "u1"}, "openai", req, true)
+
+		if blocked {
+			t.Error("action=flag must never block")
+		}
+		if got := sidecar.hits.Load(); got >= 4 {
+			t.Errorf("sidecar hits = %d, want < 4 (budget of 400ms against 300ms/scan must cut the request short)", got)
+		}
+		if !result.HadIncident {
+			t.Error("expected a layer-1 incident from the planted secret; budget exhaustion must not suppress deterministic findings")
+		}
+	})
 }

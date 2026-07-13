@@ -37,6 +37,14 @@ type dlpConfig struct {
 	// (0 = unlimited). See internal/modelpool.
 	ModelURLs           []string `json:"model_urls,omitempty"`
 	ModelMaxConcurrency int      `json:"model_max_concurrency,omitempty"`
+	// ModelScanScope selects which request messages the layer-2 model scan
+	// covers: "last_user" (default — clients resend history every turn, each
+	// user message is scanned when it first appears) or "all". Layer-1
+	// deterministic scanning always covers every message.
+	ModelScanScope string `json:"model_scan_scope,omitempty"`
+	// ModelScanBudgetMS bounds the TOTAL model-scan time per request (all
+	// messages combined). 0 or negative = default 2000.
+	ModelScanBudgetMS int `json:"model_scan_budget_ms,omitempty"`
 
 	// Sensitive Info Detection (guardrails). Patterns maps a built-in pattern
 	// label (including the model toggles person_name/address/organization and
@@ -179,7 +187,7 @@ func validatePatternLabels(p map[string]bool) error {
 }
 
 func defaultDLPConfig() dlpConfig {
-	return dlpConfig{Enabled: true, Action: "redact"}
+	return dlpConfig{Enabled: true, Action: "redact", ModelScanScope: "last_user", ModelScanBudgetMS: 2000}
 }
 
 // effectiveModelURLs returns the configured sidecar URLs, falling back to the
@@ -215,6 +223,12 @@ func (s *Server) loadDLP(ctx context.Context) {
 	}
 	if !validDLPAction(cfg.Action) {
 		cfg.Action = "off"
+	}
+	if cfg.ModelScanScope != "all" {
+		cfg.ModelScanScope = "last_user"
+	}
+	if cfg.ModelScanBudgetMS <= 0 {
+		cfg.ModelScanBudgetMS = 2000
 	}
 	// Stored config is already validated; ignore the error and use whatever
 	// compiled (defensive against a hand-edited settings row).
@@ -275,6 +289,26 @@ func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, r
 	original := snapshotOriginals(cfg.Action, req.Messages)
 
 	modelOn := cfg.ModelEnabled && modelScan && len(cfg.effectiveModelURLs()) > 0
+
+	// Scope: which messages the model scan covers. Layer-1 always scans all.
+	lastUser := -1
+	if modelOn && cfg.ModelScanScope != "all" {
+		for i := len(req.Messages) - 1; i >= 0; i-- {
+			if req.Messages[i].Role == "user" {
+				lastUser = i
+				break
+			}
+		}
+	}
+	// Budget: one deadline for ALL model scans in this request (replaces the
+	// old per-message 2s timeout, which multiplied by history length).
+	var bctx context.Context
+	var bcancel context.CancelFunc
+	if modelOn {
+		bctx, bcancel = context.WithTimeout(ctx, time.Duration(cfg.ModelScanBudgetMS)*time.Millisecond)
+		defer bcancel()
+	}
+
 	labelSet := map[string]bool{}
 	total := 0
 	sample := ""
@@ -290,12 +324,14 @@ func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, r
 			Custom:  cfg.compiledCustom,
 			Entropy: dlpToggle(cfg.Patterns, "high_entropy", true),
 		})
-		if modelOn {
-			mctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		if modelOn && (cfg.ModelScanScope == "all" || i == lastUser) {
 			mstart := time.Now()
-			mf, err := s.modelPool.Scan(mctx, s.httpc, content, cfg.ModelMinScore)
-			cancel()
+			mf, err := s.modelPool.Scan(bctx, s.httpc, content, cfg.ModelMinScore)
 			switch {
+			case errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil:
+				// The request is alive but the scan budget is spent: fail open
+				// for this and all remaining messages, visibly.
+				s.metrics.DLPModelSkipped("budget")
 			case errors.Is(err, modelpool.ErrAllBusy):
 				s.metrics.DLPModelSkipped("all_busy")
 			case errors.Is(err, modelpool.ErrNoEndpoints):

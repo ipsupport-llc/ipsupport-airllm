@@ -1076,6 +1076,13 @@ async function adminDLP(c) {
           <textarea id="dlp-murls" rows="3" class="mono" placeholder="http://dlp-bert:8000">${esc((d.model_urls || []).join("\n"))}</textarea></label>
         <label class="field"><span class="lab">Max concurrent scans per endpoint (0 = unlimited)</span>
           <input id="dlp-mconc" type="number" min="0" value="${d.model_max_concurrency ?? 0}" /></label>
+        <label class="field"><span class="lab">Model scan scope</span>
+          <select id="dlp-mscope">
+            <option value="last_user" ${d.model_scan_scope !== "all" ? "selected" : ""}>last user message (default)</option>
+            <option value="all" ${d.model_scan_scope === "all" ? "selected" : ""}>all messages</option>
+          </select></label>
+        <label class="field"><span class="lab">Model scan budget per request (ms)</span>
+          <input id="dlp-mbudget" type="number" min="100" value="${Number(d.model_scan_budget_ms) || 2000}" /></label>
         <button class="btn" id="dlp-save">Save policy</button>
       </div>
     </div>
@@ -1133,6 +1140,7 @@ async function adminDLP(c) {
       model_min_score: Number($("#dlp-mscore").value) || 0,
       model_urls: $("#dlp-murls").value.split("\n").map((s) => s.trim()).filter(Boolean),
       model_max_concurrency: Number($("#dlp-mconc").value) || 0,
+      model_scan_scope: $("#dlp-mscope").value, model_scan_budget_ms: Number($("#dlp-mbudget").value) || 2000,
     };
     // Only send patterns/custom when the panel actually rendered, so a failed
     // catalog fetch can't silently wipe the operator's toggles on save.
