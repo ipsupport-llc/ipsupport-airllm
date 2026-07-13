@@ -52,9 +52,20 @@ Two layers behind one `Scan` API:
    scan every message each turn instead. `model_scan_budget_ms` (default
    `2000`) caps the total time the model layer may spend per request; once the
    budget is exhausted, remaining scans fail open and are skipped (metric
-   reason `budget`). The sidecar itself scans long messages in chunks bounded
-   by `DLP_MAX_CHARS`, so a single oversized message can't monopolize the
-   budget or the sidecar's request.
+   reason `budget`). Note the corollary: a very large last-user message whose
+   full chunked scan exceeds the budget is skipped fail-open — layer-2 coverage
+   is absent on exactly the biggest pastes unless you raise the budget (the
+   `budget` skip metric makes this visible). The sidecar itself scans long
+   messages in chunks bounded by `DLP_MAX_CHARS` and reports `truncated: true`
+   beyond the cap.
+
+   **Upgrade note:** before this feature the model scan covered every message
+   of every request; upgrading narrows the effective scope to `last_user`
+   (that per-history rescanning was the latency defect). If your compliance
+   posture depends on layer-2 fuzzy-PII scanning of full resent history —
+   including assistant echoes and tool outputs — set `model_scan_scope: all`
+   explicitly. Layer-1 deterministic scanning covers every message in every
+   request regardless of scope.
 
 ### Enforcement actions
 
