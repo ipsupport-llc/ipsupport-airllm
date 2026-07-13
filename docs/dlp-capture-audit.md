@@ -44,6 +44,18 @@ Two layers behind one `Scan` API:
    (skips the model scan) when all endpoints are busy, applying deterministic
    redaction only.
 
+   By default (`model_scan_scope: last_user`) the sidecar only scans the
+   newest user message: since the full conversation history is resent every
+   turn, scanning it repeatedly would burn sidecar capacity on text already
+   checked in an earlier turn, and the deterministic layer still covers every
+   message in the request regardless of scope. Set `model_scan_scope: all` to
+   scan every user message each turn instead. `model_scan_budget_ms` (default
+   `2000`) caps the total time the model layer may spend per request; once the
+   budget is exhausted, remaining scans fail open and are skipped (metric
+   reason `budget`). The sidecar itself scans long messages in chunks bounded
+   by `DLP_MAX_CHARS`, so a single oversized message can't monopolize the
+   budget or the sidecar's request.
+
 ### Enforcement actions
 
 `action` is one of:
