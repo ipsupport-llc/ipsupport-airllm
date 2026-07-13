@@ -10,7 +10,27 @@ permissions:
   packages: write
 
 jobs:
+  # GitOps consumers track the chart on main with an empty image.tag, so the
+  # image they run is Chart.yaml's appVersion. A release whose tag doesn't
+  # match the chart ships images nobody deploys — fail fast instead.
+  chart-version-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Chart.yaml appVersion must match the release tag
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          app_version=$(sed -n 's/^appVersion: "\(.*\)"$/\1/p' deploy/helm/airllm/Chart.yaml)
+          if [ "$app_version" != "$tag" ]; then
+            echo "::error::Chart.yaml appVersion is \"$app_version\" but the release tag is \"$tag\"."
+            echo "::error::Bump version + appVersion in deploy/helm/airllm/Chart.yaml on main BEFORE tagging."
+            exit 1
+          fi
+          echo "appVersion $app_version matches tag v$tag"
+
   images:
+    needs: chart-version-guard
     runs-on: ubuntu-latest
     timeout-minutes: 60   # dlp-bert pulls torch + a model at build time
     strategy:

@@ -103,6 +103,19 @@ loopback rule is about not exposing an unauthenticated port directly on a host).
 Run a single writer for the migration step or rely on the idempotent,
 ordered-on-boot migrator.
 
+## Releasing
+
+GitOps consumers may track the chart on `main` with an empty `image.tag`, in
+which case the image they deploy is the chart's `appVersion`. A release is
+therefore TWO steps, in order:
+
+1. Bump `version` and `appVersion` in `deploy/helm/airllm/Chart.yaml` to the
+   release number, on `main` (part of the release PR).
+2. Tag `vX.Y.Z` and push the tag — the release workflow builds and pushes the
+   images. It refuses to run if `Chart.yaml` `appVersion` does not match the
+   tag, so a forgotten bump fails loudly instead of shipping a release that
+   main-tracking consumers never see.
+
 ## Kubernetes (Helm chart)
 
 The chart lives at `deploy/helm/airllm` and deploys two workloads — the gateway
