@@ -13,8 +13,15 @@ from pydantic import BaseModel
 from transformers import pipeline
 
 MODEL = os.environ.get("DLP_MODEL", "dslim/bert-base-NER")
+MAX_CHARS = int(os.environ.get("DLP_MAX_CHARS", "65536"))
+STRIDE = int(os.environ.get("DLP_STRIDE", "128"))
 
-ner = pipeline("token-classification", model=MODEL, aggregation_strategy="simple")
+ner = pipeline(
+    "token-classification",
+    model=MODEL,
+    aggregation_strategy="simple",
+    stride=STRIDE,
+)
 
 app = FastAPI(title="airllm-dlp-bert")
 
@@ -30,8 +37,12 @@ def healthz():
 
 @app.post("/scan")
 def scan(req: ScanRequest):
+    text = req.text
+    truncated = len(text) > MAX_CHARS
+    if truncated:
+        text = text[:MAX_CHARS]
     findings = []
-    for ent in ner(req.text):
+    for ent in ner(text):
         findings.append(
             {
                 "label": str(ent["entity_group"]),
@@ -40,4 +51,4 @@ def scan(req: ScanRequest):
                 "score": float(ent["score"]),
             }
         )
-    return {"findings": findings}
+    return {"findings": findings, "truncated": truncated}
