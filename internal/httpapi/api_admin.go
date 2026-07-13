@@ -473,13 +473,14 @@ func (s *Server) handleAdminDeleteAlias(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleAdminPricing(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.st.PG.Query(r.Context(),
-		`SELECT model, input_per_1m, output_per_1m FROM pricing ORDER BY model`)
+		`SELECT provider, model, input_per_1m, output_per_1m FROM pricing ORDER BY provider, model`)
 	if err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to list pricing")
 		return
 	}
 	defer rows.Close()
 	type price struct {
+		Provider    string  `json:"provider"`
 		Model       string  `json:"model"`
 		InputPer1M  float64 `json:"input_per_1m"`
 		OutputPer1M float64 `json:"output_per_1m"`
@@ -487,7 +488,7 @@ func (s *Server) handleAdminPricing(w http.ResponseWriter, r *http.Request) {
 	out := []price{}
 	for rows.Next() {
 		var p price
-		if err := rows.Scan(&p.Model, &p.InputPer1M, &p.OutputPer1M); err != nil {
+		if err := rows.Scan(&p.Provider, &p.Model, &p.InputPer1M, &p.OutputPer1M); err != nil {
 			writeControlError(w, http.StatusInternalServerError, "failed to read pricing")
 			return
 		}
@@ -500,6 +501,7 @@ func (s *Server) handleAdminPutPricing(w http.ResponseWriter, r *http.Request) {
 	sess, _ := sessionFrom(r.Context())
 	model := r.PathValue("model")
 	var body struct {
+		Provider    string  `json:"provider"`
 		InputPer1M  float64 `json:"input_per_1m"`
 		OutputPer1M float64 `json:"output_per_1m"`
 	}
@@ -508,16 +510,16 @@ func (s *Server) handleAdminPutPricing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, err := s.st.PG.Exec(r.Context(), `
-		INSERT INTO pricing (model, input_per_1m, output_per_1m)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (model) DO UPDATE SET
+		INSERT INTO pricing (provider, model, input_per_1m, output_per_1m)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (provider, model) DO UPDATE SET
 			input_per_1m = EXCLUDED.input_per_1m, output_per_1m = EXCLUDED.output_per_1m, updated_at = now()`,
-		model, body.InputPer1M, body.OutputPer1M)
+		body.Provider, model, body.InputPer1M, body.OutputPer1M)
 	if err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to save pricing")
 		return
 	}
-	s.pricing.Set(model, pricing.Price{InputPer1M: body.InputPer1M, OutputPer1M: body.OutputPer1M})
+	s.pricing.Set(body.Provider, model, pricing.Price{InputPer1M: body.InputPer1M, OutputPer1M: body.OutputPer1M})
 	s.audit(r.Context(), sess.principal.Subject, "pricing.put", model, body)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
 }
