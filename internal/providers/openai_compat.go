@@ -209,9 +209,10 @@ func (p *OpenAICompat) ListModelPricing(ctx context.Context) ([]ModelPrice, erro
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, fmt.Errorf("decode %s models: %w", p.name, err)
 	}
+	seen := map[string]bool{}
 	var prices []ModelPrice
 	for _, m := range out.Data {
-		if m.ID == "" || m.Pricing == nil {
+		if m.ID == "" || m.Pricing == nil || seen[m.ID] {
 			continue
 		}
 		inPer, err := strconv.ParseFloat(m.Pricing.Prompt, 64)
@@ -222,7 +223,16 @@ func (p *OpenAICompat) ListModelPricing(ctx context.Context) ([]ModelPrice, erro
 		if err != nil {
 			continue
 		}
-		prices = append(prices, ModelPrice{ID: m.ID, InputPer1M: inPer * 1e6, OutputPer1M: outPer * 1e6})
+		inPer1M := inPer * 1e6
+		outPer1M := outPer * 1e6
+		// pricing columns are numeric(12,4), which holds values < 10^8;
+		// treat anything outside that range as garbage and skip it rather
+		// than let the import tx abort on an overflow.
+		if inPer1M < 0 || inPer1M >= 1e8 || outPer1M < 0 || outPer1M >= 1e8 {
+			continue
+		}
+		seen[m.ID] = true
+		prices = append(prices, ModelPrice{ID: m.ID, InputPer1M: inPer1M, OutputPer1M: outPer1M})
 	}
 	sort.Slice(prices, func(i, j int) bool { return prices[i].ID < prices[j].ID })
 	return prices, nil

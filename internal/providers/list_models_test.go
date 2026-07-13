@@ -85,8 +85,10 @@ func TestOpenAICompatListModelPricing(t *testing.T) {
 			"data": []map[string]any{
 				{"id": "priced-a", "pricing": map[string]string{"prompt": "0.00000075", "completion": "0.0000045"}},
 				{"id": "priced-b", "pricing": map[string]string{"prompt": "0.000001", "completion": "0.000002"}},
+				{"id": "priced-b", "pricing": map[string]string{"prompt": "0.000001", "completion": "0.000002"}},
 				{"id": "unpriced"},
 				{"id": "garbage", "pricing": map[string]string{"prompt": "not-a-number", "completion": "0.000002"}},
+				{"id": "overflow", "pricing": map[string]string{"prompt": "999999999", "completion": "0.000002"}},
 			},
 		})
 	}))
