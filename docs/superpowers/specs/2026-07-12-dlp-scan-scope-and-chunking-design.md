@@ -42,9 +42,10 @@ New DLP config field `model_scan_scope`: `"last_user"` (default) | `"all"`.
 - `last_user`: the model scan runs ONLY on the last message with role `user`
   in the request. Rationale: clients resend history every turn; each user
   message is scanned the first time it appears (as the last user message of
-  that turn). Assistant content is provider output — covered by the separate
-  `scan_responses` option. Layer-1 deterministic scanning still runs on EVERY
-  message (cheap).
+  that turn). Assistant history content originated FROM the provider, so
+  re-sending it upstream leaks nothing new (note: `scan_responses` is a
+  reserved, unenforced field — DLP governs prompts only, by design). Layer-1
+  deterministic scanning still runs on EVERY message (cheap).
 - `all`: previous behavior (every message), for operators who want it.
 - Stored configs predate the field: empty string normalizes to `last_user`
   (this intentionally changes the default — the old default is the defect).
