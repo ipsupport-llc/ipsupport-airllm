@@ -883,7 +883,7 @@ async function editPrice(c, p) {
   const providerOptions = [{ value: "", label: "(any)" }, ...providers.map((n) => ({ value: n, label: n }))];
   modalForm(p.model ? `Edit price ${p.model}` : "New price", [
     { name: "model", label: "Upstream model", value: p.model || "", disabled: !!p.model },
-    { name: "provider", label: "Provider", type: "select", options: providerOptions, value: p.provider || "" },
+    { name: "provider", label: "Provider", type: "select", options: providerOptions, value: p.provider || "", disabled: !!p.model },
     { name: "input_per_1m", label: "Input $ / 1M", value: p.input_per_1m ?? 0 },
     { name: "output_per_1m", label: "Output $ / 1M", value: p.output_per_1m ?? 0 },
   ], async (v) => {
