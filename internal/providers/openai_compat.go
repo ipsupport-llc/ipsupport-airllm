@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -172,4 +173,57 @@ func (p *OpenAICompat) ListModels(ctx context.Context) ([]string, error) {
 	}
 	sort.Strings(ids)
 	return ids, nil
+}
+
+// ListModelPricing fetches GET {base}/models and returns the catalog entries
+// that publish pricing (OpenRouter's `pricing.prompt`/`pricing.completion`,
+// USD per token as strings). Prices are converted to USD per 1M tokens.
+// Entries with a missing or unparseable pricing object are skipped. Results
+// are sorted by id.
+func (p *OpenAICompat) ListModelPricing(ctx context.Context) ([]ModelPrice, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	if p.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
+	resp, err := p.hc.Do(req)
+	if err != nil {
+		return nil, &Error{Status: http.StatusBadGateway, Retryable: true, Message: err.Error()}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return nil, httpError(p.name, resp.StatusCode, b)
+	}
+	var out struct {
+		Data []struct {
+			ID      string `json:"id"`
+			Pricing *struct {
+				Prompt     string `json:"prompt"`
+				Completion string `json:"completion"`
+			} `json:"pricing"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode %s models: %w", p.name, err)
+	}
+	var prices []ModelPrice
+	for _, m := range out.Data {
+		if m.ID == "" || m.Pricing == nil {
+			continue
+		}
+		inPer, err := strconv.ParseFloat(m.Pricing.Prompt, 64)
+		if err != nil {
+			continue
+		}
+		outPer, err := strconv.ParseFloat(m.Pricing.Completion, 64)
+		if err != nil {
+			continue
+		}
+		prices = append(prices, ModelPrice{ID: m.ID, InputPer1M: inPer * 1e6, OutputPer1M: outPer * 1e6})
+	}
+	sort.Slice(prices, func(i, j int) bool { return prices[i].ID < prices[j].ID })
+	return prices, nil
 }

@@ -36,6 +36,12 @@ func (m *Mock) ListModels(_ context.Context) ([]string, error) {
 	return []string{"mock-gpt", "mock-large", "mock-small"}, nil
 }
 
+// ListModelPricing returns a fixed, deterministic priced catalog entry for
+// dev and tests.
+func (m *Mock) ListModelPricing(_ context.Context) ([]ModelPrice, error) {
+	return []ModelPrice{{ID: "mock-gpt", InputPer1M: 1, OutputPer1M: 2}}, nil
+}
+
 // Chat returns a deterministic mock completion for req. An upstream model
 // containing "fail" yields a retryable error, used to exercise routing
 // fallback.

@@ -79,8 +79,61 @@ func TestMockListModels(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatListModelPricing(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{
+				{"id": "priced-a", "pricing": map[string]string{"prompt": "0.00000075", "completion": "0.0000045"}},
+				{"id": "priced-b", "pricing": map[string]string{"prompt": "0.000001", "completion": "0.000002"}},
+				{"id": "unpriced"},
+				{"id": "garbage", "pricing": map[string]string{"prompt": "not-a-number", "completion": "0.000002"}},
+			},
+		})
+	}))
+	defer ts.Close()
+
+	p := NewOpenAICompat("up", "openrouter", ts.URL, "")
+	prices, err := p.ListModelPricing(context.Background())
+	if err != nil {
+		t.Fatalf("ListModelPricing: %v", err)
+	}
+	want := []ModelPrice{
+		{ID: "priced-a", InputPer1M: 0.75, OutputPer1M: 4.5},
+		{ID: "priced-b", InputPer1M: 1, OutputPer1M: 2},
+	}
+	if !reflect.DeepEqual(prices, want) {
+		t.Errorf("prices = %+v, want %+v", prices, want)
+	}
+}
+
+func TestOpenAICompatListModelPricingNon200(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"nope"}`, http.StatusUnauthorized)
+	}))
+	defer ts.Close()
+
+	p := NewOpenAICompat("up", "openrouter", ts.URL, "bad")
+	if _, err := p.ListModelPricing(context.Background()); err == nil {
+		t.Fatal("non-200 upstream must return an error")
+	}
+}
+
+func TestMockListModelPricing(t *testing.T) {
+	m := NewMock("mock")
+	prices, err := m.ListModelPricing(context.Background())
+	if err != nil {
+		t.Fatalf("ListModelPricing: %v", err)
+	}
+	want := []ModelPrice{{ID: "mock-gpt", InputPer1M: 1, OutputPer1M: 2}}
+	if !reflect.DeepEqual(prices, want) {
+		t.Errorf("prices = %+v, want %+v", prices, want)
+	}
+}
+
 // Compile-time capability checks.
 var (
-	_ ModelLister = (*OpenAICompat)(nil)
-	_ ModelLister = (*Mock)(nil)
+	_ ModelLister       = (*OpenAICompat)(nil)
+	_ ModelLister       = (*Mock)(nil)
+	_ PricedModelLister = (*OpenAICompat)(nil)
+	_ PricedModelLister = (*Mock)(nil)
 )
