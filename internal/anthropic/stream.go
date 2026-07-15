@@ -115,6 +115,9 @@ func (s *StreamWriter) Chunk(c llm.StreamChunk) error {
 
 // ensureToolBlock opens a tool_use block for this delta's upstream index,
 // closing whatever block was open, unless it is already the open block.
+// Assumes one call's deltas arrive contiguously (how OpenAI-compatible
+// upstreams stream); interleaved indexes would fork a spurious block, and
+// Anthropic's wire format cannot reopen a closed block without buffering.
 func (s *StreamWriter) ensureToolBlock(tc llm.ToolCallDelta) error {
 	if s.blockKind == "tool" && s.blockTool == tc.Index {
 		return nil
