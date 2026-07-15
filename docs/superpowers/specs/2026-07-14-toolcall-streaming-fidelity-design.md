@@ -107,8 +107,8 @@ tool index it belongs to + the client-facing block index counter.
 - New `internal/version` package: `var Version = "dev"`, set at build time
   via `-ldflags -X`. `deploy/Dockerfile` gets `ARG VERSION=dev`;
   `.github/workflows/release.yml` passes the tag as a build arg.
-- `GET /api/version` (session-authed like the rest of `/api`) returns
-  `{"version": "0.1.10"}`.
+- The `GET /api/me` response gains `"version"` (no new route needed — the
+  console already fetches it after login).
 - Console footer (next to the © line) shows `AirLLM v0.1.10` after login.
 
 ### 6. Diagnostics kept from the investigation
