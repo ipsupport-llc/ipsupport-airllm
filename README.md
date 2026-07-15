@@ -11,7 +11,7 @@ single, policed entry point.
 A single Go service exposes OpenAI- and
 Anthropic-compatible endpoints to internal coding agents, authenticates them by
 API key, enforces per-key model policy and rolling usage limits, routes to
-upstream providers (OpenAI, OpenRouter, xAI, Anthropic) with balancing and
+upstream providers (OpenAI, OpenRouter, xAI, Groq, Anthropic) with balancing and
 fallback, and meters tokens/cost. It can scan agent prompts for secrets and PII
 (DLP), capture traffic for audit, and feed reviewer-corrected captures back into
 the detector (the flywheel). A static SPA console, served by the same binary,
