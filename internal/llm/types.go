@@ -22,10 +22,46 @@ type ToolCall struct {
 	Function FunctionCall `json:"function"`
 }
 
+// ToolCallDelta is one streamed increment of a tool call. Index identifies
+// the call within the message (OpenAI accumulation semantics): fragments
+// sharing an Index belong to one call and their Arguments concatenate.
+type ToolCallDelta struct {
+	Index    int          `json:"index"`
+	ID       string       `json:"id,omitempty"`
+	Type     string       `json:"type,omitempty"`
+	Function FunctionCall `json:"function"`
+}
+
 // FunctionCall carries the called function name and JSON-string arguments.
 type FunctionCall struct {
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
+}
+
+// UnmarshalJSON accepts arguments as the spec's JSON-encoded string, but
+// also tolerates upstreams that send a raw object or array (kept as its
+// JSON text) or null/absent (empty string).
+func (f *FunctionCall) UnmarshalJSON(b []byte) error {
+	var w struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if err := json.Unmarshal(b, &w); err != nil {
+		return err
+	}
+	f.Name = w.Name
+	args := string(w.Arguments)
+	if len(w.Arguments) == 0 || args == "null" {
+		f.Arguments = ""
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(w.Arguments, &s); err == nil {
+		f.Arguments = s
+		return nil
+	}
+	f.Arguments = args
+	return nil
 }
 
 // Tool is a function the model may call.
@@ -43,13 +79,14 @@ type FunctionDef struct {
 
 // ChatRequest is a provider-neutral chat completion request.
 type ChatRequest struct {
-	Model       string
-	Messages    []Message
-	Tools       []Tool
-	ToolChoice  json.RawMessage
-	Temperature *float64
-	MaxTokens   *int
-	Stream      bool
+	Model             string
+	Messages          []Message
+	Tools             []Tool
+	ToolChoice        json.RawMessage
+	ParallelToolCalls *bool
+	Temperature       *float64
+	MaxTokens         *int
+	Stream            bool
 }
 
 // Usage is token accounting for one response.
@@ -80,9 +117,9 @@ type ChatResponse struct {
 // a finish-reason chunk, and finally a usage chunk (Usage set, all else
 // zero). Egress codecs translate these into the client's stream format.
 type StreamChunk struct {
-	Role         string     // set on the first chunk only
-	Content      string     // incremental text
-	ToolCalls    []ToolCall // incremental tool calls (the mock emits whole)
-	FinishReason string     // "stop" | "tool_calls" on the final delta chunk
-	Usage        *Usage     // set on the terminal usage chunk only
+	Role         string          // set on the first chunk only
+	Content      string          // incremental text
+	ToolCalls    []ToolCallDelta // incremental tool calls; Index per OpenAI accumulation semantics
+	FinishReason string          // "stop" | "tool_calls" on the final delta chunk
+	Usage        *Usage          // set on the terminal usage chunk only
 }

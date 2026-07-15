@@ -67,9 +67,9 @@ func MarshalStreamChunk(meta StreamMeta, c llm.StreamChunk) ([]byte, error) {
 	choice := streamChoice{Index: 0}
 	choice.Delta.Role = c.Role
 	choice.Delta.Content = c.Content
-	for i, tc := range c.ToolCalls {
+	for _, tc := range c.ToolCalls {
 		choice.Delta.ToolCalls = append(choice.Delta.ToolCalls, streamToolCall{
-			Index:    i,
+			Index:    tc.Index,
 			ID:       tc.ID,
 			Type:     tc.Type,
 			Function: streamToolFunc{Name: tc.Function.Name, Arguments: tc.Function.Arguments},

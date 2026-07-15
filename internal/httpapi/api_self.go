@@ -8,6 +8,7 @@ import (
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/apikey"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/version"
 )
 
 // handleAuthMode reports the active auth mode so the login screen can render
@@ -33,6 +34,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		"roles":      sess.principal.Roles,
 		"is_admin":   sess.principal.IsAdmin(),
 		"is_auditor": sess.principal.IsAuditor(),
+		"version":    version.Version,
 	})
 }
 

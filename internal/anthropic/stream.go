@@ -19,7 +19,10 @@ type StreamWriter struct {
 	inputTokens int
 
 	started   bool
-	blockOpen bool
+	blockKind string // "" | "text" | "tool"
+	blockIdx  int    // client-facing index of the open block
+	blockTool int    // upstream tool-call index the open tool block belongs to
+	nextIdx   int    // next client-facing block index
 	stop      string
 }
 
@@ -53,55 +56,47 @@ func (s *StreamWriter) Chunk(c llm.StreamChunk) error {
 
 	switch {
 	case len(c.ToolCalls) > 0:
-		tc := c.ToolCalls[0]
-		if !s.blockOpen {
-			if err := s.event("content_block_start", map[string]any{
-				"type":  "content_block_start",
-				"index": 0,
-				"content_block": map[string]any{
-					"type": "tool_use", "id": tc.ID, "name": tc.Function.Name, "input": map[string]any{},
-				},
+		for _, tc := range c.ToolCalls {
+			if err := s.ensureToolBlock(tc); err != nil {
+				return err
+			}
+			if tc.Function.Arguments == "" {
+				continue // head chunk; a filler here would corrupt the JSON
+			}
+			if err := s.event("content_block_delta", map[string]any{
+				"type":  "content_block_delta",
+				"index": s.blockIdx,
+				"delta": map[string]any{"type": "input_json_delta", "partial_json": tc.Function.Arguments},
 			}); err != nil {
 				return err
 			}
-			s.blockOpen = true
 		}
-		args := tc.Function.Arguments
-		if args == "" {
-			args = "{}"
-		}
-		return s.event("content_block_delta", map[string]any{
-			"type":  "content_block_delta",
-			"index": 0,
-			"delta": map[string]any{"type": "input_json_delta", "partial_json": args},
-		})
+		return nil
 
 	case c.Content != "":
-		if !s.blockOpen {
+		if s.blockKind != "text" {
+			if err := s.closeBlock(); err != nil {
+				return err
+			}
 			if err := s.event("content_block_start", map[string]any{
 				"type":          "content_block_start",
-				"index":         0,
+				"index":         s.nextIdx,
 				"content_block": map[string]any{"type": "text", "text": ""},
 			}); err != nil {
 				return err
 			}
-			s.blockOpen = true
+			s.blockKind, s.blockIdx = "text", s.nextIdx
+			s.nextIdx++
 		}
 		return s.event("content_block_delta", map[string]any{
 			"type":  "content_block_delta",
-			"index": 0,
+			"index": s.blockIdx,
 			"delta": map[string]any{"type": "text_delta", "text": c.Content},
 		})
 
 	case c.FinishReason != "":
 		s.stop = StopReason(c.FinishReason)
-		if s.blockOpen {
-			if err := s.event("content_block_stop", map[string]any{"type": "content_block_stop", "index": 0}); err != nil {
-				return err
-			}
-			s.blockOpen = false
-		}
-		return nil
+		return s.closeBlock()
 
 	case c.Usage != nil:
 		if err := s.event("message_delta", map[string]any{
@@ -115,6 +110,44 @@ func (s *StreamWriter) Chunk(c llm.StreamChunk) error {
 	}
 
 	// Role-only chunk: message_start already handled above.
+	return nil
+}
+
+// ensureToolBlock opens a tool_use block for this delta's upstream index,
+// closing whatever block was open, unless it is already the open block.
+// Assumes one call's deltas arrive contiguously (how OpenAI-compatible
+// upstreams stream); interleaved indexes would fork a spurious block, and
+// Anthropic's wire format cannot reopen a closed block without buffering.
+func (s *StreamWriter) ensureToolBlock(tc llm.ToolCallDelta) error {
+	if s.blockKind == "tool" && s.blockTool == tc.Index {
+		return nil
+	}
+	if err := s.closeBlock(); err != nil {
+		return err
+	}
+	if err := s.event("content_block_start", map[string]any{
+		"type":  "content_block_start",
+		"index": s.nextIdx,
+		"content_block": map[string]any{
+			"type": "tool_use", "id": tc.ID, "name": tc.Function.Name, "input": map[string]any{},
+		},
+	}); err != nil {
+		return err
+	}
+	s.blockKind, s.blockIdx, s.blockTool = "tool", s.nextIdx, tc.Index
+	s.nextIdx++
+	return nil
+}
+
+// closeBlock emits content_block_stop for the open block, if any.
+func (s *StreamWriter) closeBlock() error {
+	if s.blockKind == "" {
+		return nil
+	}
+	if err := s.event("content_block_stop", map[string]any{"type": "content_block_stop", "index": s.blockIdx}); err != nil {
+		return err
+	}
+	s.blockKind = ""
 	return nil
 }
 

@@ -137,6 +137,7 @@ function renderShell() {
           <div>${esc((me.roles || []).join(", ")) || "no roles"}</div>
           ${authMode.mode !== "oidc" ? `<button class="btn ghost sm" id="change-pw" style="margin-top:.3rem">Change password</button>` : ""}
           <button class="btn ghost sm" id="logout" style="margin-top:.6rem">Sign out</button>
+          <div class="ver">AirLLM v${esc(me.version || "dev")}</div>
           <div class="copyright">© 2026 <a href="https://ipsupport.us" target="_blank" rel="noopener">IPSupport LLC</a></div>
         </div>
       </aside>

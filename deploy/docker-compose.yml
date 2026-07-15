@@ -42,6 +42,9 @@ services:
       CAPTURE_BLOB_DIR: "/tmp/airllm-captures"
       # First-boot default for the DLP sidecar URL; ignored once DLP config is saved.
       DLP_MODEL_URL_DEFAULT: "http://dlp-bert:8000"
+      # Diagnostic: log upstream request bodies + raw SSE lines. Dev only —
+      # prompts land in logs when enabled.
+      DEBUG_UPSTREAM_SSE: "${DEBUG_UPSTREAM_SSE:-0}"
     # Default to loopback; set APP_BIND (e.g. in deploy/.env) to publish on a
     # specific LAN interface like "10.0.0.2:8088". Never bind to 0.0.0.0 on a
     # host with a public IP. In k8s the app listens on 0.0.0.0 behind the
