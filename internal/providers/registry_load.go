@@ -18,6 +18,8 @@ func defaultBaseURL(kind string) string {
 		return "https://openrouter.ai/api/v1"
 	case "xai":
 		return "https://api.x.ai/v1"
+	case "groq":
+		return "https://api.groq.com/openai/v1"
 	case "ollama":
 		return "http://localhost:11434/v1"
 	default:
@@ -48,7 +50,7 @@ func LoadFromStore(ctx context.Context, st *store.Store, sealer *secrets.Sealer)
 		switch p.Kind {
 		case "mock":
 			prov = NewMock(p.Name)
-		case "openai", "openrouter", "xai", "ollama":
+		case "openai", "openrouter", "xai", "groq", "ollama":
 			base := p.BaseURL
 			if base == "" {
 				base = defaultBaseURL(p.Kind)

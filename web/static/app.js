@@ -836,7 +836,7 @@ async function adminProviders(c) {
 function editProvider(c, p) {
   modalForm(p.name ? `Edit provider ${p.name}` : "New provider", [
     { name: "name", label: "Name", value: p.name || "", disabled: !!p.name },
-    { name: "kind", label: "Kind", type: "select", options: ["mock", "openai", "openrouter", "xai", "ollama", "anthropic"], value: p.kind || "mock" },
+    { name: "kind", label: "Kind", type: "select", options: ["mock", "openai", "openrouter", "xai", "groq", "ollama", "anthropic"], value: p.kind || "mock" },
     { name: "base_url", label: "Base URL (optional override)", value: p.base_url || "" },
     { name: "api_key", label: p.has_credential ? "API key (set — blank keeps current)" : "API key", type: "password", value: "", placeholder: p.has_credential ? "•••••• stored" : "" },
     { name: "max_concurrency", label: "Max concurrency (0 = unlimited)", value: p.max_concurrency ?? 0 },

@@ -87,6 +87,10 @@ type ChatRequest struct {
 	Temperature       *float64
 	MaxTokens         *int
 	Stream            bool
+
+	// Extra carries unmapped OpenAI request fields verbatim (OpenAI ingress →
+	// OpenAI-compatible upstream). Nil when the request had none.
+	Extra map[string]json.RawMessage
 }
 
 // Usage is token accounting for one response.
