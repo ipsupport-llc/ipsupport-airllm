@@ -159,6 +159,7 @@ code, .mono { font-family: var(--font-mono); }
   font-size: 0.8rem;
 }
 .sidebar-foot .who { color: var(--fg); font-family: var(--font-mono); font-size: 0.82rem; }
+.sidebar-foot .ver { margin-top: 0.6rem; opacity: 0.75; }
 
 .copyright {
   margin-top: 1rem;
