@@ -11,13 +11,14 @@ import (
 )
 
 type chatRequestWire struct {
-	Model       string          `json:"model"`
-	Messages    []llm.Message   `json:"messages"`
-	Tools       []llm.Tool      `json:"tools,omitempty"`
-	ToolChoice  json.RawMessage `json:"tool_choice,omitempty"`
-	Temperature *float64        `json:"temperature,omitempty"`
-	MaxTokens   *int            `json:"max_tokens,omitempty"`
-	Stream      bool            `json:"stream,omitempty"`
+	Model             string          `json:"model"`
+	Messages          []llm.Message   `json:"messages"`
+	Tools             []llm.Tool      `json:"tools,omitempty"`
+	ToolChoice        json.RawMessage `json:"tool_choice,omitempty"`
+	ParallelToolCalls *bool           `json:"parallel_tool_calls,omitempty"`
+	Temperature       *float64        `json:"temperature,omitempty"`
+	MaxTokens         *int            `json:"max_tokens,omitempty"`
+	Stream            bool            `json:"stream,omitempty"`
 }
 
 // DecodeChatRequest parses an OpenAI chat-completions request body.
@@ -34,13 +35,14 @@ func DecodeChatRequest(r io.Reader) (llm.ChatRequest, error) {
 		return llm.ChatRequest{}, errors.New("messages is required")
 	}
 	return llm.ChatRequest{
-		Model:       w.Model,
-		Messages:    w.Messages,
-		Tools:       w.Tools,
-		ToolChoice:  w.ToolChoice,
-		Temperature: w.Temperature,
-		MaxTokens:   w.MaxTokens,
-		Stream:      w.Stream,
+		Model:             w.Model,
+		Messages:          w.Messages,
+		Tools:             w.Tools,
+		ToolChoice:        w.ToolChoice,
+		ParallelToolCalls: w.ParallelToolCalls,
+		Temperature:       w.Temperature,
+		MaxTokens:         w.MaxTokens,
+		Stream:            w.Stream,
 	}, nil
 }
 

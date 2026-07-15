@@ -12,27 +12,29 @@ type streamOptions struct {
 }
 
 type upstreamChatRequest struct {
-	Model         string          `json:"model"`
-	Messages      []llm.Message   `json:"messages"`
-	Tools         []llm.Tool      `json:"tools,omitempty"`
-	ToolChoice    json.RawMessage `json:"tool_choice,omitempty"`
-	Temperature   *float64        `json:"temperature,omitempty"`
-	MaxTokens     *int            `json:"max_tokens,omitempty"`
-	Stream        bool            `json:"stream,omitempty"`
-	StreamOptions *streamOptions  `json:"stream_options,omitempty"`
+	Model             string          `json:"model"`
+	Messages          []llm.Message   `json:"messages"`
+	Tools             []llm.Tool      `json:"tools,omitempty"`
+	ToolChoice        json.RawMessage `json:"tool_choice,omitempty"`
+	ParallelToolCalls *bool           `json:"parallel_tool_calls,omitempty"`
+	Temperature       *float64        `json:"temperature,omitempty"`
+	MaxTokens         *int            `json:"max_tokens,omitempty"`
+	Stream            bool            `json:"stream,omitempty"`
+	StreamOptions     *streamOptions  `json:"stream_options,omitempty"`
 }
 
 // EncodeChatRequest renders the IR as an OpenAI chat-completions request body
 // for an upstream call. When streaming, it asks for a final usage chunk.
 func EncodeChatRequest(req llm.ChatRequest, stream bool) ([]byte, error) {
 	u := upstreamChatRequest{
-		Model:       req.Model,
-		Messages:    req.Messages,
-		Tools:       req.Tools,
-		ToolChoice:  req.ToolChoice,
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
-		Stream:      stream,
+		Model:             req.Model,
+		Messages:          req.Messages,
+		Tools:             req.Tools,
+		ToolChoice:        req.ToolChoice,
+		ParallelToolCalls: req.ParallelToolCalls,
+		Temperature:       req.Temperature,
+		MaxTokens:         req.MaxTokens,
+		Stream:            stream,
 	}
 	if stream {
 		u.StreamOptions = &streamOptions{IncludeUsage: true}
@@ -72,9 +74,9 @@ func DecodeChatResponse(r io.Reader) (llm.ChatResponse, error) {
 type upstreamChunk struct {
 	Choices []struct {
 		Delta struct {
-			Role      string         `json:"role"`
-			Content   string         `json:"content"`
-			ToolCalls []llm.ToolCall `json:"tool_calls"`
+			Role      string              `json:"role"`
+			Content   string              `json:"content"`
+			ToolCalls []llm.ToolCallDelta `json:"tool_calls"`
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`

@@ -96,7 +96,9 @@ func (m *Mock) ChatStream(_ context.Context, req llm.ChatRequest, yield func(llm
 
 	if m.wantsToolCall(req) {
 		tc := m.toolCall(req)
-		if err := yield(llm.StreamChunk{ToolCalls: []llm.ToolCall{tc}}); err != nil {
+		if err := yield(llm.StreamChunk{ToolCalls: []llm.ToolCallDelta{{
+			Index: 0, ID: tc.ID, Type: tc.Type, Function: tc.Function,
+		}}}); err != nil {
 			return err
 		}
 		if err := yield(llm.StreamChunk{FinishReason: "tool_calls"}); err != nil {
