@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,6 +18,11 @@ import (
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/openai"
 )
+
+// debugUpstreamSSE logs every upstream request body and raw SSE line when
+// DEBUG_UPSTREAM_SSE=1. Diagnostic only — never enable where prompts must
+// stay out of logs.
+var debugUpstreamSSE = os.Getenv("DEBUG_UPSTREAM_SSE") == "1"
 
 // OpenAICompat is a real upstream that speaks the OpenAI chat-completions API:
 // OpenAI, OpenRouter, xAI (Grok), and Ollama. They differ only by base URL and
@@ -94,6 +101,9 @@ func (p *OpenAICompat) ChatStream(ctx context.Context, in llm.ChatRequest, yield
 	if err != nil {
 		return err
 	}
+	if debugUpstreamSSE {
+		slog.Info("upstream request", "provider", p.name, "body", string(body))
+	}
 	req, err := p.newRequest(ctx, body)
 	if err != nil {
 		return err
@@ -121,12 +131,18 @@ func (p *OpenAICompat) ChatStream(ctx context.Context, in llm.ChatRequest, yield
 		if data == "" {
 			continue
 		}
+		if debugUpstreamSSE {
+			slog.Info("upstream sse", "provider", p.name, "data", data)
+		}
 		if data == "[DONE]" {
 			break
 		}
 		chunk, err := openai.ParseStreamChunk([]byte(data))
 		if err != nil {
-			continue // skip a malformed chunk rather than abort the stream
+			// skip a malformed chunk rather than abort the stream, but
+			// leave a trace: silent drops have hidden real defects.
+			slog.Warn("dropping malformed upstream chunk", "provider", p.name, "err", err)
+			continue
 		}
 		if err := yield(chunk); err != nil {
 			return err
