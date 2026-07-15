@@ -39,7 +39,18 @@ func EncodeChatRequest(req llm.ChatRequest, stream bool) ([]byte, error) {
 	if stream {
 		u.StreamOptions = &streamOptions{IncludeUsage: true}
 	}
-	return json.Marshal(u)
+	b, err := json.Marshal(u)
+	if err != nil || len(req.Extra) == 0 {
+		return b, err
+	}
+	var merged map[string]json.RawMessage
+	if err := json.Unmarshal(b, &merged); err != nil {
+		return nil, err
+	}
+	for k, v := range req.Extra {
+		merged[k] = v
+	}
+	return json.Marshal(merged)
 }
 
 type upstreamResponse struct {

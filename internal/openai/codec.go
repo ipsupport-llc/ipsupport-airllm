@@ -21,11 +21,22 @@ type chatRequestWire struct {
 	Stream            bool            `json:"stream,omitempty"`
 }
 
+// ownedRequestKeys are the OpenAI request fields the wire struct maps into
+// the IR. Everything else survives decode as ChatRequest.Extra.
+var ownedRequestKeys = map[string]bool{
+	"model": true, "messages": true, "tools": true, "tool_choice": true,
+	"temperature": true, "max_tokens": true, "stream": true,
+	"parallel_tool_calls": true, "stream_options": true, "n": true,
+}
+
 // DecodeChatRequest parses an OpenAI chat-completions request body.
 func DecodeChatRequest(r io.Reader) (llm.ChatRequest, error) {
+	body, err := io.ReadAll(r)
+	if err != nil {
+		return llm.ChatRequest{}, err
+	}
 	var w chatRequestWire
-	dec := json.NewDecoder(r)
-	if err := dec.Decode(&w); err != nil {
+	if err := json.Unmarshal(body, &w); err != nil {
 		return llm.ChatRequest{}, err
 	}
 	if w.Model == "" {
@@ -34,6 +45,24 @@ func DecodeChatRequest(r io.Reader) (llm.ChatRequest, error) {
 	if len(w.Messages) == 0 {
 		return llm.ChatRequest{}, errors.New("messages is required")
 	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return llm.ChatRequest{}, err
+	}
+	if nRaw, ok := raw["n"]; ok && string(nRaw) != "1" && string(nRaw) != "null" {
+		return llm.ChatRequest{}, errors.New("n is not supported (single choice only)")
+	}
+	var extra map[string]json.RawMessage
+	for k, v := range raw {
+		if !ownedRequestKeys[k] {
+			if extra == nil {
+				extra = make(map[string]json.RawMessage)
+			}
+			extra[k] = v
+		}
+	}
+
 	return llm.ChatRequest{
 		Model:             w.Model,
 		Messages:          w.Messages,
@@ -43,6 +72,7 @@ func DecodeChatRequest(r io.Reader) (llm.ChatRequest, error) {
 		Temperature:       w.Temperature,
 		MaxTokens:         w.MaxTokens,
 		Stream:            w.Stream,
+		Extra:             extra,
 	}, nil
 }
 
