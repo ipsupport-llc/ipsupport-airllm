@@ -1,0 +1,116 @@
+package providers
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
+)
+
+// sseServer serves the given raw "data: ..." lines (already SSE-formatted,
+// including the trailing "data: [DONE]" when the test wants one) as a
+// text/event-stream response.
+func sseServer(lines ...string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, l := range lines {
+			fmt.Fprintf(w, "data: %s\n\n", l)
+		}
+	}))
+}
+
+func collectChunks(t *testing.T, ts *httptest.Server) []llm.StreamChunk {
+	t.Helper()
+	p := NewOpenAICompat("up", "openai", ts.URL, "sk-test")
+	var got []llm.StreamChunk
+	err := p.ChatStream(context.Background(), llm.ChatRequest{Model: "m", Messages: []llm.Message{{Role: "user", Content: "hi"}}},
+		func(c llm.StreamChunk) error {
+			got = append(got, c)
+			return nil
+		})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	return got
+}
+
+func TestChatStreamSynthesizesFinishReasonBeforeUsage(t *testing.T) {
+	// Groq-shaped quirk: a whole tool call, then straight to a usage chunk,
+	// finish_reason never populated anywhere (see the v0.1.12 incident).
+	ts := sseServer(
+		`{"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"file","arguments":"{\"a\":1}"}}]},"finish_reason":null}]}`,
+		`{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`,
+		"[DONE]",
+	)
+	defer ts.Close()
+
+	got := collectChunks(t, ts)
+	if len(got) != 4 {
+		t.Fatalf("want 4 chunks (role, tool_calls, synthesized finish, usage), got %d: %+v", len(got), got)
+	}
+	finish := got[2]
+	if finish.FinishReason != "tool_calls" {
+		t.Errorf("synthesized finish_reason = %q, want tool_calls", finish.FinishReason)
+	}
+	if got[3].Usage == nil {
+		t.Errorf("usage chunk lost or reordered: %+v", got[3])
+	}
+}
+
+func TestChatStreamSynthesizesStopForPlainText(t *testing.T) {
+	ts := sseServer(
+		`{"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}`,
+		`{"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}`,
+		`{"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`,
+		"[DONE]",
+	)
+	defer ts.Close()
+
+	got := collectChunks(t, ts)
+	if len(got) != 4 {
+		t.Fatalf("want 4 chunks, got %d: %+v", len(got), got)
+	}
+	if got[2].FinishReason != "stop" {
+		t.Errorf("synthesized finish_reason = %q, want stop", got[2].FinishReason)
+	}
+}
+
+func TestChatStreamNoSynthesisWhenUpstreamSendsFinish(t *testing.T) {
+	ts := sseServer(
+		`{"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`{"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`,
+		"[DONE]",
+	)
+	defer ts.Close()
+
+	got := collectChunks(t, ts)
+	if len(got) != 3 {
+		t.Fatalf("well-behaved upstream must not get an extra synthesized chunk, got %d: %+v", len(got), got)
+	}
+	if got[1].FinishReason != "stop" {
+		t.Errorf("finish_reason = %q, want stop", got[1].FinishReason)
+	}
+}
+
+func TestChatStreamSynthesizesAtStreamEndWithNoUsageChunk(t *testing.T) {
+	// No usage chunk at all before [DONE] — still must not leave the client
+	// without a finish signal.
+	ts := sseServer(
+		`{"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}`,
+		"[DONE]",
+	)
+	defer ts.Close()
+
+	got := collectChunks(t, ts)
+	if len(got) != 2 {
+		t.Fatalf("want 2 chunks (content, synthesized finish), got %d: %+v", len(got), got)
+	}
+	if got[1].FinishReason != "stop" {
+		t.Errorf("finish_reason = %q, want stop", got[1].FinishReason)
+	}
+}

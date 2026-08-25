@@ -122,6 +122,7 @@ func (p *OpenAICompat) ChatStream(ctx context.Context, in llm.ChatRequest, yield
 
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var sawFinish, sawToolCalls bool
 	for sc.Scan() {
 		line := sc.Text()
 		if !strings.HasPrefix(line, "data:") {
@@ -144,11 +145,45 @@ func (p *OpenAICompat) ChatStream(ctx context.Context, in llm.ChatRequest, yield
 			slog.Warn("dropping malformed upstream chunk", "provider", p.name, "err", err)
 			continue
 		}
+		if chunk.FinishReason != "" {
+			sawFinish = true
+		}
+		if len(chunk.ToolCalls) > 0 {
+			sawToolCalls = true
+		}
+		// Some upstreams (Groq, at least with reasoning models under
+		// streaming+tools) never populate finish_reason at all before their
+		// terminal usage chunk — a client gating tool execution on it would
+		// hang or silently drop the call. Synthesize it here, in the
+		// correct position (before usage), so the client always gets one.
+		if chunk.Usage != nil && !sawFinish {
+			if err := yield(llm.StreamChunk{FinishReason: synthesizedFinishReason(sawToolCalls)}); err != nil {
+				return err
+			}
+			sawFinish = true
+		}
 		if err := yield(chunk); err != nil {
 			return err
 		}
 	}
-	return sc.Err()
+	if err := sc.Err(); err != nil {
+		return err
+	}
+	if !sawFinish {
+		if err := yield(llm.StreamChunk{FinishReason: synthesizedFinishReason(sawToolCalls)}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// synthesizedFinishReason picks the finish reason to fabricate for an
+// upstream that never sent one.
+func synthesizedFinishReason(sawToolCalls bool) string {
+	if sawToolCalls {
+		return "tool_calls"
+	}
+	return "stop"
 }
 
 // ListModels fetches GET {base}/models and returns the sorted, de-duplicated
