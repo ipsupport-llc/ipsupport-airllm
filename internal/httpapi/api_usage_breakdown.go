@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
+	"time"
 )
 
 type providerUsage struct {
@@ -125,4 +127,67 @@ func (s *Server) handleAdminUsageBreakdown(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"providers": provs, "models": models})
+}
+
+type recentRequest struct {
+	Ts            time.Time `json:"ts"`
+	Alias         string    `json:"alias"`
+	Provider      string    `json:"provider"`
+	UpstreamModel string    `json:"upstream_model"`
+	Status        int       `json:"status"`
+	LatencyMS     int64     `json:"latency_ms"`
+	TokensIn      int64     `json:"tokens_in"`
+	TokensOut     int64     `json:"tokens_out"`
+	CostUSD       float64   `json:"cost_usd"`
+	ErrorMsg      string    `json:"error"`
+}
+
+// recentRequestsQuery is exported so the integration test runs the exact
+// query the handler does.
+const recentRequestsQuery = `
+	SELECT ts, alias, provider_name, upstream_model, status, latency_ms,
+	       prompt_tokens, completion_tokens, cost_usd, error
+	FROM usage_ledger
+	ORDER BY ts DESC
+	LIMIT $1`
+
+// maxRecentRequests caps the page size so an operator can't request an
+// unbounded ledger scan.
+const maxRecentRequests = 200
+
+// handleAdminUsageRecent returns the most recent ledger rows, newest first —
+// a raw per-request tail alongside the aggregated breakdown, for spotting a
+// specific failing target without a database client.
+func (s *Server) handleAdminUsageRecent(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > maxRecentRequests {
+		limit = maxRecentRequests
+	}
+
+	rows, err := s.st.PG.Query(r.Context(), recentRequestsQuery, limit)
+	if err != nil {
+		writeControlError(w, http.StatusInternalServerError, "failed to load recent requests")
+		return
+	}
+	defer rows.Close()
+	out := []recentRequest{}
+	for rows.Next() {
+		var req recentRequest
+		if err := rows.Scan(&req.Ts, &req.Alias, &req.Provider, &req.UpstreamModel, &req.Status,
+			&req.LatencyMS, &req.TokensIn, &req.TokensOut, &req.CostUSD, &req.ErrorMsg); err != nil {
+			writeControlError(w, http.StatusInternalServerError, "failed to load recent requests")
+			return
+		}
+		out = append(out, req)
+	}
+	if err := rows.Err(); err != nil {
+		writeControlError(w, http.StatusInternalServerError, "failed to load recent requests")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"requests": out})
 }

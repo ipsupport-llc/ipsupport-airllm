@@ -165,3 +165,63 @@ func TestUsageBreakdownQueries(t *testing.T) {
 		t.Errorf("alias-a/bp-openai/gpt-4 group missing from %+v", models)
 	}
 }
+
+// TestRecentRequestsQuery exercises recentRequestsQuery directly (mirroring
+// TestUsageBreakdownQueries) inside one rolled-back transaction.
+func TestRecentRequestsQuery(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Explicit, distinct ts values: both rows would otherwise default to the
+	// same now() inside one transaction, making ORDER BY ts DESC ambiguous.
+	insert := `INSERT INTO usage_ledger
+		(ts, alias, provider_name, upstream_model, prompt_tokens, completion_tokens, cost_usd, status, latency_ms, error)
+		VALUES (now() - interval '1 second', $1, $2, $3, $4, $5, $6, $7, $8, $9)`
+	if _, err := tx.Exec(ctx, insert, "rr-alias-a", "rr-openai", "gpt-4", 100, 50, 1.00, 200, 120, ""); err != nil {
+		t.Fatalf("insert older row: %v", err)
+	}
+	insertNewer := `INSERT INTO usage_ledger
+		(ts, alias, provider_name, upstream_model, prompt_tokens, completion_tokens, cost_usd, status, latency_ms, error)
+		VALUES (now(), $1, $2, $3, $4, $5, $6, $7, $8, $9)`
+	if _, err := tx.Exec(ctx, insertNewer, "rr-alias-b", "", "", 0, 0, 0, 502, 30, "provider busy"); err != nil {
+		t.Fatalf("insert failed row: %v", err)
+	}
+
+	rows, err := tx.Query(ctx, recentRequestsQuery, 2)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer rows.Close()
+	var got []recentRequest
+	for rows.Next() {
+		var req recentRequest
+		if err := rows.Scan(&req.Ts, &req.Alias, &req.Provider, &req.UpstreamModel, &req.Status,
+			&req.LatencyMS, &req.TokensIn, &req.TokensOut, &req.CostUSD, &req.ErrorMsg); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		got = append(got, req)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows err: %v", err)
+	}
+
+	if len(got) != 2 {
+		t.Fatalf("got %d rows, want 2 (LIMIT $1 with $1=2): %+v", len(got), got)
+	}
+	// ORDER BY ts DESC: the row inserted second (rr-alias-b) comes first.
+	if got[0].Alias != "rr-alias-b" || got[0].Status != 502 || got[0].ErrorMsg != "provider busy" {
+		t.Errorf("newest row = %+v, want rr-alias-b/502/provider busy", got[0])
+	}
+	if got[0].Provider != "" || got[0].UpstreamModel != "" {
+		t.Errorf("failed row must keep its empty provider/model visible, got %+v", got[0])
+	}
+	if got[1].Alias != "rr-alias-a" || got[1].Provider != "rr-openai" || got[1].Status != 200 {
+		t.Errorf("older row = %+v, want rr-alias-a/rr-openai/200", got[1])
+	}
+}
