@@ -151,18 +151,31 @@ func (p *OpenAICompat) ChatStream(ctx context.Context, in llm.ChatRequest, yield
 		if len(chunk.ToolCalls) > 0 {
 			sawToolCalls = true
 		}
-		// Some upstreams (Groq, at least with reasoning models under
-		// streaming+tools) never populate finish_reason at all before their
-		// terminal usage chunk — a client gating tool execution on it would
-		// hang or silently drop the call. Synthesize it here, in the
-		// correct position (before usage), so the client always gets one.
-		if chunk.Usage != nil && !sawFinish {
-			if err := yield(llm.StreamChunk{FinishReason: synthesizedFinishReason(sawToolCalls)}); err != nil {
+		if chunk.Usage == nil {
+			if err := yield(chunk); err != nil {
 				return err
 			}
+			continue
+		}
+		// Usage is present. Two upstream quirks land here, both from Groq:
+		// (1) finish_reason and usage arrive bundled in the SAME message
+		// instead of separate chunks like OpenAI/xAI send, and (2)
+		// finish_reason is never populated at all. The IR documents usage
+		// as its own terminal chunk (every egress relies on that shape),
+		// so split it out here — and synthesize the missing finish_reason
+		// while we're at it, in the correct position (before usage).
+		usage := chunk.Usage
+		chunk.Usage = nil
+		if !sawFinish {
+			chunk.FinishReason = synthesizedFinishReason(sawToolCalls)
 			sawFinish = true
 		}
-		if err := yield(chunk); err != nil {
+		if chunk.Role != "" || chunk.Content != "" || len(chunk.ToolCalls) > 0 || chunk.FinishReason != "" {
+			if err := yield(chunk); err != nil {
+				return err
+			}
+		}
+		if err := yield(llm.StreamChunk{Usage: usage}); err != nil {
 			return err
 		}
 	}
