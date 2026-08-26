@@ -85,6 +85,9 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		writeProtocolError(w, r, http.StatusInternalServerError, "internal_error", "failed to encode response")
 		return
 	}
+	if plan.ExposeBackendHeaders && target.DisplayLabel != "" {
+		w.Header().Set("X-Backend-Model", target.DisplayLabel)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
@@ -101,6 +104,7 @@ func (s *Server) streamMessages(w http.ResponseWriter, r *http.Request, req llm.
 		w: w,
 		sw: anthropic.NewStreamWriter(w, flusher.Flush,
 			"msg_"+newID(), req.Model, anthropic.EstimateInputTokens(req)),
+		exposeBackend: plan.ExposeBackendHeaders,
 	}
 
 	tp := time.Now()
@@ -135,13 +139,14 @@ func (s *Server) streamMessages(w http.ResponseWriter, r *http.Request, req llm.
 // anthropicSink streams Anthropic Messages SSE events via a StreamWriter and
 // accumulates the response text for the capture pipeline.
 type anthropicSink struct {
-	w       http.ResponseWriter
-	sw      *anthropic.StreamWriter
-	content strings.Builder
+	w             http.ResponseWriter
+	sw            *anthropic.StreamWriter
+	content       strings.Builder
+	exposeBackend bool
 }
 
-func (a *anthropicSink) begin() {
-	writeSSEHeaders(a.w)
+func (a *anthropicSink) begin(t routing.Target) {
+	writeSSEHeaders(a.w, t, a.exposeBackend)
 }
 
 func (a *anthropicSink) chunk(c llm.StreamChunk) error {

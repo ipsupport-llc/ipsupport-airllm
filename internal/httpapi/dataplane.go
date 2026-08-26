@@ -87,6 +87,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeProtocolError(w, r, http.StatusInternalServerError, "internal_error", "failed to encode response")
 		return
 	}
+	if plan.ExposeBackendHeaders && target.DisplayLabel != "" {
+		w.Header().Set("X-Backend-Model", target.DisplayLabel)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
@@ -100,9 +103,10 @@ func (s *Server) streamChatCompletions(w http.ResponseWriter, r *http.Request, r
 	}
 
 	sink := &openaiSink{
-		w:     w,
-		flush: flusher.Flush,
-		meta:  openai.StreamMeta{ID: "chatcmpl-" + newID(), Model: req.Model, Created: time.Now().Unix()},
+		w:             w,
+		flush:         flusher.Flush,
+		meta:          openai.StreamMeta{ID: "chatcmpl-" + newID(), Model: req.Model, Created: time.Now().Unix()},
+		exposeBackend: plan.ExposeBackendHeaders,
 	}
 
 	tp := time.Now()

@@ -965,7 +965,9 @@ async function editAlias(c, a) {
       </select></label>
     <label class="field"><span class="lab">Layer-2 BERT scan (fuzzy PII)</span>
       <input id="al-bert" type="checkbox" ${a.dlp_model_scan === false ? "" : "checked"} style="width:auto" /></label>
-    <div class="lab" style="color:var(--muted);font-size:.82rem;margin-bottom:.3rem">Targets: same priority = load-balanced tier; higher number = fallback tier</div>
+    <label class="field"><span class="lab">Expose which target answered (X-Backend-Model header)</span>
+      <input id="al-expose" type="checkbox" ${a.expose_backend_headers ? "checked" : ""} style="width:auto" /></label>
+    <div class="lab" style="color:var(--muted);font-size:.82rem;margin-bottom:.3rem">Targets: same priority = load-balanced tier; higher number = fallback tier. Label is what the header shows — real provider/model names never leak.</div>
     <div id="al-targets"></div>
     <button type="button" class="btn ghost sm" id="al-add" style="margin-top:.3rem">+ Add target</button>
     <div class="row" style="justify-content:flex-end;margin-top:1rem">
@@ -1013,6 +1015,7 @@ async function editAlias(c, a) {
         <option ${t.upstream_protocol !== "anthropic" ? "selected" : ""}>openai</option>
         <option ${t.upstream_protocol === "anthropic" ? "selected" : ""}>anthropic</option>
       </select>
+      <input class="t-label" placeholder="label (X-Backend-Model)" value="${esc(t.display_label || "")}" style="width:150px" />
       <button type="button" class="btn danger sm t-del" title="remove">×</button>`;
     row.querySelector(".t-del").addEventListener("click", () => row.remove());
     rowSeq++;
@@ -1046,11 +1049,12 @@ async function editAlias(c, a) {
       provider: r.querySelector(".t-prov").value,
       upstream_model: r.querySelector(".t-model").value.trim(),
       upstream_protocol: r.querySelector(".t-proto").value,
+      display_label: r.querySelector(".t-label").value.trim(),
     })).filter((t) => t.upstream_model);
     if (tlist.length === 0) { toast("Add at least one target with a model", "err"); return; }
     const x = await api("PUT", `/api/admin/aliases/${encodeURIComponent(alias)}`,
       { protocol: $("#al-proto", bg).value, strategy: $("#al-strategy", bg).value, targets: tlist,
-        dlp_model_scan: $("#al-bert", bg).checked });
+        dlp_model_scan: $("#al-bert", bg).checked, expose_backend_headers: $("#al-expose", bg).checked });
     if (!x.ok) { toast((x.data && x.data.error) || "Failed", "err"); return; }
     // Rename = save under the new name, then drop the old one. Role
     // policies and pricing that reference the old name are NOT rewritten.

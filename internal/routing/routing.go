@@ -22,15 +22,21 @@ type Target struct {
 	Provider         string
 	UpstreamModel    string
 	UpstreamProtocol string
+	// DisplayLabel is an operator-chosen name for this target, shown in the
+	// X-Backend-Model response header (see Plan.ExposeBackendHeaders)
+	// instead of Provider/UpstreamModel — those stay internal. Empty means
+	// no label was configured for this target.
+	DisplayLabel string
 }
 
 // Plan is the ordered set of priority tiers for a request, plus the within-
 // tier balancing strategy.
 type Plan struct {
-	Alias        string
-	Strategy     string     // round_robin | least_busy
-	DLPModelScan bool       // run the layer-2 BERT scan for this alias
-	Tiers        [][]Target // index 0 = highest priority (tried first)
+	Alias                string
+	Strategy             string     // round_robin | least_busy
+	DLPModelScan         bool       // run the layer-2 BERT scan for this alias
+	ExposeBackendHeaders bool       // set X-Backend-Provider/-Model on the response
+	Tiers                [][]Target // index 0 = highest priority (tried first)
 }
 
 // Ordered flattens the tiers into the try-order for one request: tier by tier,
@@ -100,12 +106,15 @@ func (r *Router) Resolve(ctx context.Context, model string, allowPassthrough boo
 		if err != nil {
 			return nil, err
 		}
-		return &Plan{Alias: model, Strategy: "round_robin", DLPModelScan: true, Tiers: [][]Target{{t}}}, nil
+		// The client already named the provider/model explicitly, so echoing
+		// it back in headers reveals nothing new — same reasoning as the
+		// DLPModelScan default above.
+		return &Plan{Alias: model, Strategy: "round_robin", DLPModelScan: true, ExposeBackendHeaders: true, Tiers: [][]Target{{t}}}, nil
 	}
 
 	var strategy string
-	var dlpModelScan bool
-	err := r.st.PG.QueryRow(ctx, `SELECT strategy, dlp_model_scan FROM model_aliases WHERE alias = $1`, model).Scan(&strategy, &dlpModelScan)
+	var dlpModelScan, exposeBackendHeaders bool
+	err := r.st.PG.QueryRow(ctx, `SELECT strategy, dlp_model_scan, expose_backend_headers FROM model_aliases WHERE alias = $1`, model).Scan(&strategy, &dlpModelScan, &exposeBackendHeaders)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("model %q not found", model)
@@ -114,7 +123,7 @@ func (r *Router) Resolve(ctx context.Context, model string, allowPassthrough boo
 	}
 
 	rows, err := r.st.PG.Query(ctx, `
-		SELECT t.priority, t.provider_name, t.upstream_model, t.upstream_protocol
+		SELECT t.priority, t.provider_name, t.upstream_model, t.upstream_protocol, t.display_label
 		FROM alias_targets t
 		JOIN providers p ON p.name = t.provider_name AND p.enabled = true
 		WHERE t.alias = $1
@@ -129,7 +138,7 @@ func (r *Router) Resolve(ctx context.Context, model string, allowPassthrough boo
 	for rows.Next() {
 		var priority int
 		var t Target
-		if err := rows.Scan(&priority, &t.Provider, &t.UpstreamModel, &t.UpstreamProtocol); err != nil {
+		if err := rows.Scan(&priority, &t.Provider, &t.UpstreamModel, &t.UpstreamProtocol, &t.DisplayLabel); err != nil {
 			return nil, err
 		}
 		if len(tiers) == 0 || priority != lastPriority {
@@ -144,7 +153,7 @@ func (r *Router) Resolve(ctx context.Context, model string, allowPassthrough boo
 	if len(tiers) == 0 {
 		return nil, fmt.Errorf("model %q has no available targets", model)
 	}
-	return &Plan{Alias: model, Strategy: strategy, DLPModelScan: dlpModelScan, Tiers: tiers}, nil
+	return &Plan{Alias: model, Strategy: strategy, DLPModelScan: dlpModelScan, ExposeBackendHeaders: exposeBackendHeaders, Tiers: tiers}, nil
 }
 
 func (r *Router) passthroughTarget(ctx context.Context, provider, upstreamModel string) (Target, error) {
