@@ -97,6 +97,34 @@ func TestChatStreamNoSynthesisWhenUpstreamSendsFinish(t *testing.T) {
 	}
 }
 
+func TestChatStreamSplitsBundledFinishAndUsage(t *testing.T) {
+	// Real Groq shape (captured live, see the v0.1.13 incident): the
+	// finish_reason chunk and the terminal usage chunk are the SAME JSON
+	// object, not separate ones like OpenAI/xAI send.
+	ts := sseServer(
+		`{"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"file","arguments":"{\"a\":1}"}}]},"finish_reason":null}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":291,"completion_tokens":246,"total_tokens":537}}`,
+		"[DONE]",
+	)
+	defer ts.Close()
+
+	got := collectChunks(t, ts)
+	if len(got) != 4 {
+		t.Fatalf("want 4 chunks (role, tool_calls, finish, usage — split apart), got %d: %+v", len(got), got)
+	}
+	finish, usage := got[2], got[3]
+	if finish.FinishReason != "tool_calls" {
+		t.Errorf("finish chunk lost: %+v", finish)
+	}
+	if finish.Usage != nil {
+		t.Errorf("finish chunk must not carry usage once split: %+v", finish)
+	}
+	if usage.Usage == nil || usage.FinishReason != "" {
+		t.Errorf("usage chunk must be usage-only after the split: %+v", usage)
+	}
+}
+
 func TestChatStreamSynthesizesAtStreamEndWithNoUsageChunk(t *testing.T) {
 	// No usage chunk at all before [DONE] — still must not leave the client
 	// without a finish signal.
