@@ -77,6 +77,18 @@ func (s *Server) finalizeUsage(ctx context.Context, entry ledger.Entry, keyID, u
 	s.ledger.Record(ctx, entry)
 	s.metrics.RecordUsage(entry.IngressProtocol, prompt, completion, entry.CostUSD)
 
+	logAttrs := []any{
+		"alias", entry.Alias, "provider", entry.ProviderName, "upstream_model", upstreamModel,
+		"ingress", entry.IngressProtocol, "status", entry.Status,
+		"prompt_tokens", prompt, "completion_tokens", completion,
+		"cost_usd", entry.CostUSD, "latency_ms", entry.LatencyMS,
+	}
+	if entry.ErrorMsg != "" {
+		slog.Error("request completed", append(logAttrs, "error", entry.ErrorMsg)...)
+	} else {
+		slog.Info("request completed", logAttrs...)
+	}
+
 	if entry.Status == http.StatusOK && (prompt > 0 || completion > 0) {
 		if err := s.limiter.Add(ctx, keyID, int64(prompt+completion), costMicro); err != nil {
 			slog.Error("limiter add failed", "err", err)

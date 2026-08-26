@@ -678,12 +678,31 @@ function viewAdmin(view, tab) {
 }
 
 async function adminUsage(c) {
-  const [u, b] = await Promise.all([
+  const [u, b, r] = await Promise.all([
     api("GET", "/api/admin/usage"),
     api("GET", "/api/admin/usage/breakdown?hours=24"),
+    api("GET", "/api/admin/usage/recent?limit=50"),
   ]);
   c.innerHTML = `<h2 style="font-size:1.05rem">Organization usage</h2>` + usageCards(u.data || {}) +
-    breakdownTables(b.data || {});
+    breakdownTables(b.data || {}) + recentRequestsTable((r.data || {}).requests || []);
+}
+
+// recentRequestsTable renders the last N ledger rows, newest first — a raw
+// per-request tail (status, latency, error) alongside the aggregates above.
+function recentRequestsTable(reqs) {
+  const tok = (n) => (+n || 0).toLocaleString("en-US");
+  const rows = reqs.map((x) => `<tr class="${x.status >= 400 ? "err-row" : ""}">
+    <td class="mono">${esc(new Date(x.ts).toLocaleString())}</td>
+    <td class="mono">${esc(x.alias)}</td>
+    <td>${esc(x.provider) || "(none)"}</td>
+    <td class="mono">${esc(x.upstream_model)}</td>
+    <td>${x.status}</td>
+    <td>${x.latency_ms} ms</td>
+    <td class="mono">${tok(x.tokens_in)} / ${tok(x.tokens_out)}</td>
+    <td>$${(+x.cost_usd).toFixed(4)}</td>
+    <td class="mono">${esc(x.error || "")}</td></tr>`);
+  return panelTable("Recent requests",
+    ["Time", "Alias", "Provider", "Upstream model", "Status", "Latency", "Tokens in / out", "Cost", "Error"], rows);
 }
 
 async function adminUsers(c) {
