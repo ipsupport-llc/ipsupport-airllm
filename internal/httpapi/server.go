@@ -136,6 +136,21 @@ func (s *Server) reloadProviders(ctx context.Context) error {
 // for large prompts but blocks pathological payloads.
 const maxRequestBody = 16 << 20 // 16 MiB
 
+// maxAudioRequestBody caps audio upload bodies. Matches the 32 MiB
+// ParseMultipartForm allows in api_audio.go — audio files routinely exceed
+// the 16 MiB text-oriented maxRequestBody.
+const maxAudioRequestBody = 32 << 20 // 32 MiB
+
+// maxBodyFor returns the body-size cap for a request path.
+func maxBodyFor(path string) int64 {
+	switch path {
+	case "/v1/audio/transcriptions", "/v1/audio/speech":
+		return maxAudioRequestBody
+	default:
+		return maxRequestBody
+	}
+}
+
 // statusRecorder captures the response status for metrics.
 type statusRecorder struct {
 	http.ResponseWriter
@@ -158,7 +173,7 @@ func (r *statusRecorder) Flush() {
 // ingressOf maps a request path to a metrics ingress label.
 func ingressOf(path string) string {
 	switch path {
-	case "/v1/chat/completions", "/v1/models":
+	case "/v1/chat/completions", "/v1/models", "/v1/audio/transcriptions", "/v1/audio/speech":
 		return "openai"
 	case "/v1/messages":
 		return "anthropic"
@@ -170,7 +185,7 @@ func ingressOf(path string) string {
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+		r.Body = http.MaxBytesReader(w, r.Body, maxBodyFor(r.URL.Path))
 	}
 	start := time.Now()
 	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
