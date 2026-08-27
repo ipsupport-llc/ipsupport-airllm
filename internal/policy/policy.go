@@ -15,8 +15,10 @@ type KeyPolicy struct {
 // Limits are per-window usage caps. Keys are window names ("5h"/"24h"/"7d");
 // a missing or non-positive value means no cap for that window/unit.
 type Limits struct {
-	Tokens  map[string]int64   `json:"tokens,omitempty"`
-	CostUSD map[string]float64 `json:"cost_usd,omitempty"`
+	Tokens       map[string]int64   `json:"tokens,omitempty"`
+	CostUSD      map[string]float64 `json:"cost_usd,omitempty"`
+	AudioSeconds map[string]int64   `json:"audio_seconds,omitempty"`
+	TTSChars     map[string]int64   `json:"tts_chars,omitempty"`
 }
 
 // ParseLimits decodes the limits snapshot.

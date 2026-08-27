@@ -90,7 +90,7 @@ func (s *Server) finalizeUsage(ctx context.Context, entry ledger.Entry, keyID, u
 	}
 
 	if entry.Status == http.StatusOK && (prompt > 0 || completion > 0) {
-		if err := s.limiter.Add(ctx, keyID, int64(prompt+completion), costMicro); err != nil {
+		if err := s.limiter.Add(ctx, keyID, int64(prompt+completion), costMicro, 0, 0); err != nil {
 			slog.Error("limiter add failed", "err", err)
 		}
 	}
