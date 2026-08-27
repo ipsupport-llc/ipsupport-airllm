@@ -6,6 +6,7 @@ import (
 	"context"
 	"sync/atomic"
 
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/audio"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
 )
 
@@ -42,6 +43,19 @@ type ModelPrice struct {
 // prices (OpenRouter). Entries without pricing are omitted.
 type PricedModelLister interface {
 	ListModelPricing(ctx context.Context) ([]ModelPrice, error)
+}
+
+// Transcriber is implemented by providers that can transcribe audio to
+// text. Providers without a transcription capability simply do not
+// implement it.
+type Transcriber interface {
+	Transcribe(ctx context.Context, req audio.TranscriptionRequest) (audio.TranscriptionResponse, error)
+}
+
+// Synthesizer is implemented by providers that can synthesize speech from
+// text. Providers without a synthesis capability simply do not implement it.
+type Synthesizer interface {
+	Synthesize(ctx context.Context, req audio.SpeechRequest) (audio.SpeechResponse, error)
 }
 
 // Entry wraps a provider with a concurrency limit. A request must Acquire a

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/audio"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
 )
 
@@ -130,5 +131,37 @@ func TestMockChatStreamYieldError(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("ChatStream should stop after first yield error, made %d calls", calls)
+	}
+}
+
+func TestMockTranscribe(t *testing.T) {
+	m := NewMock("mock")
+	resp, err := m.Transcribe(context.Background(), audio.TranscriptionRequest{
+		Model: "mock-whisper", Audio: []byte("fake-audio-bytes"), Filename: "clip.wav",
+	})
+	if err != nil {
+		t.Fatalf("Transcribe: %v", err)
+	}
+	if resp.Text == "" {
+		t.Error("want non-empty transcript")
+	}
+	if resp.DurationSeconds <= 0 {
+		t.Errorf("DurationSeconds = %v, want > 0", resp.DurationSeconds)
+	}
+}
+
+func TestMockSynthesize(t *testing.T) {
+	m := NewMock("mock")
+	resp, err := m.Synthesize(context.Background(), audio.SpeechRequest{
+		Model: "mock-tts", Input: "hello world", Voice: "default",
+	})
+	if err != nil {
+		t.Fatalf("Synthesize: %v", err)
+	}
+	if len(resp.Audio) == 0 {
+		t.Error("want non-empty audio bytes")
+	}
+	if resp.ContentType == "" {
+		t.Error("want a non-empty ContentType")
 	}
 }
