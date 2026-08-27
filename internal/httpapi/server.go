@@ -192,6 +192,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/chat/completions", s.requireAPIKey(s.handleChatCompletions))
 	s.mux.HandleFunc("GET /v1/models", s.requireAPIKey(s.handleModels))
 	s.mux.HandleFunc("POST /v1/messages", s.requireAPIKey(s.handleMessages))
+	s.mux.HandleFunc("POST /v1/audio/transcriptions", s.requireAPIKey(s.handleAudioTranscriptions))
+	s.mux.HandleFunc("POST /v1/audio/speech", s.requireAPIKey(s.handleAudioSpeech))
 
 	// Control-plane auth endpoints (public — no session required).
 	s.mux.HandleFunc("GET /api/auth/mode", s.handleAuthMode)
