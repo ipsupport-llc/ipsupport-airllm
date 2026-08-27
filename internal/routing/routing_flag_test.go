@@ -111,3 +111,60 @@ func TestDLPModelScanFlag(t *testing.T) {
 		t.Errorf("passthrough plan DLPModelScan = false, want true")
 	}
 }
+
+// TestDisplayLabelFlag exercises the alias_targets.display_label column: an
+// operator-chosen name shown in X-Backend-Model instead of the real
+// provider/model. Same tx-vs-pool constraint as TestDLPModelScanFlag above,
+// same rationale for testing the alias branch via the raw query.
+func TestDisplayLabelFlag(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `SELECT display_label FROM alias_targets LIMIT 0`); err != nil {
+		t.Skipf("display_label column not present (migration 0010 not applied?): %v", err)
+	}
+
+	mustExec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := tx.Exec(ctx, sql, args...); err != nil {
+			t.Fatalf("exec %s: %v", sql, err)
+		}
+	}
+
+	mustExec(`INSERT INTO providers (name, kind, base_url, enabled) VALUES ($1, $2, $3, $4)`,
+		"label-test-provider", "openai", "http://example.invalid", true)
+	mustExec(`INSERT INTO model_aliases (alias, protocol, strategy, expose_backend_headers) VALUES ($1, $2, $3, $4)`,
+		"label-test-alias", "openai", "round_robin", true)
+	mustExec(`INSERT INTO alias_targets (alias, priority, provider_name, upstream_model, upstream_protocol, display_label)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		"label-test-alias", 0, "label-test-provider", "upstream-model", "openai", "Fast Tier")
+
+	// Same query as the alias branch of Router.Resolve.
+	rows, err := tx.Query(ctx, `
+		SELECT t.priority, t.provider_name, t.upstream_model, t.upstream_protocol, t.display_label
+		FROM alias_targets t
+		JOIN providers p ON p.name = t.provider_name AND p.enabled = true
+		WHERE t.alias = $1
+		ORDER BY t.priority`, "label-test-alias")
+	if err != nil {
+		t.Fatalf("query targets: %v", err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		t.Fatalf("no target row returned for label-test-alias")
+	}
+	var priority int
+	var provider, upModel, upProto, label string
+	if err := rows.Scan(&priority, &provider, &upModel, &upProto, &label); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if label != "Fast Tier" {
+		t.Errorf("display_label = %q, want %q", label, "Fast Tier")
+	}
+}

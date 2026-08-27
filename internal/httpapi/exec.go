@@ -145,9 +145,10 @@ func (s *Server) runChat(ctx context.Context, plan *routing.Plan, req llm.ChatRe
 
 // streamSink encodes IR stream chunks into a client wire format. begin is
 // called exactly once, on the first chunk, so headers are written lazily and
-// fallback remains possible until the first byte is sent.
+// fallback remains possible until the first byte is sent. It receives the
+// target that actually started answering, once known.
 type streamSink interface {
-	begin()
+	begin(t routing.Target)
 	chunk(llm.StreamChunk) error
 }
 
@@ -177,7 +178,7 @@ func (s *Server) runStream(ctx context.Context, plan *routing.Plan, req llm.Chat
 			var attemptUsage llm.Usage
 			callErr := e.Provider.ChatStream(ctx, upstreamRequest(req, t.UpstreamModel), func(c llm.StreamChunk) error {
 				if !attemptStarted {
-					sink.begin()
+					sink.begin(t)
 					attemptStarted = true
 				}
 				if c.Usage != nil {
@@ -217,14 +218,15 @@ func (s *Server) runStream(ctx context.Context, plan *routing.Plan, req llm.Chat
 // openaiSink streams OpenAI chat.completion.chunk SSE events and accumulates
 // the response text for the capture pipeline.
 type openaiSink struct {
-	w       http.ResponseWriter
-	flush   func()
-	meta    openai.StreamMeta
-	content strings.Builder
+	w             http.ResponseWriter
+	flush         func()
+	meta          openai.StreamMeta
+	content       strings.Builder
+	exposeBackend bool
 }
 
-func (o *openaiSink) begin() {
-	writeSSEHeaders(o.w)
+func (o *openaiSink) begin(t routing.Target) {
+	writeSSEHeaders(o.w, t, o.exposeBackend)
 }
 
 func (o *openaiSink) chunk(c llm.StreamChunk) error {
@@ -245,7 +247,10 @@ func (o *openaiSink) chunk(c llm.StreamChunk) error {
 // assembled returns the full accumulated response text.
 func (o *openaiSink) assembled() string { return o.content.String() }
 
-func writeSSEHeaders(w http.ResponseWriter) {
+func writeSSEHeaders(w http.ResponseWriter, t routing.Target, exposeBackend bool) {
+	if exposeBackend && t.DisplayLabel != "" {
+		w.Header().Set("X-Backend-Model", t.DisplayLabel)
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
