@@ -191,8 +191,13 @@ same explicit pattern rather than generalizing already-tested code:
 - The audio handlers call `Check` before the provider call and `Add` after
   a successful one (STT adds `DurationSeconds`; TTS adds the input
   character count) — same check-before/increment-after shape as chat.
-- Role policy admin UI: two more numeric fields per window, next to the
-  existing tokens/cost inputs.
+- No console change needed: the role editor already edits `limits` as a
+  raw JSON textarea (`policy.Limits` round-trips through `json.RawMessage`
+  end to end), and `fmtLimits` in `web/static/app.js` already renders any
+  dimension key generically (`"${val} ${dim}/${win}"`). An operator can
+  set `audio_seconds`/`tts_chars` caps today, the moment the Go side
+  understands those keys — verified by reading the current UI code before
+  writing this plan, not assumed.
 
 ## Testing
 
