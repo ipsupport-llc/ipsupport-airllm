@@ -211,7 +211,6 @@ package providers
 import (
 	"context"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -323,14 +322,7 @@ func TestOpenAICompatSynthesizeNon200(t *testing.T) {
 		t.Fatal("want an error for a non-2xx upstream response")
 	}
 }
-
-var _ = multipart.Writer{} // silence unused import if not otherwise referenced
 ```
-
-(Remove the trailing `var _ = multipart.Writer{}` line if the file ends up
-using `mime/multipart` directly elsewhere; it is only there so the import
-list above compiles if you trim assertions during review. Prefer deleting
-the import and that line together if unused.)
 
 - [ ] **Step 2: Run tests to verify they fail**
 
