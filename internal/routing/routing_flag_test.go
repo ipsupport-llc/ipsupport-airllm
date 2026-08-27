@@ -168,3 +168,44 @@ func TestDisplayLabelFlag(t *testing.T) {
 		t.Errorf("display_label = %q, want %q", label, "Fast Tier")
 	}
 }
+
+// TestDLPAudioScanFlag exercises the dlp_audio_scan column end to end, same
+// tx-scoped fixture pattern as TestDisplayLabelFlag above.
+func TestDLPAudioScanFlag(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `SELECT dlp_audio_scan FROM model_aliases LIMIT 0`); err != nil {
+		t.Skipf("dlp_audio_scan column not present (migration 0011 not applied?): %v", err)
+	}
+
+	mustExec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := tx.Exec(ctx, sql, args...); err != nil {
+			t.Fatalf("exec %s: %v", sql, err)
+		}
+	}
+	mustExec(`INSERT INTO providers (name, kind, base_url, enabled) VALUES ($1, $2, $3, $4)`,
+		"audioflag-test-provider", "openai", "http://example.invalid", true)
+	mustExec(`INSERT INTO model_aliases (alias, protocol, strategy, dlp_audio_scan) VALUES ($1, $2, $3, $4)`,
+		"audioflag-test-alias", "openai", "round_robin", false)
+	mustExec(`INSERT INTO alias_targets (alias, priority, provider_name, upstream_model, upstream_protocol) VALUES ($1, $2, $3, $4, $5)`,
+		"audioflag-test-alias", 0, "audioflag-test-provider", "upstream-model", "openai")
+
+	var strategy string
+	var dlpAudioScan bool
+	if err := tx.QueryRow(ctx,
+		`SELECT strategy, dlp_audio_scan FROM model_aliases WHERE alias = $1`, "audioflag-test-alias",
+	).Scan(&strategy, &dlpAudioScan); err != nil {
+		t.Fatalf("query alias: %v", err)
+	}
+	if dlpAudioScan {
+		t.Errorf("dlp_audio_scan = true, want false for audioflag-test-alias")
+	}
+}
