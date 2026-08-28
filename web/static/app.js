@@ -878,8 +878,9 @@ async function adminPricing(c) {
       <select id="import-provider">${providers.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("")}</select>
       <button class="btn ghost sm" id="import-prices">Import prices</button>
     </div>` +
-    panelTable("Pricing (USD / 1M tokens)", ["Provider", "Model", "Input", "Output", ""],
-      ps.map((p) => `<tr><td class="mono">${esc(p.provider) || "(any)"}</td><td class="mono">${esc(p.model)}</td><td>${p.input_per_1m}</td><td>${p.output_per_1m}</td>
+    panelTable("Pricing", ["Provider", "Model", "Unit", "Input", "Output", ""],
+      ps.map((p) => `<tr><td class="mono">${esc(p.provider) || "(any)"}</td><td class="mono">${esc(p.model)}</td>
+        <td>${esc(p.unit || "tokens")}</td><td>${p.input_per_1m}</td><td>${p.output_per_1m}</td>
         <td style="text-align:right"><button class="btn ghost sm" data-edit='${esc(JSON.stringify(p))}'>Edit</button></td></tr>`));
   $("#new-price").addEventListener("click", () => editPrice(c, {}));
   document.querySelectorAll("[data-edit]").forEach((b) =>
@@ -904,11 +905,13 @@ async function editPrice(c, p) {
   modalForm(p.model ? `Edit price ${p.model}` : "New price", [
     { name: "model", label: "Upstream model", value: p.model || "", disabled: !!p.model },
     { name: "provider", label: "Provider", type: "select", options: providerOptions, value: p.provider || "", disabled: !!p.model },
+    { name: "unit", label: "Unit ($ / 1M of this)", type: "select",
+      options: ["tokens", "audio_second", "text_char"], value: p.unit || "tokens" },
     { name: "input_per_1m", label: "Input $ / 1M", value: p.input_per_1m ?? 0 },
     { name: "output_per_1m", label: "Output $ / 1M", value: p.output_per_1m ?? 0 },
   ], async (v) => {
     const x = await api("PUT", `/api/admin/pricing/${encodeURIComponent(v.model)}`,
-      { provider: v.provider, input_per_1m: Number(v.input_per_1m), output_per_1m: Number(v.output_per_1m) });
+      { provider: v.provider, unit: v.unit, input_per_1m: Number(v.input_per_1m), output_per_1m: Number(v.output_per_1m) });
     if (x.ok) { toast("Pricing saved"); adminPricing(c); return true; }
     toast((x.data && x.data.error) || "Failed", "err"); return false;
   });
