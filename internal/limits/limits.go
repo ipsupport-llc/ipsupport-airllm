@@ -73,22 +73,18 @@ func (l *Limiter) Check(ctx context.Context, key string, lim policy.Limits) (Dec
 	}
 
 	now := l.now()
-	tokFields, err := l.rdb.HGetAll(ctx, tokKey(key)).Result()
-	if err != nil {
+	pipe := l.rdb.Pipeline()
+	tokCmd := pipe.HGetAll(ctx, tokKey(key))
+	costCmd := pipe.HGetAll(ctx, costKey(key))
+	audioCmd := pipe.HGetAll(ctx, audioSecKey(key))
+	ttsCmd := pipe.HGetAll(ctx, ttsCharKey(key))
+	if _, err := pipe.Exec(ctx); err != nil {
 		return Decision{Allowed: true}, err
 	}
-	costFields, err := l.rdb.HGetAll(ctx, costKey(key)).Result()
-	if err != nil {
-		return Decision{Allowed: true}, err
-	}
-	audioFields, err := l.rdb.HGetAll(ctx, audioSecKey(key)).Result()
-	if err != nil {
-		return Decision{Allowed: true}, err
-	}
-	ttsFields, err := l.rdb.HGetAll(ctx, ttsCharKey(key)).Result()
-	if err != nil {
-		return Decision{Allowed: true}, err
-	}
+	tokFields := tokCmd.Val()
+	costFields := costCmd.Val()
+	audioFields := audioCmd.Val()
+	ttsFields := ttsCmd.Val()
 
 	l.prune(ctx, key, now, tokFields, costFields, audioFields, ttsFields)
 

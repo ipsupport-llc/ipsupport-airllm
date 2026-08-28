@@ -387,7 +387,7 @@ func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, r
 // BERT model scan (audio DLP is layer-1 only, per the design spec) and
 // takes no modelScan/budget parameters. cfg.Action drives the same
 // flag/redact/block semantics as dlpEnforce.
-func (s *Server) dlpScanText(ctx context.Context, ak authedKey, ingress, text string) (blocked bool, message string, findings []dlp.Finding, redactedText string) {
+func (s *Server) dlpScanText(ctx context.Context, ak authedKey, ingress, alias, text string) (blocked bool, message string, findings []dlp.Finding, redactedText string) {
 	cfg := s.dlpCfg()
 	redactedText = text
 	if !cfg.Enabled || cfg.Action == "off" || text == "" {
@@ -405,7 +405,7 @@ func (s *Server) dlpScanText(ctx context.Context, ak authedKey, ingress, text st
 
 	labels := sortedKeys(labelSetOf(findings))
 	sample := excerpt(dlp.Redact(text, findings))
-	s.recordDLP(ctx, ak, ingress, "audio", actionPast(cfg.Action), labels, len(findings), sample)
+	s.recordDLP(ctx, ak, ingress, alias, actionPast(cfg.Action), labels, len(findings), sample)
 
 	if cfg.Action == "block" {
 		return true, "request blocked: sensitive content detected (" + strings.Join(labels, ", ") + ")", findings, redactedText

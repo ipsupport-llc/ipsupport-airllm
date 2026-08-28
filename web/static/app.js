@@ -970,6 +970,8 @@ async function editAlias(c, a) {
       <input id="al-bert" type="checkbox" ${a.dlp_model_scan === false ? "" : "checked"} style="width:auto" /></label>
     <label class="field"><span class="lab">Expose which target answered (X-Backend-Model header)</span>
       <input id="al-expose" type="checkbox" ${a.expose_backend_headers ? "checked" : ""} style="width:auto" /></label>
+    <label class="field"><span class="lab">DLP scan on audio transcripts/input (STT/TTS)</span>
+      <input id="al-dlpaudio" type="checkbox" ${a.dlp_audio_scan === false ? "" : "checked"} style="width:auto" /></label>
     <div class="lab" style="color:var(--muted);font-size:.82rem;margin-bottom:.3rem">Targets: same priority = load-balanced tier; higher number = fallback tier. Label is what the header shows — real provider/model names never leak.</div>
     <div id="al-targets"></div>
     <button type="button" class="btn ghost sm" id="al-add" style="margin-top:.3rem">+ Add target</button>
@@ -1057,7 +1059,7 @@ async function editAlias(c, a) {
     if (tlist.length === 0) { toast("Add at least one target with a model", "err"); return; }
     const x = await api("PUT", `/api/admin/aliases/${encodeURIComponent(alias)}`,
       { protocol: $("#al-proto", bg).value, strategy: $("#al-strategy", bg).value, targets: tlist,
-        dlp_model_scan: $("#al-bert", bg).checked, expose_backend_headers: $("#al-expose", bg).checked });
+        dlp_model_scan: $("#al-bert", bg).checked, expose_backend_headers: $("#al-expose", bg).checked, dlp_audio_scan: $("#al-dlpaudio", bg).checked });
     if (!x.ok) { toast((x.data && x.data.error) || "Failed", "err"); return; }
     // Rename = save under the new name, then drop the old one. Role
     // policies and pricing that reference the old name are NOT rewritten.

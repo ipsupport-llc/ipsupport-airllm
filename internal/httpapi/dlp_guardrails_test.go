@@ -203,7 +203,7 @@ func newDLPScanTextTestServer(t *testing.T, cfg dlpConfig) *Server {
 
 func TestDlpScanTextFlag(t *testing.T) {
 	s := newDLPScanTextTestServer(t, dlpConfig{Enabled: true, Action: "flag"})
-	blocked, msg, findings, redacted := s.dlpScanText(context.Background(), authedKey{}, "openai", "my key is sk-test-1234567890abcdef1234567890abcdef")
+	blocked, msg, findings, redacted := s.dlpScanText(context.Background(), authedKey{}, "openai", "gpt-audio", "my key is sk-test-1234567890abcdef1234567890abcdef")
 	if blocked {
 		t.Errorf("action=flag must not block, got blocked=%v msg=%q", blocked, msg)
 	}
@@ -217,7 +217,7 @@ func TestDlpScanTextFlag(t *testing.T) {
 
 func TestDlpScanTextRedact(t *testing.T) {
 	s := newDLPScanTextTestServer(t, dlpConfig{Enabled: true, Action: "redact"})
-	_, _, findings, redacted := s.dlpScanText(context.Background(), authedKey{}, "openai", "my key is sk-test-1234567890abcdef1234567890abcdef")
+	_, _, findings, redacted := s.dlpScanText(context.Background(), authedKey{}, "openai", "gpt-audio", "my key is sk-test-1234567890abcdef1234567890abcdef")
 	if len(findings) == 0 {
 		t.Fatal("want at least one finding")
 	}
@@ -228,7 +228,7 @@ func TestDlpScanTextRedact(t *testing.T) {
 
 func TestDlpScanTextBlock(t *testing.T) {
 	s := newDLPScanTextTestServer(t, dlpConfig{Enabled: true, Action: "block"})
-	blocked, msg, _, _ := s.dlpScanText(context.Background(), authedKey{}, "openai", "my key is sk-test-1234567890abcdef1234567890abcdef")
+	blocked, msg, _, _ := s.dlpScanText(context.Background(), authedKey{}, "openai", "gpt-audio", "my key is sk-test-1234567890abcdef1234567890abcdef")
 	if !blocked {
 		t.Error("action=block must block a planted secret")
 	}
@@ -239,7 +239,7 @@ func TestDlpScanTextBlock(t *testing.T) {
 
 func TestDlpScanTextClean(t *testing.T) {
 	s := newDLPScanTextTestServer(t, dlpConfig{Enabled: true, Action: "block"})
-	blocked, _, findings, redacted := s.dlpScanText(context.Background(), authedKey{}, "openai", "just an ordinary sentence")
+	blocked, _, findings, redacted := s.dlpScanText(context.Background(), authedKey{}, "openai", "gpt-audio", "just an ordinary sentence")
 	if blocked {
 		t.Error("clean text must not block")
 	}

@@ -1,12 +1,16 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
+	"math"
 	"net/http"
+	"time"
+	"unicode/utf8"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/audio"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/dlp"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/ledger"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
@@ -18,6 +22,7 @@ import (
 // requests — see the design spec's out-of-scope list.
 func (s *Server) handleAudioTranscriptions(w http.ResponseWriter, r *http.Request) {
 	ak, _ := keyFromContext(r.Context())
+	start := time.Now()
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		writeProtocolError(w, r, http.StatusBadRequest, "invalid_request_error", "invalid multipart body: "+err.Error())
 		return
@@ -49,6 +54,7 @@ func (s *Server) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if msg, denied := s.limitDenied(r.Context(), ak); denied {
+		s.metrics.IncRateLimited("usage_limit")
 		writeProtocolError(w, r, http.StatusTooManyRequests, "rate_limit_error", msg)
 		return
 	}
@@ -88,6 +94,12 @@ func (s *Server) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reques
 			break
 		}
 	}
+
+	entry := ledger.Entry{
+		KeyID: ak.KeyID, UserID: ak.UserID, Alias: model, ProviderName: target, UpstreamModel: upstreamModel,
+		IngressProtocol: "openai", UpstreamProtocol: "openai", LatencyMS: time.Since(start).Milliseconds(),
+	}
+
 	if !succeeded {
 		if callErr == nil {
 			callErr = errAllBusy
@@ -96,30 +108,42 @@ func (s *Server) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reques
 		if pe, ok := callErr.(*providers.Error); ok && !pe.Retryable {
 			code = pe.Status
 		}
+		if code == http.StatusTooManyRequests {
+			s.metrics.IncRateLimited("provider_busy")
+		}
+		entry.Status = code
+		entry.ErrorMsg = callErr.Error()
+		s.finalizeAudioUsage(r.Context(), entry, ak.KeyID, 0, 0, 0)
 		writeProtocolError(w, r, code, typ, callErr.Error())
 		return
 	}
 
+	audioSeconds := int64(math.Round(resp.DurationSeconds))
+	costMicro := s.pricing.AudioCostMicroUSD(target, upstreamModel, resp.DurationSeconds)
+
 	redactedText := resp.Text
+	var findings []dlp.Finding
 	if plan.DLPAudioScan {
 		var blocked bool
 		var msg string
-		blocked, msg, _, redactedText = s.dlpScanText(r.Context(), ak, "openai", resp.Text)
+		blocked, msg, findings, redactedText = s.dlpScanText(r.Context(), ak, "openai", model, resp.Text)
 		if blocked {
+			entry.Status = http.StatusBadRequest
+			entry.ErrorMsg = msg
+			s.finalizeAudioUsage(r.Context(), entry, ak.KeyID, costMicro, audioSeconds, 0)
 			writeProtocolError(w, r, http.StatusBadRequest, "invalid_request_error", msg)
 			return
 		}
 	}
 
-	costMicro := s.pricing.AudioCostMicroUSD(target, upstreamModel, resp.DurationSeconds)
-	s.ledger.Record(r.Context(), ledger.Entry{
-		KeyID: ak.KeyID, UserID: ak.UserID, Alias: model, ProviderName: target, UpstreamModel: upstreamModel,
-		IngressProtocol: "openai", UpstreamProtocol: "openai", Status: http.StatusOK, CostUSD: float64(costMicro) / 1e6,
-	})
-	if err := s.limiter.Add(r.Context(), ak.KeyID, 0, 0, int64(resp.DurationSeconds), 0); err != nil {
-		slog.Error("limiter add failed", "err", err)
+	entry.Status = http.StatusOK
+	s.finalizeAudioUsage(r.Context(), entry, ak.KeyID, costMicro, audioSeconds, 0)
+
+	dlpRes := dlpResult{}
+	if len(findings) > 0 {
+		dlpRes = dlpResult{Findings: findings, HadIncident: true}
 	}
-	s.enqueueCapture(ak, "openai", model, target, upstreamModel, http.StatusOK, 0, 0, float64(costMicro)/1e6, dlpResult{}, nil, redactedText)
+	s.enqueueCapture(ak, "openai", model, target, upstreamModel, http.StatusOK, 0, 0, float64(costMicro)/1e6, dlpRes, nil, redactedText)
 
 	writeJSON(w, http.StatusOK, map[string]string{"text": redactedText})
 }
@@ -128,14 +152,20 @@ func (s *Server) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reques
 // bytes out, batch (no streaming).
 func (s *Server) handleAudioSpeech(w http.ResponseWriter, r *http.Request) {
 	ak, _ := keyFromContext(r.Context())
+	start := time.Now()
 	var body struct {
 		Model          string `json:"model"`
 		Input          string `json:"input"`
 		Voice          string `json:"voice"`
 		ResponseFormat string `json:"response_format"`
 	}
-	if err := decodeJSON(r, &body); err != nil {
-		writeProtocolError(w, r, http.StatusBadRequest, "invalid_request_error", err.Error())
+	// Plain decoding, NOT the control-plane decodeJSON helper: that helper
+	// sets DisallowUnknownFields, which would reject valid OpenAI-SDK
+	// requests carrying documented fields this v1 doesn't use yet (e.g.
+	// "speed", "instructions") — better to ignore an unsupported knob than
+	// hard-reject an otherwise-compatible client.
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeProtocolError(w, r, http.StatusBadRequest, "invalid_request_error", "invalid JSON body: "+err.Error())
 		return
 	}
 	if body.Model == "" || body.Input == "" {
@@ -153,15 +183,17 @@ func (s *Server) handleAudioSpeech(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if msg, denied := s.limitDenied(r.Context(), ak); denied {
+		s.metrics.IncRateLimited("usage_limit")
 		writeProtocolError(w, r, http.StatusTooManyRequests, "rate_limit_error", msg)
 		return
 	}
 
 	redactedInput := body.Input
+	var findings []dlp.Finding
 	if plan.DLPAudioScan {
 		var blocked bool
 		var msg string
-		blocked, msg, _, redactedInput = s.dlpScanText(r.Context(), ak, "openai", body.Input)
+		blocked, msg, findings, redactedInput = s.dlpScanText(r.Context(), ak, "openai", body.Model, body.Input)
 		if blocked {
 			writeProtocolError(w, r, http.StatusBadRequest, "invalid_request_error", msg)
 			return
@@ -202,6 +234,12 @@ func (s *Server) handleAudioSpeech(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+
+	entry := ledger.Entry{
+		KeyID: ak.KeyID, UserID: ak.UserID, Alias: body.Model, ProviderName: target, UpstreamModel: upstreamModel,
+		IngressProtocol: "openai", UpstreamProtocol: "openai", LatencyMS: time.Since(start).Milliseconds(),
+	}
+
 	if !succeeded {
 		if callErr == nil {
 			callErr = errAllBusy
@@ -210,19 +248,31 @@ func (s *Server) handleAudioSpeech(w http.ResponseWriter, r *http.Request) {
 		if pe, ok := callErr.(*providers.Error); ok && !pe.Retryable {
 			code = pe.Status
 		}
+		if code == http.StatusTooManyRequests {
+			s.metrics.IncRateLimited("provider_busy")
+		}
+		entry.Status = code
+		entry.ErrorMsg = callErr.Error()
+		s.finalizeAudioUsage(r.Context(), entry, ak.KeyID, 0, 0, 0)
 		writeProtocolError(w, r, code, typ, callErr.Error())
 		return
 	}
 
-	costMicro := s.pricing.TTSCostMicroUSD(target, upstreamModel, len(redactedInput))
-	s.ledger.Record(r.Context(), ledger.Entry{
-		KeyID: ak.KeyID, UserID: ak.UserID, Alias: body.Model, ProviderName: target, UpstreamModel: upstreamModel,
-		IngressProtocol: "openai", UpstreamProtocol: "openai", Status: http.StatusOK, CostUSD: float64(costMicro) / 1e6,
-	})
-	if err := s.limiter.Add(r.Context(), ak.KeyID, 0, 0, 0, int64(len(redactedInput))); err != nil {
-		slog.Error("limiter add failed", "err", err)
+	ttsChars := int64(utf8.RuneCountInString(redactedInput))
+	costMicro := s.pricing.TTSCostMicroUSD(target, upstreamModel, utf8.RuneCountInString(redactedInput))
+	entry.Status = http.StatusOK
+	s.finalizeAudioUsage(r.Context(), entry, ak.KeyID, costMicro, 0, ttsChars)
+
+	dlpRes := dlpResult{}
+	if len(findings) > 0 {
+		dlpRes = dlpResult{
+			Findings:        findings,
+			MsgFindings:     [][]dlp.Finding{findings},
+			HadIncident:     true,
+			AlreadyRedacted: redactedInput != body.Input,
+		}
 	}
-	s.enqueueCapture(ak, "openai", body.Model, target, upstreamModel, http.StatusOK, 0, 0, float64(costMicro)/1e6, dlpResult{},
+	s.enqueueCapture(ak, "openai", body.Model, target, upstreamModel, http.StatusOK, 0, 0, float64(costMicro)/1e6, dlpRes,
 		[]llm.Message{{Role: "user", Content: redactedInput}}, "")
 
 	if resp.ContentType != "" {

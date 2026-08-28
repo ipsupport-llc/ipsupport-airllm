@@ -96,6 +96,43 @@ func (s *Server) finalizeUsage(ctx context.Context, entry ledger.Entry, keyID, u
 	}
 }
 
+// finalizeAudioUsage records an audio request's usage the same way
+// finalizeUsage does for chat: it fills cost onto the ledger entry, records
+// it, updates the RecordUsage cost metric, and emits the same "request
+// completed" structured log line, so audio requests are visible in
+// Prometheus/Grafana and log-based tooling exactly like chat requests are.
+// Unlike finalizeUsage, the limiter increment is not gated on
+// entry.Status == 200: a transcription DLP-blocks AFTER the real upstream
+// call already ran (see dlpScanText's call site in api_audio.go), so a
+// blocked response can still carry real, billable usage that must count
+// against both cost_usd and audio_seconds/tts_chars caps. Add already
+// no-ops when every quantity is zero, so gating on "any non-zero quantity"
+// (rather than status) correctly skips the Redis round trip for requests
+// that never reached a provider.
+func (s *Server) finalizeAudioUsage(ctx context.Context, entry ledger.Entry, keyID string, costMicro, audioSeconds, ttsChars int64) {
+	entry.CostUSD = float64(costMicro) / 1e6
+	s.ledger.Record(ctx, entry)
+	s.metrics.RecordUsage(entry.IngressProtocol, 0, 0, entry.CostUSD)
+
+	logAttrs := []any{
+		"alias", entry.Alias, "provider", entry.ProviderName, "upstream_model", entry.UpstreamModel,
+		"ingress", entry.IngressProtocol, "status", entry.Status,
+		"audio_seconds", audioSeconds, "tts_chars", ttsChars,
+		"cost_usd", entry.CostUSD, "latency_ms", entry.LatencyMS,
+	}
+	if entry.ErrorMsg != "" {
+		slog.Error("request completed", append(logAttrs, "error", entry.ErrorMsg)...)
+	} else {
+		slog.Info("request completed", logAttrs...)
+	}
+
+	if costMicro != 0 || audioSeconds != 0 || ttsChars != 0 {
+		if err := s.limiter.Add(ctx, keyID, 0, costMicro, audioSeconds, ttsChars); err != nil {
+			slog.Error("limiter add failed", "err", err)
+		}
+	}
+}
+
 // runChat executes the plan: it walks the tiers (each ordered by the alias
 // strategy), acquiring a concurrency slot per attempt. A busy target is
 // skipped; a retryable error advances to the next target; if every target is

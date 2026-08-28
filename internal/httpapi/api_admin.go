@@ -351,7 +351,7 @@ type aliasTarget struct {
 
 func (s *Server) handleAdminAliases(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.st.PG.Query(r.Context(), `
-		SELECT a.alias, a.protocol, a.strategy, a.dlp_model_scan, a.expose_backend_headers,
+		SELECT a.alias, a.protocol, a.strategy, a.dlp_model_scan, a.expose_backend_headers, a.dlp_audio_scan,
 			COALESCE(t.priority, 0), COALESCE(t.provider_name, ''),
 			COALESCE(t.upstream_model, ''), COALESCE(t.upstream_protocol, ''),
 			COALESCE(t.display_label, '')
@@ -369,6 +369,7 @@ func (s *Server) handleAdminAliases(w http.ResponseWriter, r *http.Request) {
 		Strategy             string        `json:"strategy"`
 		DLPModelScan         bool          `json:"dlp_model_scan"`
 		ExposeBackendHeaders bool          `json:"expose_backend_headers"`
+		DLPAudioScan         bool          `json:"dlp_audio_scan"`
 		Targets              []aliasTarget `json:"targets"`
 	}
 	byAlias := map[string]*aliasView{}
@@ -376,14 +377,14 @@ func (s *Server) handleAdminAliases(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var alias, protocol, strategy, provider, upModel, upProto, label string
 		var priority int
-		var dlpModelScan, exposeBackendHeaders bool
-		if err := rows.Scan(&alias, &protocol, &strategy, &dlpModelScan, &exposeBackendHeaders, &priority, &provider, &upModel, &upProto, &label); err != nil {
+		var dlpModelScan, exposeBackendHeaders, dlpAudioScan bool
+		if err := rows.Scan(&alias, &protocol, &strategy, &dlpModelScan, &exposeBackendHeaders, &dlpAudioScan, &priority, &provider, &upModel, &upProto, &label); err != nil {
 			writeControlError(w, http.StatusInternalServerError, "failed to read aliases")
 			return
 		}
 		av, ok := byAlias[alias]
 		if !ok {
-			av = &aliasView{Alias: alias, Protocol: protocol, Strategy: strategy, DLPModelScan: dlpModelScan, ExposeBackendHeaders: exposeBackendHeaders, Targets: []aliasTarget{}}
+			av = &aliasView{Alias: alias, Protocol: protocol, Strategy: strategy, DLPModelScan: dlpModelScan, ExposeBackendHeaders: exposeBackendHeaders, DLPAudioScan: dlpAudioScan, Targets: []aliasTarget{}}
 			byAlias[alias] = av
 			order = append(order, alias)
 		}
@@ -406,6 +407,7 @@ func (s *Server) handleAdminPutAlias(w http.ResponseWriter, r *http.Request) {
 		Strategy             string        `json:"strategy"`
 		DLPModelScan         *bool         `json:"dlp_model_scan"`
 		ExposeBackendHeaders bool          `json:"expose_backend_headers"`
+		DLPAudioScan         *bool         `json:"dlp_audio_scan"`
 		Targets              []aliasTarget `json:"targets"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
@@ -422,6 +424,10 @@ func (s *Server) handleAdminPutAlias(w http.ResponseWriter, r *http.Request) {
 	if body.DLPModelScan != nil {
 		scan = *body.DLPModelScan
 	}
+	audioScan := true
+	if body.DLPAudioScan != nil {
+		audioScan = *body.DLPAudioScan
+	}
 
 	tx, err := s.st.PG.Begin(r.Context())
 	if err != nil {
@@ -431,9 +437,9 @@ func (s *Server) handleAdminPutAlias(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 
 	if _, err := tx.Exec(r.Context(), `
-		INSERT INTO model_aliases (alias, protocol, strategy, dlp_model_scan, expose_backend_headers) VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (alias) DO UPDATE SET protocol = EXCLUDED.protocol, strategy = EXCLUDED.strategy, dlp_model_scan = EXCLUDED.dlp_model_scan, expose_backend_headers = EXCLUDED.expose_backend_headers`,
-		alias, body.Protocol, body.Strategy, scan, body.ExposeBackendHeaders); err != nil {
+		INSERT INTO model_aliases (alias, protocol, strategy, dlp_model_scan, expose_backend_headers, dlp_audio_scan) VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (alias) DO UPDATE SET protocol = EXCLUDED.protocol, strategy = EXCLUDED.strategy, dlp_model_scan = EXCLUDED.dlp_model_scan, expose_backend_headers = EXCLUDED.expose_backend_headers, dlp_audio_scan = EXCLUDED.dlp_audio_scan`,
+		alias, body.Protocol, body.Strategy, scan, body.ExposeBackendHeaders, audioScan); err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to save alias")
 		return
 	}

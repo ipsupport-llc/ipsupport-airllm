@@ -72,6 +72,22 @@ func httpError(name string, status int, body []byte) error {
 	}
 }
 
+// audioHTTPError wraps httpError with a hint for 404, the most common
+// signature of a real, non-mock provider that doesn't actually implement
+// the OpenAI audio API — every OpenAICompat instance structurally passes
+// the Transcriber/Synthesizer type assertion regardless of whether the
+// configured vendor/base_url has these endpoints, so a misconfigured audio
+// alias reaches this point instead of failing a local capability check.
+func audioHTTPError(name string, status int, body []byte) error {
+	err := httpError(name, status, body)
+	if status == http.StatusNotFound {
+		if pe, ok := err.(*Error); ok {
+			pe.Message += " (this provider/model may not support the OpenAI audio API)"
+		}
+	}
+	return err
+}
+
 // Chat performs a non-streaming upstream call.
 func (p *OpenAICompat) Chat(ctx context.Context, in llm.ChatRequest) (llm.ChatResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
@@ -354,7 +370,7 @@ func (p *OpenAICompat) Transcribe(ctx context.Context, in audio.TranscriptionReq
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return audio.TranscriptionResponse{}, httpError(p.name, resp.StatusCode, b)
+		return audio.TranscriptionResponse{}, audioHTTPError(p.name, resp.StatusCode, b)
 	}
 
 	var w struct {
@@ -396,7 +412,7 @@ func (p *OpenAICompat) Synthesize(ctx context.Context, in audio.SpeechRequest) (
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return audio.SpeechResponse{}, httpError(p.name, resp.StatusCode, b)
+		return audio.SpeechResponse{}, audioHTTPError(p.name, resp.StatusCode, b)
 	}
 	audioBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
