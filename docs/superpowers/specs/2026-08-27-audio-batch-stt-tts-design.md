@@ -79,9 +79,22 @@ type Synthesizer interface {
 request's `model` field is an alias name, resolved through the same
 `model_aliases`/`alias_targets` tables and the same tier/fallback
 mechanics as chat. The audio handler type-asserts the resolved target's
-provider implements `Transcriber`/`Synthesizer`; a target that doesn't
-(e.g., an alias pointed at a text-only provider) fails with a clear 400
-instead of a confusing upstream error.
+provider implements `Transcriber`/`Synthesizer`.
+
+**Known limitation (shipped, not fixed — see the implementation ledger's
+Ruling 7):** because every real (non-mock) provider kind is constructed as
+the same concrete `OpenAICompat` type, and that type implements
+`Transcriber`/`Synthesizer` unconditionally, the type assertion above
+structurally cannot fail for any real provider — only a `Mock` target or a
+`kind` with no client at all is caught locally. An alias pointed at a real
+provider that doesn't actually support the OpenAI audio API makes a live
+upstream call and surfaces whatever that upstream returns (typically a 404,
+now given a short hint pointing at the likely cause), rather than a clean
+local 400. This mirrors an already-accepted characteristic of
+`PricedModelLister` in this same codebase (only OpenRouter's catalog
+publishes prices, but the interface is implemented unconditionally by the
+same shared type) and was judged an acceptable, non-blocking limitation
+rather than worth a new per-provider capability flag.
 
 **Ingress** (`internal/httpapi/api_audio.go`, new file):
 
