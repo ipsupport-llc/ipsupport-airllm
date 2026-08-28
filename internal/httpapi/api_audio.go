@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -57,9 +58,11 @@ func (s *Server) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reques
 	var target string
 	var upstreamModel string
 	var callErr error
+	succeeded := false
 	for _, t := range plan.Ordered(s.router.NextRR(plan.Alias), s.freeFunc(reg)) {
 		e, ok := reg.Get(t.Provider)
 		if !ok {
+			callErr = fmt.Errorf("provider %q not registered", t.Provider)
 			continue
 		}
 		tr, ok := e.Provider.(providers.Transcriber)
@@ -68,6 +71,7 @@ func (s *Server) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reques
 			continue
 		}
 		if !e.Acquire() {
+			callErr = errAllBusy
 			continue
 		}
 		resp, callErr = tr.Transcribe(r.Context(), audio.TranscriptionRequest{
@@ -77,13 +81,17 @@ func (s *Server) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reques
 		e.Release()
 		target, upstreamModel = t.Provider, t.UpstreamModel
 		if callErr == nil {
+			succeeded = true
 			break
 		}
 		if !providers.IsRetryable(callErr) {
 			break
 		}
 	}
-	if callErr != nil {
+	if !succeeded {
+		if callErr == nil {
+			callErr = errAllBusy
+		}
 		code, typ := classifyUpstreamErr(callErr)
 		if pe, ok := callErr.(*providers.Error); ok && !pe.Retryable {
 			code = pe.Status
@@ -165,9 +173,11 @@ func (s *Server) handleAudioSpeech(w http.ResponseWriter, r *http.Request) {
 	var target string
 	var upstreamModel string
 	var callErr error
+	succeeded := false
 	for _, t := range plan.Ordered(s.router.NextRR(plan.Alias), s.freeFunc(reg)) {
 		e, ok := reg.Get(t.Provider)
 		if !ok {
+			callErr = fmt.Errorf("provider %q not registered", t.Provider)
 			continue
 		}
 		sy, ok := e.Provider.(providers.Synthesizer)
@@ -176,6 +186,7 @@ func (s *Server) handleAudioSpeech(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if !e.Acquire() {
+			callErr = errAllBusy
 			continue
 		}
 		resp, callErr = sy.Synthesize(r.Context(), audio.SpeechRequest{
@@ -184,13 +195,17 @@ func (s *Server) handleAudioSpeech(w http.ResponseWriter, r *http.Request) {
 		e.Release()
 		target, upstreamModel = t.Provider, t.UpstreamModel
 		if callErr == nil {
+			succeeded = true
 			break
 		}
 		if !providers.IsRetryable(callErr) {
 			break
 		}
 	}
-	if callErr != nil {
+	if !succeeded {
+		if callErr == nil {
+			callErr = errAllBusy
+		}
 		code, typ := classifyUpstreamErr(callErr)
 		if pe, ok := callErr.(*providers.Error); ok && !pe.Retryable {
 			code = pe.Status
