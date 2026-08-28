@@ -11,10 +11,14 @@ import (
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 )
 
-// Price is the USD cost per 1M input/output tokens for a model.
+// Price is the USD cost per 1,000,000 units for a model. Unit says what is
+// being counted: "tokens" (default), "audio_second" (STT, priced by audio
+// duration), or "text_char" (TTS, priced by input character count) — same
+// formula for all three, only the quantity differs.
 type Price struct {
 	InputPer1M  float64
 	OutputPer1M float64
+	Unit        string
 }
 
 // Table is a concurrency-safe price snapshot.
@@ -35,7 +39,7 @@ func key(provider, model string) string {
 // Load builds a Table from the pricing rows in the store.
 func Load(ctx context.Context, st *store.Store) (*Table, error) {
 	t := New()
-	rows, err := st.PG.Query(ctx, `SELECT provider, model, input_per_1m, output_per_1m FROM pricing`)
+	rows, err := st.PG.Query(ctx, `SELECT provider, model, input_per_1m, output_per_1m, unit FROM pricing`)
 	if err != nil {
 		return nil, err
 	}
@@ -43,7 +47,7 @@ func Load(ctx context.Context, st *store.Store) (*Table, error) {
 	for rows.Next() {
 		var provider, model string
 		var p Price
-		if err := rows.Scan(&provider, &model, &p.InputPer1M, &p.OutputPer1M); err != nil {
+		if err := rows.Scan(&provider, &model, &p.InputPer1M, &p.OutputPer1M, &p.Unit); err != nil {
 			return nil, err
 		}
 		t.prices[key(provider, model)] = p
@@ -74,4 +78,37 @@ func (t *Table) CostMicroUSD(provider, model string, promptTokens, completionTok
 	}
 	usd := float64(promptTokens)/1e6*p.InputPer1M + float64(completionTokens)/1e6*p.OutputPer1M
 	return int64(math.Round(usd * 1e6))
+}
+
+// AudioCostMicroUSD prices a transcription by audio duration: seconds/1e6
+// * the priced row's InputPer1M (interpreted as $ per 1,000,000 seconds).
+// Same lookup precedence as CostMicroUSD: exact provider+model, then the
+// wildcard provider "", then 0 for an unpriced model.
+func (t *Table) AudioCostMicroUSD(provider, model string, seconds float64) int64 {
+	t.mu.RLock()
+	p, ok := t.prices[key(provider, model)]
+	if !ok {
+		p, ok = t.prices[key("", model)]
+	}
+	t.mu.RUnlock()
+	if !ok {
+		return 0
+	}
+	return int64(math.Round(seconds / 1e6 * p.InputPer1M * 1e6))
+}
+
+// TTSCostMicroUSD prices a synthesis by input character count: chars/1e6 *
+// the priced row's InputPer1M (interpreted as $ per 1,000,000 characters).
+// Same lookup precedence as CostMicroUSD.
+func (t *Table) TTSCostMicroUSD(provider, model string, chars int) int64 {
+	t.mu.RLock()
+	p, ok := t.prices[key(provider, model)]
+	if !ok {
+		p, ok = t.prices[key("", model)]
+	}
+	t.mu.RUnlock()
+	if !ok {
+		return 0
+	}
+	return int64(math.Round(float64(chars) / 1e6 * p.InputPer1M * 1e6))
 }

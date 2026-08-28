@@ -37,8 +37,8 @@ func maxWindow() time.Duration { return Windows[len(Windows)-1].Dur }
 type Decision struct {
 	Allowed bool
 	Window  string
-	Unit    string // "tokens" | "cost_usd"
-	Limit   int64  // tokens, or micro-USD
+	Unit    string // "tokens" | "cost_usd" | "audio_seconds" | "tts_chars"
+	Limit   int64  // tokens, micro-USD, audio seconds, or TTS characters
 	Used    int64
 }
 
@@ -53,8 +53,10 @@ func New(rdb *redis.Client) *Limiter {
 	return &Limiter{rdb: rdb, now: time.Now}
 }
 
-func tokKey(key string) string  { return "air:u:" + key + ":tok" }
-func costKey(key string) string { return "air:u:" + key + ":cost" }
+func tokKey(key string) string      { return "air:u:" + key + ":tok" }
+func costKey(key string) string     { return "air:u:" + key + ":cost" }
+func audioSecKey(key string) string { return "air:u:" + key + ":asec" }
+func ttsCharKey(key string) string  { return "air:u:" + key + ":ttsc" }
 
 // BucketStamp returns the bucket timestamp (unix seconds) for t.
 func BucketStamp(t time.Time) int64 {
@@ -66,24 +68,30 @@ func BucketStamp(t time.Time) int64 {
 // On a backend error it fails open (allow) so a Redis outage cannot take the
 // gateway down; the caller logs the error.
 func (l *Limiter) Check(ctx context.Context, key string, lim policy.Limits) (Decision, error) {
-	if len(lim.Tokens) == 0 && len(lim.CostUSD) == 0 {
+	if len(lim.Tokens) == 0 && len(lim.CostUSD) == 0 && len(lim.AudioSeconds) == 0 && len(lim.TTSChars) == 0 {
 		return Decision{Allowed: true}, nil
 	}
 
 	now := l.now()
-	tokFields, err := l.rdb.HGetAll(ctx, tokKey(key)).Result()
-	if err != nil {
+	pipe := l.rdb.Pipeline()
+	tokCmd := pipe.HGetAll(ctx, tokKey(key))
+	costCmd := pipe.HGetAll(ctx, costKey(key))
+	audioCmd := pipe.HGetAll(ctx, audioSecKey(key))
+	ttsCmd := pipe.HGetAll(ctx, ttsCharKey(key))
+	if _, err := pipe.Exec(ctx); err != nil {
 		return Decision{Allowed: true}, err
 	}
-	costFields, err := l.rdb.HGetAll(ctx, costKey(key)).Result()
-	if err != nil {
-		return Decision{Allowed: true}, err
-	}
+	tokFields := tokCmd.Val()
+	costFields := costCmd.Val()
+	audioFields := audioCmd.Val()
+	ttsFields := ttsCmd.Val()
 
-	l.prune(ctx, key, now, tokFields, costFields)
+	l.prune(ctx, key, now, tokFields, costFields, audioFields, ttsFields)
 
 	tokSums := SumWindows(now, tokFields)
 	costSums := SumWindows(now, costFields)
+	audioSums := SumWindows(now, audioFields)
+	ttsSums := SumWindows(now, ttsFields)
 
 	for _, win := range Windows {
 		if max, ok := lim.Tokens[win.Name]; ok && max > 0 && tokSums[win.Name] >= max {
@@ -95,14 +103,21 @@ func (l *Limiter) Check(ctx context.Context, key string, lim policy.Limits) (Dec
 				return Decision{Allowed: false, Window: win.Name, Unit: "cost_usd", Limit: maxMicro, Used: costSums[win.Name]}, nil
 			}
 		}
+		if max, ok := lim.AudioSeconds[win.Name]; ok && max > 0 && audioSums[win.Name] >= max {
+			return Decision{Allowed: false, Window: win.Name, Unit: "audio_seconds", Limit: max, Used: audioSums[win.Name]}, nil
+		}
+		if max, ok := lim.TTSChars[win.Name]; ok && max > 0 && ttsSums[win.Name] >= max {
+			return Decision{Allowed: false, Window: win.Name, Unit: "tts_chars", Limit: max, Used: ttsSums[win.Name]}, nil
+		}
 	}
 	return Decision{Allowed: true}, nil
 }
 
 // Add increments the current bucket with the given usage and refreshes the
-// hash TTLs so idle keys eventually expire.
-func (l *Limiter) Add(ctx context.Context, key string, tokens, costMicroUSD int64) error {
-	if tokens == 0 && costMicroUSD == 0 {
+// hash TTLs so idle keys eventually expire. Any zero-valued quantity is
+// skipped (no Redis write for a dimension a request didn't use).
+func (l *Limiter) Add(ctx context.Context, key string, tokens, costMicroUSD, audioSeconds, ttsChars int64) error {
+	if tokens == 0 && costMicroUSD == 0 && audioSeconds == 0 && ttsChars == 0 {
 		return nil
 	}
 	field := strconv.FormatInt(BucketStamp(l.now()), 10)
@@ -116,6 +131,14 @@ func (l *Limiter) Add(ctx context.Context, key string, tokens, costMicroUSD int6
 	if costMicroUSD != 0 {
 		pipe.HIncrBy(ctx, costKey(key), field, costMicroUSD)
 		pipe.Expire(ctx, costKey(key), ttl)
+	}
+	if audioSeconds != 0 {
+		pipe.HIncrBy(ctx, audioSecKey(key), field, audioSeconds)
+		pipe.Expire(ctx, audioSecKey(key), ttl)
+	}
+	if ttsChars != 0 {
+		pipe.HIncrBy(ctx, ttsCharKey(key), field, ttsChars)
+		pipe.Expire(ctx, ttsCharKey(key), ttl)
 	}
 	_, err := pipe.Exec(ctx)
 	return err
@@ -142,12 +165,14 @@ func SumWindows(now time.Time, fields map[string]string) map[string]int64 {
 	return out
 }
 
-// prune deletes buckets older than the longest window from both hashes.
-func (l *Limiter) prune(ctx context.Context, key string, now time.Time, tokFields, costFields map[string]string) {
+// prune deletes buckets older than the longest window from all dimension hashes.
+func (l *Limiter) prune(ctx context.Context, key string, now time.Time, tokFields, costFields, audioFields, ttsFields map[string]string) {
 	cutoff := now.Add(-maxWindow() - BucketSize).Unix()
 	tokExpired := expiredFields(cutoff, tokFields)
 	costExpired := expiredFields(cutoff, costFields)
-	if len(tokExpired) == 0 && len(costExpired) == 0 {
+	audioExpired := expiredFields(cutoff, audioFields)
+	ttsExpired := expiredFields(cutoff, ttsFields)
+	if len(tokExpired) == 0 && len(costExpired) == 0 && len(audioExpired) == 0 && len(ttsExpired) == 0 {
 		return
 	}
 	pipe := l.rdb.Pipeline()
@@ -156,6 +181,12 @@ func (l *Limiter) prune(ctx context.Context, key string, now time.Time, tokField
 	}
 	if len(costExpired) > 0 {
 		pipe.HDel(ctx, costKey(key), costExpired...)
+	}
+	if len(audioExpired) > 0 {
+		pipe.HDel(ctx, audioSecKey(key), audioExpired...)
+	}
+	if len(ttsExpired) > 0 {
+		pipe.HDel(ctx, ttsCharKey(key), ttsExpired...)
 	}
 	_, _ = pipe.Exec(ctx)
 }

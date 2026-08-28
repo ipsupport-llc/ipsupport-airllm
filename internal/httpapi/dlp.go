@@ -381,6 +381,51 @@ func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, r
 	}
 }
 
+// dlpScanText runs layer-1 deterministic DLP (regex + entropy) over a single
+// string — the shape audio requests need (one transcript, or one TTS input,
+// not a chat message array). Unlike dlpEnforce it never runs the layer-2
+// BERT model scan (audio DLP is layer-1 only, per the design spec) and
+// takes no modelScan/budget parameters. cfg.Action drives the same
+// flag/redact/block semantics as dlpEnforce.
+func (s *Server) dlpScanText(ctx context.Context, ak authedKey, ingress, alias, text string) (blocked bool, message string, findings []dlp.Finding, redactedText string) {
+	cfg := s.dlpCfg()
+	redactedText = text
+	if !cfg.Enabled || cfg.Action == "off" || text == "" {
+		return false, "", nil, redactedText
+	}
+
+	findings = dlp.ScanWith(text, dlp.PatternSet{
+		Enabled: cfg.Patterns,
+		Custom:  cfg.compiledCustom,
+		Entropy: dlpToggle(cfg.Patterns, "high_entropy", true),
+	})
+	if len(findings) == 0 {
+		return false, "", nil, redactedText
+	}
+
+	labels := sortedKeys(labelSetOf(findings))
+	sample := excerpt(dlp.Redact(text, findings))
+	s.recordDLP(ctx, ak, ingress, alias, actionPast(cfg.Action), labels, len(findings), sample)
+
+	if cfg.Action == "block" {
+		return true, "request blocked: sensitive content detected (" + strings.Join(labels, ", ") + ")", findings, redactedText
+	}
+	if cfg.Action == "redact" {
+		redactedText = dlp.Redact(text, findings)
+	}
+	return false, "", findings, redactedText
+}
+
+// labelSetOf collects the distinct labels across a findings slice, matching
+// the label-collection loop dlpEnforce runs inline per message.
+func labelSetOf(findings []dlp.Finding) map[string]bool {
+	set := map[string]bool{}
+	for _, l := range dlp.Labels(findings) {
+		set[l] = true
+	}
+	return set
+}
+
 func (s *Server) recordDLP(ctx context.Context, ak authedKey, ingress, alias, action string, labels []string, count int, sample string) {
 	if err := s.st.RecordDLPIncident(ctx, store.DLPIncident{
 		KeyID: ak.KeyID, UserID: ak.UserID, IngressProtocol: ingress, Alias: alias,

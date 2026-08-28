@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"sort"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/audio"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/openai"
 )
@@ -68,6 +70,22 @@ func httpError(name string, status int, body []byte) error {
 		Retryable: status == http.StatusTooManyRequests || status >= 500,
 		Message:   fmt.Sprintf("upstream %s returned %d: %s", name, status, strings.TrimSpace(string(body))),
 	}
+}
+
+// audioHTTPError wraps httpError with a hint for 404, the most common
+// signature of a real, non-mock provider that doesn't actually implement
+// the OpenAI audio API — every OpenAICompat instance structurally passes
+// the Transcriber/Synthesizer type assertion regardless of whether the
+// configured vendor/base_url has these endpoints, so a misconfigured audio
+// alias reaches this point instead of failing a local capability check.
+func audioHTTPError(name string, status int, body []byte) error {
+	err := httpError(name, status, body)
+	if status == http.StatusNotFound {
+		if pe, ok := err.(*Error); ok {
+			pe.Message += " (this provider/model may not support the OpenAI audio API)"
+		}
+	}
+	return err
 }
 
 // Chat performs a non-streaming upstream call.
@@ -300,4 +318,105 @@ func (p *OpenAICompat) ListModelPricing(ctx context.Context) ([]ModelPrice, erro
 	}
 	sort.Slice(prices, func(i, j int) bool { return prices[i].ID < prices[j].ID })
 	return prices, nil
+}
+
+// Transcribe uploads audio for transcription. It always requests
+// response_format=verbose_json upstream — regardless of what the
+// gateway's own client asked for — because the gateway needs the
+// reported duration for pricing.
+func (p *OpenAICompat) Transcribe(ctx context.Context, in audio.TranscriptionRequest) (audio.TranscriptionResponse, error) {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	if err := mw.WriteField("model", in.Model); err != nil {
+		return audio.TranscriptionResponse{}, err
+	}
+	if err := mw.WriteField("response_format", "verbose_json"); err != nil {
+		return audio.TranscriptionResponse{}, err
+	}
+	if in.Language != "" {
+		if err := mw.WriteField("language", in.Language); err != nil {
+			return audio.TranscriptionResponse{}, err
+		}
+	}
+	if in.Prompt != "" {
+		if err := mw.WriteField("prompt", in.Prompt); err != nil {
+			return audio.TranscriptionResponse{}, err
+		}
+	}
+	fw, err := mw.CreateFormFile("file", in.Filename)
+	if err != nil {
+		return audio.TranscriptionResponse{}, err
+	}
+	if _, err := fw.Write(in.Audio); err != nil {
+		return audio.TranscriptionResponse{}, err
+	}
+	if err := mw.Close(); err != nil {
+		return audio.TranscriptionResponse{}, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/audio/transcriptions", &buf)
+	if err != nil {
+		return audio.TranscriptionResponse{}, err
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	if p.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
+
+	resp, err := p.hc.Do(req)
+	if err != nil {
+		return audio.TranscriptionResponse{}, &Error{Status: http.StatusBadGateway, Retryable: true, Message: err.Error()}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return audio.TranscriptionResponse{}, audioHTTPError(p.name, resp.StatusCode, b)
+	}
+
+	var w struct {
+		Text     string  `json:"text"`
+		Duration float64 `json:"duration"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&w); err != nil {
+		return audio.TranscriptionResponse{}, err
+	}
+	return audio.TranscriptionResponse{Text: w.Text, DurationSeconds: w.Duration}, nil
+}
+
+// Synthesize requests text-to-speech audio. The response is read whole —
+// batch only, no streaming — and the upstream Content-Type is passed
+// through so the client gets the right audio format.
+func (p *OpenAICompat) Synthesize(ctx context.Context, in audio.SpeechRequest) (audio.SpeechResponse, error) {
+	body, err := json.Marshal(struct {
+		Model          string `json:"model"`
+		Input          string `json:"input"`
+		Voice          string `json:"voice"`
+		ResponseFormat string `json:"response_format,omitempty"`
+	}{Model: in.Model, Input: in.Input, Voice: in.Voice, ResponseFormat: in.ResponseFormat})
+	if err != nil {
+		return audio.SpeechResponse{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/audio/speech", bytes.NewReader(body))
+	if err != nil {
+		return audio.SpeechResponse{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if p.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
+
+	resp, err := p.hc.Do(req)
+	if err != nil {
+		return audio.SpeechResponse{}, &Error{Status: http.StatusBadGateway, Retryable: true, Message: err.Error()}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return audio.SpeechResponse{}, audioHTTPError(p.name, resp.StatusCode, b)
+	}
+	audioBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return audio.SpeechResponse{}, err
+	}
+	return audio.SpeechResponse{Audio: audioBytes, ContentType: resp.Header.Get("Content-Type")}, nil
 }

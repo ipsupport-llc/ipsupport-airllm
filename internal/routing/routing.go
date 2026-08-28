@@ -36,6 +36,7 @@ type Plan struct {
 	Strategy             string     // round_robin | least_busy
 	DLPModelScan         bool       // run the layer-2 BERT scan for this alias
 	ExposeBackendHeaders bool       // set X-Backend-Provider/-Model on the response
+	DLPAudioScan         bool       // run layer-1 DLP scanning on audio text for this alias
 	Tiers                [][]Target // index 0 = highest priority (tried first)
 }
 
@@ -109,12 +110,12 @@ func (r *Router) Resolve(ctx context.Context, model string, allowPassthrough boo
 		// The client already named the provider/model explicitly, so echoing
 		// it back in headers reveals nothing new — same reasoning as the
 		// DLPModelScan default above.
-		return &Plan{Alias: model, Strategy: "round_robin", DLPModelScan: true, ExposeBackendHeaders: true, Tiers: [][]Target{{t}}}, nil
+		return &Plan{Alias: model, Strategy: "round_robin", DLPModelScan: true, ExposeBackendHeaders: true, DLPAudioScan: true, Tiers: [][]Target{{t}}}, nil
 	}
 
 	var strategy string
-	var dlpModelScan, exposeBackendHeaders bool
-	err := r.st.PG.QueryRow(ctx, `SELECT strategy, dlp_model_scan, expose_backend_headers FROM model_aliases WHERE alias = $1`, model).Scan(&strategy, &dlpModelScan, &exposeBackendHeaders)
+	var dlpModelScan, exposeBackendHeaders, dlpAudioScan bool
+	err := r.st.PG.QueryRow(ctx, `SELECT strategy, dlp_model_scan, expose_backend_headers, dlp_audio_scan FROM model_aliases WHERE alias = $1`, model).Scan(&strategy, &dlpModelScan, &exposeBackendHeaders, &dlpAudioScan)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("model %q not found", model)
@@ -153,7 +154,7 @@ func (r *Router) Resolve(ctx context.Context, model string, allowPassthrough boo
 	if len(tiers) == 0 {
 		return nil, fmt.Errorf("model %q has no available targets", model)
 	}
-	return &Plan{Alias: model, Strategy: strategy, DLPModelScan: dlpModelScan, ExposeBackendHeaders: exposeBackendHeaders, Tiers: tiers}, nil
+	return &Plan{Alias: model, Strategy: strategy, DLPModelScan: dlpModelScan, ExposeBackendHeaders: exposeBackendHeaders, DLPAudioScan: dlpAudioScan, Tiers: tiers}, nil
 }
 
 func (r *Router) passthroughTarget(ctx context.Context, provider, upstreamModel string) (Target, error) {

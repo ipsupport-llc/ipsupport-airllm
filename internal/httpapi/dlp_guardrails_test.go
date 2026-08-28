@@ -186,6 +186,71 @@ func newDLPEnforceTestServer(t *testing.T, sidecarURL string) *Server {
 	return s
 }
 
+// newDLPScanTextTestServer builds a *Server for dlpScanText tests: same
+// dummy-pool trick as newDLPEnforceTestServer, no sidecar/modelPool since
+// dlpScanText never runs the layer-2 model scan.
+func newDLPScanTextTestServer(t *testing.T, cfg dlpConfig) *Server {
+	t.Helper()
+	pgPool, err := pgxpool.New(context.Background(), "postgres://user:pass@127.0.0.1:1/db?connect_timeout=1")
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	t.Cleanup(pgPool.Close)
+	s := &Server{st: &store.Store{PG: pgPool}, httpc: http.DefaultClient}
+	s.dlpPtr.Store(&cfg)
+	return s
+}
+
+func TestDlpScanTextFlag(t *testing.T) {
+	s := newDLPScanTextTestServer(t, dlpConfig{Enabled: true, Action: "flag"})
+	blocked, msg, findings, redacted := s.dlpScanText(context.Background(), authedKey{}, "openai", "gpt-audio", "my key is sk-test-1234567890abcdef1234567890abcdef")
+	if blocked {
+		t.Errorf("action=flag must not block, got blocked=%v msg=%q", blocked, msg)
+	}
+	if len(findings) == 0 {
+		t.Error("want at least one finding for a planted secret")
+	}
+	if redacted != "my key is sk-test-1234567890abcdef1234567890abcdef" {
+		t.Errorf("action=flag must not alter the text, got %q", redacted)
+	}
+}
+
+func TestDlpScanTextRedact(t *testing.T) {
+	s := newDLPScanTextTestServer(t, dlpConfig{Enabled: true, Action: "redact"})
+	_, _, findings, redacted := s.dlpScanText(context.Background(), authedKey{}, "openai", "gpt-audio", "my key is sk-test-1234567890abcdef1234567890abcdef")
+	if len(findings) == 0 {
+		t.Fatal("want at least one finding")
+	}
+	if redacted == "my key is sk-test-1234567890abcdef1234567890abcdef" {
+		t.Error("action=redact must alter the text")
+	}
+}
+
+func TestDlpScanTextBlock(t *testing.T) {
+	s := newDLPScanTextTestServer(t, dlpConfig{Enabled: true, Action: "block"})
+	blocked, msg, _, _ := s.dlpScanText(context.Background(), authedKey{}, "openai", "gpt-audio", "my key is sk-test-1234567890abcdef1234567890abcdef")
+	if !blocked {
+		t.Error("action=block must block a planted secret")
+	}
+	if msg == "" {
+		t.Error("want a non-empty block message")
+	}
+}
+
+func TestDlpScanTextClean(t *testing.T) {
+	s := newDLPScanTextTestServer(t, dlpConfig{Enabled: true, Action: "block"})
+	blocked, _, findings, redacted := s.dlpScanText(context.Background(), authedKey{}, "openai", "gpt-audio", "just an ordinary sentence")
+	if blocked {
+		t.Error("clean text must not block")
+	}
+	if len(findings) != 0 {
+		t.Errorf("want no findings, got %+v", findings)
+	}
+	if redacted != "just an ordinary sentence" {
+		t.Errorf("clean text must round-trip unchanged, got %q", redacted)
+	}
+}
+
 // TestDlpEnforceModelScanGate proves modelScan gates ONLY the layer-2 BERT
 // sidecar call: with model scanning enabled config-wise, dlpEnforce(...,
 // false) must never hit the sidecar, while the layer-1 deterministic scan

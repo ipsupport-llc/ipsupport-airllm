@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/audio"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
 )
 
@@ -188,4 +189,22 @@ func randID() string {
 	var b [8]byte
 	_, _ = rand.Read(b[:])
 	return hex.EncodeToString(b[:])
+}
+
+// Transcribe returns a deterministic fake transcript, echoing the audio
+// length as a stand-in duration (real providers report their own).
+func (m *Mock) Transcribe(_ context.Context, req audio.TranscriptionRequest) (audio.TranscriptionResponse, error) {
+	return audio.TranscriptionResponse{
+		Text:            fmt.Sprintf("mock transcript of %q (%d bytes)", req.Filename, len(req.Audio)),
+		DurationSeconds: float64(len(req.Audio)) / 16000, // arbitrary deterministic stand-in
+	}, nil
+}
+
+// Synthesize returns deterministic fake "audio" (not real audio bytes —
+// good enough for routing/pricing/limits tests, which never decode it).
+func (m *Mock) Synthesize(_ context.Context, req audio.SpeechRequest) (audio.SpeechResponse, error) {
+	return audio.SpeechResponse{
+		Audio:       []byte("mock-audio:" + req.Voice + ":" + req.Input),
+		ContentType: "audio/mpeg",
+	}, nil
 }
