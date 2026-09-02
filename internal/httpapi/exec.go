@@ -27,10 +27,19 @@ const (
 )
 
 // classifyUpstreamErr maps an executor error to an HTTP status: all-busy is a
-// 429 (back off and retry), anything else is a 502 upstream error.
+// 429 (back off and retry); a recognized context-length/model-not-found
+// error that still failed on every fallback tier is a 400 the client can
+// act on; anything else is a 502 upstream error.
 func classifyUpstreamErr(err error) (int, string) {
 	if errors.Is(err, errAllBusy) {
 		return http.StatusTooManyRequests, "rate_limit_error"
+	}
+	var pe *providers.Error
+	if errors.As(err, &pe) {
+		switch pe.Code {
+		case providers.ErrCodeContextLengthExceeded, providers.ErrCodeModelNotFound:
+			return http.StatusBadRequest, "invalid_request_error"
+		}
 	}
 	return http.StatusBadGateway, "upstream_error"
 }
@@ -160,7 +169,7 @@ func (s *Server) runChat(ctx context.Context, plan *routing.Plan, req llm.ChatRe
 				return resp, t, nil
 			}
 			lastErr = err
-			if !providers.IsRetryable(err) {
+			if !providers.IsFallbackWorthy(err) {
 				return llm.ChatResponse{}, t, err
 			}
 		}
@@ -232,7 +241,7 @@ func (s *Server) runStream(ctx context.Context, plan *routing.Plan, req llm.Chat
 			if attemptStarted {
 				return t, attemptUsage, true, callErr
 			}
-			if !providers.IsRetryable(callErr) {
+			if !providers.IsFallbackWorthy(callErr) {
 				return t, llm.Usage{}, false, callErr
 			}
 		}
