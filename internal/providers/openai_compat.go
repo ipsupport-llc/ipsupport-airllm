@@ -64,10 +64,54 @@ func (p *OpenAICompat) newRequest(ctx context.Context, body []byte) (*http.Reque
 	return req, nil
 }
 
+// openAIErrorBody is the error shape OpenAI itself, and every OpenAI-compatible
+// cloud vendor this codebase talks to (Groq, xAI, OpenRouter), uses.
+type openAIErrorBody struct {
+	Error struct {
+		Type string `json:"type"`
+		Code string `json:"code"`
+	} `json:"error"`
+}
+
+// llamaCppErrorBody is the error shape llama.cpp's server (and Ollama, which
+// wraps it) uses — distinct from the OpenAI shape: the reason lives in
+// error.type, not error.code, and there is no error.code field at all.
+type llamaCppErrorBody struct {
+	Error struct {
+		Type string `json:"type"`
+	} `json:"error"`
+}
+
+// classifyErrorBody does best-effort parsing of a non-2xx response body
+// against the two known vendor error shapes, returning a recognized
+// providers error code or "" if neither shape matches or matched to
+// something we don't specifically track. A body that fails to unmarshal
+// (malformed JSON, a field of the wrong type such as a null "code") is
+// treated exactly like a non-matching body — this is deliberately not
+// hardened against every possible shape; the two codes this function
+// recognizes always arrive as non-null strings in practice.
+func classifyErrorBody(body []byte) string {
+	var oa openAIErrorBody
+	if err := json.Unmarshal(body, &oa); err == nil {
+		switch oa.Error.Code {
+		case ErrCodeContextLengthExceeded, ErrCodeModelNotFound:
+			return oa.Error.Code
+		}
+	}
+	var lc llamaCppErrorBody
+	if err := json.Unmarshal(body, &lc); err == nil {
+		if lc.Error.Type == "exceed_context_size_error" {
+			return ErrCodeContextLengthExceeded
+		}
+	}
+	return ""
+}
+
 func httpError(name string, status int, body []byte) error {
 	return &Error{
 		Status:    status,
 		Retryable: status == http.StatusTooManyRequests || status >= 500,
+		Code:      classifyErrorBody(body),
 		Message:   fmt.Sprintf("upstream %s returned %d: %s", name, status, strings.TrimSpace(string(body))),
 	}
 }
