@@ -64,10 +64,59 @@ func (p *OpenAICompat) newRequest(ctx context.Context, body []byte) (*http.Reque
 	return req, nil
 }
 
+// openAIErrorBody is the error shape OpenAI itself, and every OpenAI-compatible
+// cloud vendor this codebase talks to (Groq, xAI, OpenRouter), uses.
+type openAIErrorBody struct {
+	Error struct {
+		Type string `json:"type"`
+		Code string `json:"code"`
+	} `json:"error"`
+}
+
+// llamaCppErrorBody is the error shape llama.cpp's server (and Ollama, which
+// wraps it) uses — distinct from the OpenAI shape: the reason lives in
+// error.type, not error.code, and there is no error.code field at all.
+type llamaCppErrorBody struct {
+	Error struct {
+		Type string `json:"type"`
+	} `json:"error"`
+}
+
+// classifyErrorBody does best-effort parsing of a non-2xx response body
+// against the two known vendor error shapes, returning a recognized
+// providers error code or "" if neither shape matches or matched to
+// something we don't specifically track. A body that doesn't match either
+// shape — including one where a field arrives as the wrong JSON type,
+// e.g. llama.cpp's numeric `code` failing to unmarshal into
+// openAIErrorBody's string field — simply leaves Code empty. A JSON
+// `code: null` is a different case: Go's encoding/json decodes a JSON
+// null into a zero-value string without erroring, so that attempt
+// "succeeds" with an empty Code, which then simply misses the switch
+// below and falls through to the next shape. Both paths converge on the
+// same safe outcome (Code stays empty), just via different mechanisms —
+// worth knowing precisely, not just that it's "safe."
+func classifyErrorBody(body []byte) string {
+	var oa openAIErrorBody
+	if err := json.Unmarshal(body, &oa); err == nil {
+		switch oa.Error.Code {
+		case ErrCodeContextLengthExceeded, ErrCodeModelNotFound:
+			return oa.Error.Code
+		}
+	}
+	var lc llamaCppErrorBody
+	if err := json.Unmarshal(body, &lc); err == nil {
+		if lc.Error.Type == "exceed_context_size_error" {
+			return ErrCodeContextLengthExceeded
+		}
+	}
+	return ""
+}
+
 func httpError(name string, status int, body []byte) error {
 	return &Error{
 		Status:    status,
 		Retryable: status == http.StatusTooManyRequests || status >= 500,
+		Code:      classifyErrorBody(body),
 		Message:   fmt.Sprintf("upstream %s returned %d: %s", name, status, strings.TrimSpace(string(body))),
 	}
 }

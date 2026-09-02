@@ -142,3 +142,64 @@ func TestChatStreamSynthesizesAtStreamEndWithNoUsageChunk(t *testing.T) {
 		t.Errorf("finish_reason = %q, want stop", got[1].FinishReason)
 	}
 }
+
+func TestHTTPErrorParsesOpenAIStyleContextLengthExceeded(t *testing.T) {
+	body := []byte(`{"error":{"message":"This model's maximum context length is 8192 tokens.","type":"invalid_request_error","code":"context_length_exceeded"}}`)
+	err := httpError("openai", 400, body)
+	pe, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("want *Error, got %T", err)
+	}
+	if pe.Code != ErrCodeContextLengthExceeded {
+		t.Errorf("Code = %q, want %q", pe.Code, ErrCodeContextLengthExceeded)
+	}
+	if pe.Retryable {
+		t.Error("a 400 must still be Retryable=false — Code is additive, not a replacement")
+	}
+}
+
+func TestHTTPErrorParsesOpenAIStyleModelNotFound(t *testing.T) {
+	body := []byte(`{"error":{"message":"The model does not exist","type":"invalid_request_error","code":"model_not_found"}}`)
+	err := httpError("groq", 404, body)
+	pe := err.(*Error)
+	if pe.Code != ErrCodeModelNotFound {
+		t.Errorf("Code = %q, want %q", pe.Code, ErrCodeModelNotFound)
+	}
+}
+
+func TestHTTPErrorParsesLlamaCppStyleContextSizeExceeded(t *testing.T) {
+	body := []byte(`{"error":{"code":400,"message":"the request exceeds the available context size, try increasing it","type":"exceed_context_size_error","n_prompt_tokens":94520,"n_ctx":8192}}`)
+	err := httpError("ollama-local", 400, body)
+	pe := err.(*Error)
+	if pe.Code != ErrCodeContextLengthExceeded {
+		t.Errorf("Code = %q, want %q", pe.Code, ErrCodeContextLengthExceeded)
+	}
+}
+
+func TestHTTPErrorUnrecognizedBodyLeavesCodeEmpty(t *testing.T) {
+	cases := [][]byte{
+		[]byte(`{"error":{"message":"bad request","type":"invalid_request_error","code":"something_else"}}`),
+		[]byte(`{"error":"model 'x' not found, try pulling it first"}`), // Ollama's plain-string shape, not object
+		[]byte(`not even json`),
+		[]byte(``),
+		[]byte(`{"error":{"type":"invalid_request_error","code":null}}`), // OpenAI sends real null codes for many error kinds
+	}
+	for _, body := range cases {
+		err := httpError("x", 400, body)
+		pe := err.(*Error)
+		if pe.Code != "" {
+			t.Errorf("body %q: Code = %q, want empty", body, pe.Code)
+		}
+	}
+}
+
+func TestHTTPErrorRetryableUnaffectedByCode(t *testing.T) {
+	body := []byte(`{"error":{"message":"rate limited","type":"rate_limit_error"}}`)
+	err := httpError("x", 429, body).(*Error)
+	if !err.Retryable {
+		t.Error("429 must remain Retryable=true regardless of Code parsing")
+	}
+	if err.Code != "" {
+		t.Errorf("this body has no recognized code, want empty, got %q", err.Code)
+	}
+}

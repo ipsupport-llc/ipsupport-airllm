@@ -118,6 +118,30 @@ func TestMockFailRetryable(t *testing.T) {
 	}
 }
 
+func TestMockCtxFailFallbackWorthy(t *testing.T) {
+	m := NewMock("mock")
+
+	ctxFailReq := llm.ChatRequest{Model: "mock-ctxfail", Messages: []llm.Message{{Role: "user", Content: "x"}}}
+	_, err := m.Chat(context.Background(), ctxFailReq)
+	if err == nil {
+		t.Fatal("ctxfail model must return an error")
+	}
+	if IsRetryable(err) {
+		t.Error("ctxfail error must NOT be Retryable (it's a target-specific failure, not transient)")
+	}
+	if !IsFallbackWorthy(err) {
+		t.Error("ctxfail error must be fallback-worthy via its Code")
+	}
+
+	err = m.ChatStream(context.Background(), ctxFailReq, func(llm.StreamChunk) error {
+		t.Fatal("ctxfail model must not yield any chunk")
+		return nil
+	})
+	if !IsFallbackWorthy(err) {
+		t.Error("ChatStream ctxfail error must be fallback-worthy via its Code")
+	}
+}
+
 func TestMockChatStreamYieldError(t *testing.T) {
 	m := NewMock("mock")
 	sentinel := context.Canceled
