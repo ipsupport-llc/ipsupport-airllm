@@ -117,11 +117,21 @@ machinery is untouched.
 **Audio handlers (`internal/httpapi/api_audio.go`) are explicitly out of
 scope** — they have their own `IsRetryable`-gated fallback loop, but no
 production incident has occurred there, and extending this fix to audio
-would be speculative scope creep beyond what's been observed.
+would be speculative scope creep beyond what's been observed. Audio's
+fallback GATE is genuinely unchanged (still `IsRetryable`-only, no new
+audio fallback behavior) — but because `api_audio.go` calls the same
+shared `classifyUpstreamErr`, the client-visible error `type` string for
+the two newly-recognized codes changes there too: a removed audio model
+now returns `type: "invalid_request_error"` instead of `"upstream_error"`,
+while the HTTP status is still whatever the non-retryable override already
+produced. This is a side effect of sharing the classification function,
+not a new audio fallback path.
 
-**`classifyUpstreamErr`** (`exec.go`) gains one new branch, checked before
-the existing `errAllBusy`/default fallback: if the final error (the one
-propagated after every tier has been exhausted) is a `*providers.Error`
+**`classifyUpstreamErr`** (`exec.go`) gains one new branch, checked after
+the existing `errAllBusy` check and before the default fallback (the order
+has no behavioral effect either way, since `errAllBusy` is a bare sentinel
+that can never also satisfy `errors.As(err, &pe)`): if the final error (the
+one propagated after every tier has been exhausted) is a `*providers.Error`
 whose `Code` is `ErrCodeContextLengthExceeded` or `ErrCodeModelNotFound`,
 the client gets `400 invalid_request_error` instead of the current
 generic `502 upstream_error`. The message text is unchanged (it already
@@ -189,8 +199,18 @@ error.
 - A blanket "all non-429 4xx fall back" policy — explicitly rejected in
   favor of the known-cases list, to avoid masking genuinely malformed
   client requests behind confusing multi-tier retries.
-- Retrying the *same* target (this codebase has no such mechanism today,
-  and this design doesn't add one — "fallback-worthy" only ever means
-  "try the next tier," matching `Retryable`'s existing practical effect).
+- Deliberately retrying the *same* target within one tier walk —
+  "fallback-worthy" only ever means "try the next tier," matching
+  `Retryable`'s existing practical effect. There is one real corner case
+  where a target still gets walked again without a deliberate mechanism
+  for it: when the busy-retry loop's outer `attempt` iterations fire
+  (triggered by an UNRELATED tier being momentarily busy in the same
+  pass), every tier — including one that already failed deterministically
+  with a fallback-worthy error earlier in the SAME attempt — gets walked
+  again, up to `busyRetries+1` = 5 times total. This can waste real
+  upstream calls (e.g. re-uploading a large request that will
+  deterministically fail the same way) but never produces an incorrect
+  final answer; per this plan's simplicity-first scope, it's documented
+  here rather than mitigated with a skip-map.
 - Changing `busyRetries`/`busyBackoff` semantics (capacity-exhaustion
   retry is a separate, untouched mechanism).
