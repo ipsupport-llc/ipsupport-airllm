@@ -93,6 +93,9 @@ func TestRunStreamFallsBackOnContextLengthExceeded(t *testing.T) {
 	if !started {
 		t.Error("expected the stream to have started")
 	}
+	if !sink.began {
+		t.Error("expected sink.begin to have been called by the fallback tier")
+	}
 	if target.Provider != "mock-ok" {
 		t.Errorf("target.Provider = %q, want mock-ok (fallback should have been tried)", target.Provider)
 	}
@@ -112,6 +115,51 @@ func (f *fakeStreamSink) begin(routing.Target) { f.began = true }
 func (f *fakeStreamSink) chunk(c llm.StreamChunk) error {
 	f.onChunk(c)
 	return nil
+}
+
+func exhaustedTwoTierPlan() *routing.Plan {
+	return &routing.Plan{
+		Alias:    "text",
+		Strategy: "round_robin",
+		Tiers: [][]routing.Target{
+			{{Provider: "mock-ctxfail-a", UpstreamModel: "model-ctxfail-a"}},
+			{{Provider: "mock-ctxfail-b", UpstreamModel: "model-ctxfail-b"}},
+		},
+	}
+}
+
+func TestRunChatExhaustionReturnsLastAttemptedTarget(t *testing.T) {
+	s := newRunChatTestServer(t, providers.NewMock("mock-ctxfail-a"), providers.NewMock("mock-ctxfail-b"))
+	req := llm.ChatRequest{Messages: []llm.Message{{Role: "user", Content: "hi"}}}
+
+	_, target, err := s.runChat(context.Background(), exhaustedTwoTierPlan(), req)
+	if err == nil {
+		t.Fatal("expected an error when every tier fails")
+	}
+	if target.Provider != "mock-ctxfail-b" {
+		t.Errorf("target.Provider = %q, want mock-ctxfail-b (the last tier attempted, not an empty target)", target.Provider)
+	}
+	code, typ := classifyUpstreamErr(err)
+	if code != http.StatusBadRequest || typ != "invalid_request_error" {
+		t.Errorf("got (%d, %q), want (400, invalid_request_error)", code, typ)
+	}
+}
+
+func TestRunStreamExhaustionReturnsLastAttemptedTarget(t *testing.T) {
+	s := newRunChatTestServer(t, providers.NewMock("mock-ctxfail-a"), providers.NewMock("mock-ctxfail-b"))
+	req := llm.ChatRequest{Messages: []llm.Message{{Role: "user", Content: "hi"}}}
+	sink := &fakeStreamSink{onChunk: func(llm.StreamChunk) {}}
+
+	target, _, started, err := s.runStream(context.Background(), exhaustedTwoTierPlan(), req, sink)
+	if err == nil {
+		t.Fatal("expected an error when every tier fails")
+	}
+	if started {
+		t.Error("a fully-exhausted plan must never report started=true")
+	}
+	if target.Provider != "mock-ctxfail-b" {
+		t.Errorf("target.Provider = %q, want mock-ctxfail-b (the last tier attempted, not an empty target)", target.Provider)
+	}
 }
 
 func TestClassifyUpstreamErrContextLengthExceeded(t *testing.T) {

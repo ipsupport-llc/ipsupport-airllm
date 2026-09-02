@@ -85,11 +85,16 @@ type llamaCppErrorBody struct {
 // classifyErrorBody does best-effort parsing of a non-2xx response body
 // against the two known vendor error shapes, returning a recognized
 // providers error code or "" if neither shape matches or matched to
-// something we don't specifically track. A body that fails to unmarshal
-// (malformed JSON, a field of the wrong type such as a null "code") is
-// treated exactly like a non-matching body — this is deliberately not
-// hardened against every possible shape; the two codes this function
-// recognizes always arrive as non-null strings in practice.
+// something we don't specifically track. A body that doesn't match either
+// shape — including one where a field arrives as the wrong JSON type,
+// e.g. llama.cpp's numeric `code` failing to unmarshal into
+// openAIErrorBody's string field — simply leaves Code empty. A JSON
+// `code: null` is a different case: Go's encoding/json decodes a JSON
+// null into a zero-value string without erroring, so that attempt
+// "succeeds" with an empty Code, which then simply misses the switch
+// below and falls through to the next shape. Both paths converge on the
+// same safe outcome (Code stays empty), just via different mechanisms —
+// worth knowing precisely, not just that it's "safe."
 func classifyErrorBody(body []byte) string {
 	var oa openAIErrorBody
 	if err := json.Unmarshal(body, &oa); err == nil {

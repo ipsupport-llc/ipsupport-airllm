@@ -182,6 +182,7 @@ func TestHTTPErrorUnrecognizedBodyLeavesCodeEmpty(t *testing.T) {
 		[]byte(`{"error":"model 'x' not found, try pulling it first"}`), // Ollama's plain-string shape, not object
 		[]byte(`not even json`),
 		[]byte(``),
+		[]byte(`{"error":{"type":"invalid_request_error","code":null}}`), // OpenAI sends real null codes for many error kinds
 	}
 	for _, body := range cases {
 		err := httpError("x", 400, body)
