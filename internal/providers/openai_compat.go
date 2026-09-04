@@ -1,7 +1,6 @@
 package providers
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -10,7 +9,6 @@ import (
 	"log/slog"
 	"mime/multipart"
 	"net/http"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,11 +18,6 @@ import (
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/openai"
 )
-
-// debugUpstreamSSE logs every upstream request body and raw SSE line when
-// DEBUG_UPSTREAM_SSE=1. Diagnostic only — never enable where prompts must
-// stay out of logs.
-var debugUpstreamSSE = os.Getenv("DEBUG_UPSTREAM_SSE") == "1"
 
 // OpenAICompat is a real upstream that speaks the OpenAI chat-completions API:
 // OpenAI, OpenRouter, xAI (Grok), and Ollama. They differ only by base URL and
@@ -52,75 +45,6 @@ func (p *OpenAICompat) Name() string     { return p.name }
 func (p *OpenAICompat) Kind() string     { return p.kind }
 func (p *OpenAICompat) Protocol() string { return "openai" }
 
-func (p *OpenAICompat) newRequest(ctx context.Context, body []byte) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if p.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+p.apiKey)
-	}
-	return req, nil
-}
-
-// openAIErrorBody is the error shape OpenAI itself, and every OpenAI-compatible
-// cloud vendor this codebase talks to (Groq, xAI, OpenRouter), uses.
-type openAIErrorBody struct {
-	Error struct {
-		Type string `json:"type"`
-		Code string `json:"code"`
-	} `json:"error"`
-}
-
-// llamaCppErrorBody is the error shape llama.cpp's server (and Ollama, which
-// wraps it) uses — distinct from the OpenAI shape: the reason lives in
-// error.type, not error.code, and there is no error.code field at all.
-type llamaCppErrorBody struct {
-	Error struct {
-		Type string `json:"type"`
-	} `json:"error"`
-}
-
-// classifyErrorBody does best-effort parsing of a non-2xx response body
-// against the two known vendor error shapes, returning a recognized
-// providers error code or "" if neither shape matches or matched to
-// something we don't specifically track. A body that doesn't match either
-// shape — including one where a field arrives as the wrong JSON type,
-// e.g. llama.cpp's numeric `code` failing to unmarshal into
-// openAIErrorBody's string field — simply leaves Code empty. A JSON
-// `code: null` is a different case: Go's encoding/json decodes a JSON
-// null into a zero-value string without erroring, so that attempt
-// "succeeds" with an empty Code, which then simply misses the switch
-// below and falls through to the next shape. Both paths converge on the
-// same safe outcome (Code stays empty), just via different mechanisms —
-// worth knowing precisely, not just that it's "safe."
-func classifyErrorBody(body []byte) string {
-	var oa openAIErrorBody
-	if err := json.Unmarshal(body, &oa); err == nil {
-		switch oa.Error.Code {
-		case ErrCodeContextLengthExceeded, ErrCodeModelNotFound:
-			return oa.Error.Code
-		}
-	}
-	var lc llamaCppErrorBody
-	if err := json.Unmarshal(body, &lc); err == nil {
-		if lc.Error.Type == "exceed_context_size_error" {
-			return ErrCodeContextLengthExceeded
-		}
-	}
-	return ""
-}
-
-func httpError(name string, status int, body []byte) error {
-	return &Error{
-		Status:    status,
-		Retryable: status == http.StatusTooManyRequests || status >= 500,
-		Code:      classifyErrorBody(body),
-		Message:   fmt.Sprintf("upstream %s returned %d: %s", name, status, strings.TrimSpace(string(body))),
-	}
-}
-
 // audioHTTPError wraps httpError with a hint for 404, the most common
 // signature of a real, non-mock provider that doesn't actually implement
 // the OpenAI audio API — every OpenAICompat instance structurally passes
@@ -146,19 +70,11 @@ func (p *OpenAICompat) Chat(ctx context.Context, in llm.ChatRequest) (llm.ChatRe
 	if err != nil {
 		return llm.ChatResponse{}, err
 	}
-	req, err := p.newRequest(ctx, body)
+	resp, err := sendChatCompletions(ctx, p.hc, p.name, p.baseURL, p.apiKey, body, false)
 	if err != nil {
 		return llm.ChatResponse{}, err
 	}
-	resp, err := p.hc.Do(req)
-	if err != nil {
-		return llm.ChatResponse{}, &Error{Status: http.StatusBadGateway, Retryable: true, Message: err.Error()}
-	}
 	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return llm.ChatResponse{}, httpError(p.name, resp.StatusCode, b)
-	}
 	return openai.DecodeChatResponse(resp.Body)
 }
 
@@ -171,99 +87,13 @@ func (p *OpenAICompat) ChatStream(ctx context.Context, in llm.ChatRequest, yield
 	if debugUpstreamSSE {
 		slog.Info("upstream request", "provider", p.name, "body", string(body))
 	}
-	req, err := p.newRequest(ctx, body)
+	resp, err := sendChatCompletions(ctx, p.hc, p.name, p.baseURL, p.apiKey, body, true)
 	if err != nil {
 		return err
-	}
-	req.Header.Set("Accept", "text/event-stream")
-
-	resp, err := p.hc.Do(req)
-	if err != nil {
-		return &Error{Status: http.StatusBadGateway, Retryable: true, Message: err.Error()}
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return httpError(p.name, resp.StatusCode, b)
-	}
 
-	sc := bufio.NewScanner(resp.Body)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	var sawFinish, sawToolCalls bool
-	for sc.Scan() {
-		line := sc.Text()
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		data := strings.TrimSpace(line[len("data:"):])
-		if data == "" {
-			continue
-		}
-		if debugUpstreamSSE {
-			slog.Info("upstream sse", "provider", p.name, "data", data)
-		}
-		if data == "[DONE]" {
-			break
-		}
-		chunk, err := openai.ParseStreamChunk([]byte(data))
-		if err != nil {
-			// skip a malformed chunk rather than abort the stream, but
-			// leave a trace: silent drops have hidden real defects.
-			slog.Warn("dropping malformed upstream chunk", "provider", p.name, "err", err)
-			continue
-		}
-		if chunk.FinishReason != "" {
-			sawFinish = true
-		}
-		if len(chunk.ToolCalls) > 0 {
-			sawToolCalls = true
-		}
-		if chunk.Usage == nil {
-			if err := yield(chunk); err != nil {
-				return err
-			}
-			continue
-		}
-		// Usage is present. Two upstream quirks land here, both from Groq:
-		// (1) finish_reason and usage arrive bundled in the SAME message
-		// instead of separate chunks like OpenAI/xAI send, and (2)
-		// finish_reason is never populated at all. The IR documents usage
-		// as its own terminal chunk (every egress relies on that shape),
-		// so split it out here — and synthesize the missing finish_reason
-		// while we're at it, in the correct position (before usage).
-		usage := chunk.Usage
-		chunk.Usage = nil
-		if !sawFinish {
-			chunk.FinishReason = synthesizedFinishReason(sawToolCalls)
-			sawFinish = true
-		}
-		if chunk.Role != "" || chunk.Content != "" || len(chunk.ToolCalls) > 0 || chunk.FinishReason != "" {
-			if err := yield(chunk); err != nil {
-				return err
-			}
-		}
-		if err := yield(llm.StreamChunk{Usage: usage}); err != nil {
-			return err
-		}
-	}
-	if err := sc.Err(); err != nil {
-		return err
-	}
-	if !sawFinish {
-		if err := yield(llm.StreamChunk{FinishReason: synthesizedFinishReason(sawToolCalls)}); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// synthesizedFinishReason picks the finish reason to fabricate for an
-// upstream that never sent one.
-func synthesizedFinishReason(sawToolCalls bool) string {
-	if sawToolCalls {
-		return "tool_calls"
-	}
-	return "stop"
+	return decodeSSEStream(resp.Body, streamDecodeOptions{provider: p.name}, yield)
 }
 
 // ListModels fetches GET {base}/models and returns the sorted, de-duplicated

@@ -1,6 +1,12 @@
 package providers
 
-import "errors"
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+)
 
 // Known error codes that make a failure fallback-worthy even though it is
 // not retryable against the same target — see IsFallbackWorthy.
@@ -50,4 +56,107 @@ func IsFallbackWorthy(err error) bool {
 		}
 	}
 	return false
+}
+
+// openAIErrorBody is the error shape OpenAI itself, and every OpenAI-compatible
+// cloud vendor this codebase talks to (Groq, xAI, OpenRouter), uses.
+type openAIErrorBody struct {
+	Error struct {
+		Type string `json:"type"`
+		Code string `json:"code"`
+	} `json:"error"`
+}
+
+// llamaCppErrorBody is the error shape llama.cpp's server (and Ollama, which
+// wraps it) uses — distinct from the OpenAI shape: the reason lives in
+// error.type, not error.code, and there is no error.code field at all.
+type llamaCppErrorBody struct {
+	Error struct {
+		Type string `json:"type"`
+	} `json:"error"`
+}
+
+// googleErrorBody is the error shape every Google API uses, Vertex AI's
+// OpenAI-compatible surface included. It shares the `error` wrapper with the
+// OpenAI shape and nothing inside it: the code is numeric where OpenAI's is a
+// string, and the reason it carries is a status enum.
+type googleErrorBody struct {
+	Error struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Status  string `json:"status"`
+	} `json:"error"`
+}
+
+// googleContextLimitHints are the phrases Google uses when an INVALID_ARGUMENT
+// really means "the prompt is longer than the model's window". There is no
+// distinct status for it — the message is the only signal there is — so this
+// list is a best effort that fails safe: a phrasing it misses leaves the
+// error unclassified, exactly as it was before.
+var googleContextLimitHints = []string{
+	"token count",
+	"maximum number of tokens",
+	"token limit",
+	"context length",
+	"input is too long",
+}
+
+// classifyErrorBody does best-effort parsing of a non-2xx response body
+// against the known vendor error shapes, returning a recognized providers
+// error code or "" if none matches or matches something we don't
+// specifically track. A body that doesn't match any shape — including one
+// where a field arrives as the wrong JSON type, e.g. llama.cpp's and
+// Google's numeric `code` failing to unmarshal into openAIErrorBody's
+// string field — simply leaves Code empty. A JSON `code: null` is a
+// different case: Go's encoding/json decodes a JSON null into a
+// zero-value string without erroring, so that attempt "succeeds" with an
+// empty Code, which then simply misses the switch below and falls through
+// to the next shape. Both paths converge on the same safe outcome (Code
+// stays empty), just via different mechanisms — worth knowing precisely,
+// not just that it's "safe."
+//
+// The shapes are tried in the order they were added, and each later one only
+// ever sees a body the earlier ones declined: that is what keeps a new vendor
+// from changing how an old vendor's envelope is classified.
+func classifyErrorBody(body []byte) string {
+	var oa openAIErrorBody
+	if err := json.Unmarshal(body, &oa); err == nil {
+		switch oa.Error.Code {
+		case ErrCodeContextLengthExceeded, ErrCodeModelNotFound:
+			return oa.Error.Code
+		}
+	}
+	var lc llamaCppErrorBody
+	if err := json.Unmarshal(body, &lc); err == nil {
+		if lc.Error.Type == "exceed_context_size_error" {
+			return ErrCodeContextLengthExceeded
+		}
+	}
+	var g googleErrorBody
+	if err := json.Unmarshal(body, &g); err == nil {
+		switch g.Error.Status {
+		case "NOT_FOUND":
+			// An unknown publisher model. Fallback-worthy: another tier may
+			// well have the model this one doesn't.
+			return ErrCodeModelNotFound
+		case "INVALID_ARGUMENT":
+			msg := strings.ToLower(g.Error.Message)
+			for _, hint := range googleContextLimitHints {
+				if strings.Contains(msg, hint) {
+					return ErrCodeContextLengthExceeded
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// httpError builds a provider Error from a non-2xx upstream response.
+func httpError(name string, status int, body []byte) error {
+	return &Error{
+		Status:    status,
+		Retryable: status == http.StatusTooManyRequests || status >= 500,
+		Code:      classifyErrorBody(body),
+		Message:   fmt.Sprintf("upstream %s returned %d: %s", name, status, strings.TrimSpace(string(body))),
+	}
 }

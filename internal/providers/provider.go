@@ -1,5 +1,6 @@
 // Package providers defines the upstream provider interface, a concurrency-
-// aware registry, and the provider implementations (mock + OpenAI-compatible).
+// aware registry, and the provider implementations (mock, OpenAI-compatible,
+// and Vertex AI).
 package providers
 
 import (
@@ -14,7 +15,7 @@ import (
 type Provider interface {
 	// Name is the unique provider name (matches providers.name in the DB).
 	Name() string
-	// Kind is the provider family: openai | openrouter | xai | groq | ollama | anthropic | mock.
+	// Kind is the provider family: openai | openrouter | xai | groq | ollama | anthropic | vertex | mock.
 	Kind() string
 	// Protocol is the native wire protocol: openai | anthropic.
 	Protocol() string

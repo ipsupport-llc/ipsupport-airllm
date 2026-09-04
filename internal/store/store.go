@@ -4,6 +4,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -49,14 +50,17 @@ type ProviderRow struct {
 	Name           string
 	Kind           string
 	BaseURL        string
-	CredEnc        []byte // AES-GCM sealed API key (nil if none)
+	CredEnc        []byte // AES-GCM sealed credential (nil if none)
 	MaxConcurrency int
+	// Config is the kind-specific structured configuration, '{}' for kinds
+	// that need none. Vertex stores its cloud project and location here.
+	Config json.RawMessage
 }
 
 // ListProvidersForRegistry returns all enabled providers for the registry.
 func (s *Store) ListProvidersForRegistry(ctx context.Context) ([]ProviderRow, error) {
 	rows, err := s.PG.Query(ctx,
-		`SELECT name, kind, base_url, cred_enc, max_concurrency FROM providers WHERE enabled = true ORDER BY name`)
+		`SELECT name, kind, base_url, cred_enc, max_concurrency, config FROM providers WHERE enabled = true ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +68,7 @@ func (s *Store) ListProvidersForRegistry(ctx context.Context) ([]ProviderRow, er
 	var out []ProviderRow
 	for rows.Next() {
 		var p ProviderRow
-		if err := rows.Scan(&p.Name, &p.Kind, &p.BaseURL, &p.CredEnc, &p.MaxConcurrency); err != nil {
+		if err := rows.Scan(&p.Name, &p.Kind, &p.BaseURL, &p.CredEnc, &p.MaxConcurrency, &p.Config); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
