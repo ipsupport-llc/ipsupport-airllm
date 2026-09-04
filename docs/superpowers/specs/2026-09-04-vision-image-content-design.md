@@ -69,18 +69,94 @@ type Message struct {
 existing non-vision traffic) and populated only when an ingress decoder
 finds an image part/block.
 
-**OpenAI ingress** (`internal/openai/codec.go`, `DecodeChatRequest`):
-the wire struct's `Content` field changes from `string` to
-`json.RawMessage` (mirroring the pattern `internal/anthropic/codec.go`
-already uses for exactly this reason). A new `convertContent` step tries,
-in order: (1) unmarshal as a plain string — the overwhelmingly common
-case, zero added parsing cost; (2) unmarshal as
-`[]struct{Type string; Text string; ImageURL *struct{URL, Detail string}}`
-— walk the parts, append `Text` values to the message's `Content` (joined,
-matching Anthropic's existing `strings.Join(texts, "")` convention for
-consistency across both ingress paths), append one `llm.Image{URL,
-Detail}` per `image_url` part to `Images`. An unparseable body (neither
-shape) is the existing invalid-request-body error path, unchanged.
+**Correction from an earlier draft of this section, found by reading the
+actual code before writing the plan (not assumed):** unlike Anthropic's
+ingress, which already has its own `messageWire`/`convertMessage`
+translation layer, the OpenAI side has **no separate wire type for
+messages at all** — `internal/openai/codec.go`'s `chatRequestWire.Messages
+[]llm.Message` (ingress decode) and `internal/openai/client.go`'s
+`upstreamChatRequest.Messages []llm.Message` (egress encode to the real
+upstream) and `upstreamResponse.Choices[].Message llm.Message` (decoding
+the upstream's own response) all reference `llm.Message` directly and rely
+on `encoding/json`'s generic reflection-based (un)marshaling. Introducing
+a fourth OpenAI-specific wire type here (duplicating Anthropic's pattern)
+would work, but this package already has an established, narrower
+precedent for exactly this shape of problem: `FunctionCall.UnmarshalJSON`
+(`internal/llm/types.go`) tolerantly decodes a field that can arrive in
+more than one JSON shape, directly on the IR type itself. `Message`
+follows the same precedent instead of introducing wire-type duplication:
+
+```go
+// messageAlias has Message's exact field layout without its custom
+// UnmarshalJSON, so the plain-string-content case (the overwhelming
+// majority of traffic) decodes via ordinary struct reflection with zero
+// added cost, and existing behavior is provably unchanged for it.
+type messageAlias Message
+
+// UnmarshalJSON tries the plain-string shape first (the common case,
+// via messageAlias — a JSON array value for "content" fails this
+// attempt with a type error, which is the intended discriminator);
+// on failure, decodes Content as a multi-part array instead, joining
+// text parts into Content and collecting image_url parts into Images.
+func (m *Message) UnmarshalJSON(b []byte) error {
+	// exact code in the plan
+}
+```
+
+**Deliberately NOT adding a matching `MarshalJSON`** — a real risk was
+caught while designing this (not left implicit): `internal/httpapi/capture_enqueue.go`'s
+`captureBody` also marshals `[]llm.Message` generically
+(`json.Marshal(payload)` where `payload.Messages = msgs`). If `Message`
+had its own `MarshalJSON` that reads `m.Images` to build the wire array
+(the encode-side mirror of the method above), that method would ALSO fire
+for `captureBody`'s call — and since it reads `Images` directly via Go
+code rather than through struct-tag reflection, the field's `json:"-"`
+tag would provide **no protection at all** there: the raw image data
+(potentially a full base64-embedded `data:` URI) would leak straight into
+the capture pipeline, exactly the outcome the Persistence section below
+rules out. `UnmarshalJSON` alone carries no such risk (it only reads
+bytes in, never a Go field out), so only it goes on the shared IR type.
+
+The encode-to-upstream direction — the one place that actually needs to
+emit the array shape — gets its own conversion, scoped to
+`internal/openai/client.go`'s `EncodeChatRequest` only, where the
+`upstreamChatRequest.Messages []llm.Message` field is changed to a new
+package-private wire type built explicitly from the IR:
+
+```go
+type openaiOutMessage struct {
+	Role       string     `json:"role"`
+	Content    any        `json:"content,omitempty"` // string, or []any of text/image_url parts
+	Name       string     `json:"name,omitempty"`
+	ToolCalls  []llm.ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+}
+
+func toOpenAIOutMessage(m llm.Message) openaiOutMessage {
+	// len(m.Images) == 0: Content = m.Content (string), byte-identical to
+	// today's marshaled shape for every non-vision message.
+	// len(m.Images) > 0: Content = []any{ text part (if Content != ""),
+	// one image_url part per Image }, using the same wire shapes described
+	// above.
+	// (exact code in the plan)
+}
+```
+
+`EncodeChatRequest` maps `req.Messages` through `toOpenAIOutMessage`
+before assigning to `upstreamChatRequest.Messages`. This is the ONLY
+place raw image data is ever read from `Images` to build output — a
+single, narrow, auditable call site, not a method any future generic
+`json.Marshal` on `llm.Message` could accidentally invoke.
+
+`upstreamResponse.Choices[].Message llm.Message` (decoding the real
+upstream's response) and `choiceWire.Message llm.Message` in
+`MarshalChatResponse` (encoding the gateway's own response to the client)
+are both unaffected: neither ever carries `Images` (models don't return
+images in chat-completion responses in either protocol), so they
+continue to marshal/unmarshal exactly as today — `UnmarshalJSON`'s
+string-first branch always succeeds for a response, and with no custom
+`MarshalJSON` on `Message`, the response encode path never even
+considers the array shape.
 
 **Anthropic ingress** (`internal/anthropic/codec.go`, `convertMessage`):
 add `case "image":` to the existing block-type switch, alongside `"text"`,
@@ -102,14 +178,14 @@ fix, just moved one field over. This condition MUST become `base.Content
 != "" || len(base.ToolCalls) > 0 || len(base.Images) > 0`. This is a
 required code change, not only a test case.
 
-**Egress to the real upstream** (`internal/openai/codec.go`,
-`EncodeChatRequest`): a message with `len(Images) == 0` encodes `content`
-exactly as today (a plain JSON string) — zero wire-format change for the
-entire existing non-vision traffic, so no real backend that has ever
-worked with this gateway can regress. A message with `len(Images) > 0`
-encodes `content` as an array: one `{"type":"text","text":...}` part
-(only when `Content != ""` — an image-only message omits the text part
-entirely, matching what real OpenAI clients send) followed by one
+**Egress to the real upstream**: via `toOpenAIOutMessage` above. A
+message with `len(Images) == 0` encodes `content` exactly as today (a
+plain JSON string) — zero wire-format change for the entire existing
+non-vision traffic, so no real backend that has ever worked with this
+gateway can regress. A message with `len(Images) > 0` encodes `content`
+as an array: one `{"type":"text","text":...}` part (only when `Content
+!= ""` — an image-only message omits the text part entirely, matching
+what real OpenAI clients send) followed by one
 `{"type":"image_url","image_url":{"url":...,"detail":...}}` per image
 (`detail` omitted when empty, matching OpenAI's own optional field).
 Ordering is always text-then-images regardless of the original client's
@@ -125,13 +201,16 @@ by construction, not by a new check someone could forget to add.
 
 **Persistence** (`internal/httpapi/capture_enqueue.go` and anywhere else
 `llm.Message` might ever be JSON-marshaled generically): `Images` carries
-`json:"-"`. `captureBody`'s `json.Marshal(payload)` — the one place in
-this codebase that marshals `[]llm.Message` directly via reflection —
-will never emit the field, present or future, without anyone needing to
-remember to strip it at each call site. This mirrors the audio feature's
-hard "no raw audio bytes ever persisted" constraint: no raw image bytes or
-URLs are ever captured, logged, or stored, by construction of the type
-itself rather than by a call-site convention.
+`json:"-"`, and — precisely because `Message` gets no `MarshalJSON` of its
+own (see above) — this tag is actually load-bearing: `captureBody`'s
+`json.Marshal(payload)` (`payload.Messages = msgs`) falls through to
+ordinary struct-tag reflection, which honors `json:"-"` and skips the
+field unconditionally. Present or future generic marshal of `[]llm.Message`
+anywhere in this codebase gets the same guarantee, without anyone needing
+to remember to strip it at each call site. This mirrors the audio
+feature's hard "no raw audio bytes ever persisted" constraint: no raw
+image bytes or URLs are ever captured, logged, or stored, by construction
+of the type itself rather than by a call-site convention.
 
 **Vision-capability mismatch** (known, accepted limitation, matching
 Ruling 7 from the audio feature): this gateway cannot locally verify that
@@ -147,16 +226,30 @@ if unpolished, error rather than a crash or silent wrong answer.
 
 ## Testing
 
-- **`internal/openai`**: `DecodeChatRequest` — plain-string content
-  (existing behavior, must be unaffected); array content with one text +
-  one image part (text and image extracted correctly); array content with
-  only an image part (empty `Content`, one `Image`); array content with
-  multiple images (order preserved in `Images`); malformed content
-  (neither string nor valid parts array) still produces the existing
-  invalid-request error. `EncodeChatRequest` — a message with no images
-  encodes `content` as a plain string (byte-identical to today's output);
-  a message with one image encodes the two-part array shape with `detail`
-  omitted when unset; a message with `Detail` set includes it.
+- **`internal/llm`**: `Message.UnmarshalJSON` — plain-string content
+  (existing behavior, must be unaffected, including `content` absent
+  entirely and `content: null`); array content with one text + one image
+  part (text and image extracted correctly); array content with only an
+  image part (empty `Content`, one `Image`); array content with multiple
+  images (order preserved in `Images`); malformed content (neither string
+  nor a valid parts array) still produces a decode error. Also confirm
+  `Message` has no `MarshalJSON` method — a one-line test that
+  `json.Marshal(Message{Content: "hi"})` produces exactly
+  `{"role":"","content":"hi"}` (or whatever the struct-tag-derived shape
+  is) pins this as a deliberate, checked property, not an assumption.
+- **`internal/openai`**: one `DecodeChatRequest` test using the bug
+  report's own literal JSON body end to end (the real regression case),
+  confirming no error and the expected `Content`/`Images` on the decoded
+  message. `toOpenAIOutMessage`/`EncodeChatRequest` (`client.go`) — a
+  message with no images encodes `content` as a plain string
+  (byte-identical to today's output for a no-image message — a useful
+  regression assertion is comparing against the pre-change marshaled
+  bytes); a message with one image encodes the two-part array shape with
+  `detail` omitted when unset; a message with `Detail` set includes it;
+  an image-only message (empty `Content`) omits the text part.
+  `DecodeChatResponse` doesn't need a dedicated new test — it does
+  nothing content-shape-specific of its own, and real upstream responses
+  never carry array content in practice.
 - **`internal/anthropic`**: `convertMessage` — an image block converts to
   the expected `data:` URI in `Images`, alongside existing text-block
   behavior; a message that is ONLY an image block (no text, no tool
