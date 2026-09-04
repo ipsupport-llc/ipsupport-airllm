@@ -4,15 +4,87 @@
 // The IR is OpenAI-shaped because most clients are; Anthropic maps onto it.
 package llm
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // Message is one chat message.
 type Message struct {
 	Role       string     `json:"role"`
 	Content    string     `json:"content,omitempty"`
+	Images     []Image    `json:"-"` // never serialized generically — see Persistence in the design spec
 	Name       string     `json:"name,omitempty"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
+}
+
+// Image is one image attachment on a message, carried in OpenAI's
+// image_url wire shape (a data: URI or a real http(s) URL) regardless of
+// which ingress protocol produced it — the only upstream client this
+// gateway has (OpenAICompat) speaks that shape natively.
+type Image struct {
+	URL    string
+	Detail string // optional OpenAI "detail": "auto"|"low"|"high"; empty = unset
+}
+
+// messageAlias has Message's exact field layout without a custom
+// UnmarshalJSON, so the plain-string-content case (the overwhelming
+// majority of traffic) decodes via ordinary struct reflection with zero
+// added cost.
+type messageAlias Message
+
+// contentPart is one element of an OpenAI multi-part content array.
+type contentPart struct {
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	ImageURL *struct {
+		URL    string `json:"url"`
+		Detail string `json:"detail,omitempty"`
+	} `json:"image_url,omitempty"`
+}
+
+// UnmarshalJSON tries the plain-string content shape first (the common
+// case, via messageAlias — a JSON array value for "content" fails this
+// attempt with a type error, which is the intended discriminator); on
+// failure, decodes Content as a multi-part array instead, joining text
+// parts into Content and collecting image_url parts into Images.
+func (m *Message) UnmarshalJSON(b []byte) error {
+	var direct messageAlias
+	if err := json.Unmarshal(b, &direct); err == nil {
+		*m = Message(direct)
+		return nil
+	}
+
+	var w struct {
+		Role       string          `json:"role"`
+		Content    json.RawMessage `json:"content"`
+		Name       string          `json:"name"`
+		ToolCalls  []ToolCall      `json:"tool_calls"`
+		ToolCallID string          `json:"tool_call_id"`
+	}
+	if err := json.Unmarshal(b, &w); err != nil {
+		return err
+	}
+	m.Role, m.Name, m.ToolCalls, m.ToolCallID = w.Role, w.Name, w.ToolCalls, w.ToolCallID
+
+	var parts []contentPart
+	if err := json.Unmarshal(w.Content, &parts); err != nil {
+		return err
+	}
+	var texts []string
+	for _, p := range parts {
+		switch p.Type {
+		case "text":
+			texts = append(texts, p.Text)
+		case "image_url":
+			if p.ImageURL != nil {
+				m.Images = append(m.Images, Image{URL: p.ImageURL.URL, Detail: p.ImageURL.Detail})
+			}
+		}
+	}
+	m.Content = strings.Join(texts, "")
+	return nil
 }
 
 // ToolCall is a model-requested function call.
