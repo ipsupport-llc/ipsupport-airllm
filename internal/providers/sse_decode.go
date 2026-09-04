@@ -2,8 +2,11 @@ package providers
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"strings"
 
@@ -15,6 +18,43 @@ import (
 // DEBUG_UPSTREAM_SSE=1. Diagnostic only — never enable where prompts must
 // stay out of logs.
 var debugUpstreamSSE = os.Getenv("DEBUG_UPSTREAM_SSE") == "1"
+
+// sendChatCompletions posts an encoded body to an OpenAI-shaped
+// /chat/completions endpoint and hands back a 2xx response for the caller to
+// decode; the caller closes its body.
+//
+// It is the shared request half of what decodeSSEStream is the shared
+// response half of. Both things a caller must not get wrong live here: a
+// transport failure is retryable (the next attempt may well connect), and a
+// non-2xx goes through httpError so the vendor's error envelope is
+// classified in one place rather than per provider.
+//
+// bearer is omitted when empty, which is how a local upstream with no
+// authentication is addressed.
+func sendChatCompletions(ctx context.Context, hc *http.Client, name, baseURL, bearer string, body []byte, stream bool) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	if stream {
+		req.Header.Set("Accept", "text/event-stream")
+	}
+
+	resp, err := hc.Do(req)
+	if err != nil {
+		return nil, &Error{Status: http.StatusBadGateway, Retryable: true, Message: err.Error()}
+	}
+	if resp.StatusCode/100 != 2 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		resp.Body.Close()
+		return nil, httpError(name, resp.StatusCode, b)
+	}
+	return resp, nil
+}
 
 // streamDecodeOptions tunes decodeSSEStream for one upstream's quirks.
 type streamDecodeOptions struct {

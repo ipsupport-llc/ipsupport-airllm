@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/pricing"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 )
 
@@ -248,24 +250,27 @@ func (s *Server) handleAdminPutRole(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAdminProviders(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.st.PG.Query(r.Context(),
-		`SELECT name, kind, base_url, enabled, max_concurrency, (cred_enc IS NOT NULL) FROM providers ORDER BY name`)
+		`SELECT name, kind, base_url, enabled, max_concurrency, (cred_enc IS NOT NULL), config FROM providers ORDER BY name`)
 	if err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to list providers")
 		return
 	}
 	defer rows.Close()
+	// The credential itself is never returned, only whether one is stored:
+	// reading the configuration must not disclose it.
 	type provider struct {
-		Name           string `json:"name"`
-		Kind           string `json:"kind"`
-		BaseURL        string `json:"base_url"`
-		Enabled        bool   `json:"enabled"`
-		MaxConcurrency int    `json:"max_concurrency"`
-		HasCredential  bool   `json:"has_credential"`
+		Name           string          `json:"name"`
+		Kind           string          `json:"kind"`
+		BaseURL        string          `json:"base_url"`
+		Enabled        bool            `json:"enabled"`
+		MaxConcurrency int             `json:"max_concurrency"`
+		HasCredential  bool            `json:"has_credential"`
+		Config         json.RawMessage `json:"config"`
 	}
 	out := []provider{}
 	for rows.Next() {
 		var p provider
-		if err := rows.Scan(&p.Name, &p.Kind, &p.BaseURL, &p.Enabled, &p.MaxConcurrency, &p.HasCredential); err != nil {
+		if err := rows.Scan(&p.Name, &p.Kind, &p.BaseURL, &p.Enabled, &p.MaxConcurrency, &p.HasCredential, &p.Config); err != nil {
 			writeControlError(w, http.StatusInternalServerError, "failed to read providers")
 			return
 		}
@@ -278,11 +283,13 @@ func (s *Server) handleAdminPutProvider(w http.ResponseWriter, r *http.Request) 
 	sess, _ := sessionFrom(r.Context())
 	name := r.PathValue("name")
 	var body struct {
-		Kind           string `json:"kind"`
-		BaseURL        string `json:"base_url"`
-		Enabled        bool   `json:"enabled"`
-		MaxConcurrency int    `json:"max_concurrency"`
-		APIKey         string `json:"api_key"` // blank = keep existing
+		Kind           string          `json:"kind"`
+		BaseURL        string          `json:"base_url"`
+		Enabled        bool            `json:"enabled"`
+		MaxConcurrency int             `json:"max_concurrency"`
+		Config         json.RawMessage `json:"config"`          // kind-specific structured configuration
+		APIKey         string          `json:"api_key"`         // blank = keep existing
+		CredentialJSON string          `json:"credential_json"` // a service-account key; blank = keep existing
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeControlError(w, http.StatusBadRequest, "invalid body")
@@ -295,37 +302,54 @@ func (s *Server) handleAdminPutProvider(w http.ResponseWriter, r *http.Request) 
 	if body.MaxConcurrency < 0 {
 		body.MaxConcurrency = 0
 	}
+	// Both fields seal into the same column, so a request setting both leaves
+	// it ambiguous which identity was meant. Say so rather than pick one.
+	if body.APIKey != "" && body.CredentialJSON != "" {
+		writeControlError(w, http.StatusBadRequest, "set api_key or credential_json, not both")
+		return
+	}
 
-	if body.APIKey != "" {
-		sealed, err := s.sealer.Seal([]byte(body.APIKey))
+	// A save that omits the configuration keeps the one already stored, so
+	// reading it is what "keep" means. A provider that does not exist yet has
+	// none, which the COALESCE renders as the empty string.
+	var stored string
+	if err := s.st.PG.QueryRow(r.Context(),
+		`SELECT COALESCE((SELECT config::text FROM providers WHERE name = $1), '')`, name,
+	).Scan(&stored); err != nil {
+		writeControlError(w, http.StatusInternalServerError, "failed to read provider")
+		return
+	}
+	config, err := providerConfigToStore(body.Kind, body.Config, stored, body.BaseURL)
+	if err != nil {
+		writeControlError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// nil leaves whatever credential is already stored in place (see the
+	// COALESCE below); a non-nil value replaces it.
+	var sealed []byte
+	cred := body.APIKey
+	if body.CredentialJSON != "" {
+		cred = body.CredentialJSON
+	}
+	if cred != "" {
+		sealed, err = s.sealer.Seal([]byte(cred))
 		if err != nil {
 			writeControlError(w, http.StatusInternalServerError, "failed to seal credential")
 			return
 		}
-		_, err = s.st.PG.Exec(r.Context(), `
-			INSERT INTO providers (name, kind, base_url, enabled, max_concurrency, cred_enc)
-			VALUES ($1, $2, $3, $4, $5, $6)
-			ON CONFLICT (name) DO UPDATE SET
-				kind = EXCLUDED.kind, base_url = EXCLUDED.base_url, enabled = EXCLUDED.enabled,
-				max_concurrency = EXCLUDED.max_concurrency, cred_enc = EXCLUDED.cred_enc, updated_at = now()`,
-			name, body.Kind, body.BaseURL, body.Enabled, body.MaxConcurrency, sealed)
-		if err != nil {
-			writeControlError(w, http.StatusInternalServerError, "failed to save provider")
-			return
-		}
-	} else {
-		// No key supplied: leave any existing credential untouched.
-		_, err := s.st.PG.Exec(r.Context(), `
-			INSERT INTO providers (name, kind, base_url, enabled, max_concurrency)
-			VALUES ($1, $2, $3, $4, $5)
-			ON CONFLICT (name) DO UPDATE SET
-				kind = EXCLUDED.kind, base_url = EXCLUDED.base_url, enabled = EXCLUDED.enabled,
-				max_concurrency = EXCLUDED.max_concurrency, updated_at = now()`,
-			name, body.Kind, body.BaseURL, body.Enabled, body.MaxConcurrency)
-		if err != nil {
-			writeControlError(w, http.StatusInternalServerError, "failed to save provider")
-			return
-		}
+	}
+	if _, err := s.st.PG.Exec(r.Context(), `
+		INSERT INTO providers (name, kind, base_url, enabled, max_concurrency, config, cred_enc)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (name) DO UPDATE SET
+			kind = EXCLUDED.kind, base_url = EXCLUDED.base_url, enabled = EXCLUDED.enabled,
+			max_concurrency = EXCLUDED.max_concurrency, config = EXCLUDED.config,
+			cred_enc = COALESCE(EXCLUDED.cred_enc, providers.cred_enc), updated_at = now()`,
+		name, body.Kind, body.BaseURL, body.Enabled, body.MaxConcurrency, config, sealed,
+	); err != nil {
+		writeControlError(w, http.StatusInternalServerError, "failed to save provider")
+		return
 	}
 
 	// Apply immediately (rebuild the registry with new creds/limits/clients).
@@ -333,12 +357,41 @@ func (s *Server) handleAdminPutProvider(w http.ResponseWriter, r *http.Request) 
 		slog.Error("provider reload failed", "err", err)
 	}
 
-	// Audit without the secret.
+	// Audit without the secret. The configuration is not one — it holds a
+	// cloud project and location, both of which the operator just typed.
 	s.audit(r.Context(), sess.principal.Subject, "provider.put", name, map[string]any{
 		"kind": body.Kind, "base_url": body.BaseURL, "enabled": body.Enabled,
-		"max_concurrency": body.MaxConcurrency, "has_key": body.APIKey != "",
+		"max_concurrency": body.MaxConcurrency, "config": json.RawMessage(config),
+		"has_key": sealed != nil,
 	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
+}
+
+// providerConfigToStore decides which structured configuration a save should
+// persist, and rejects one that could never serve a request.
+//
+// A supplied configuration replaces what was stored; an omitted one keeps it.
+// That is deliberately unlike base_url or enabled, which this endpoint
+// replaces wholesale, and deliberately like the credential: a client that
+// does not know a kind has configuration at all — today's console, or a
+// script toggling "enabled" — would otherwise erase the cloud project a
+// Vertex provider is addressed by, as a side effect of an unrelated edit.
+//
+// Rejecting an incomplete configuration here is the other half: the
+// alternative is an operator learning about the mistake from a failed request
+// hours later, with nothing in the form to suggest what was wrong.
+func providerConfigToStore(kind string, supplied json.RawMessage, stored, baseURL string) (string, error) {
+	config := strings.TrimSpace(string(supplied))
+	if config == "" || config == "null" {
+		config = strings.TrimSpace(stored)
+	}
+	if config == "" {
+		config = "{}"
+	}
+	if err := providers.ValidateProviderConfig(kind, []byte(config), baseURL); err != nil {
+		return "", err
+	}
+	return config, nil
 }
 
 type aliasTarget struct {
