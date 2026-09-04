@@ -118,3 +118,57 @@ func TestTextThenToolClosesTextBlock(t *testing.T) {
 		t.Errorf("event order:\n got %s\nwant %s", joined, want)
 	}
 }
+
+// A well-behaved producer splits the finish reason onto a chunk of its own, and
+// providers.yieldSplittingFinish normalises the upstreams that do not. This
+// pins what happens if something ever hands the writer a bundled chunk anyway:
+// the finish reason must survive and the block must still close. It shipped
+// broken once — a Gemini-backed stream whose text block never closed and whose
+// message_delta carried "stop_reason":"" — so the invariant is asserted here
+// rather than left to the producer alone.
+func TestBundledFinishReasonSurvivesADeltaChunk(t *testing.T) {
+	events := collect(t, []llm.StreamChunk{
+		{Role: "assistant"},
+		{Content: "Hi!", FinishReason: "stop"},
+		{Usage: &llm.Usage{CompletionTokens: 2}},
+	})
+
+	var names []string
+	for _, e := range events {
+		names = append(names, e.Name)
+	}
+	joined := strings.Join(names, ",")
+	want := "message_start,content_block_start,content_block_delta,content_block_stop,message_delta,message_stop"
+	if joined != want {
+		t.Errorf("event order:\n got %s\nwant %s", joined, want)
+	}
+
+	for _, e := range events {
+		if e.Name != "message_delta" {
+			continue
+		}
+		delta, _ := e.Data["delta"].(map[string]any)
+		if got := delta["stop_reason"]; got != "end_turn" {
+			t.Errorf("stop_reason = %v, want end_turn — the bundled finish reason was dropped", got)
+		}
+	}
+}
+
+// The block must be closed even when no finish reason ever arrives, because
+// Anthropic's format cannot close one after message_delta.
+func TestBlockClosesOnAStreamThatNeverFinishes(t *testing.T) {
+	events := collect(t, []llm.StreamChunk{
+		{Content: "Hi!"},
+		{Usage: &llm.Usage{CompletionTokens: 2}},
+	})
+
+	var names []string
+	for _, e := range events {
+		names = append(names, e.Name)
+	}
+	joined := strings.Join(names, ",")
+	want := "message_start,content_block_start,content_block_delta,content_block_stop,message_delta,message_stop"
+	if joined != want {
+		t.Errorf("event order:\n got %s\nwant %s", joined, want)
+	}
+}

@@ -54,6 +54,17 @@ func (s *StreamWriter) Chunk(c llm.StreamChunk) error {
 		s.started = true
 	}
 
+	// Read the finish reason before dispatching, not inside a case. The cases
+	// below are mutually exclusive, so a chunk carrying both a delta and a
+	// finish reason would take the delta branch and lose the reason silently —
+	// which shipped once, as a Gemini-backed stream whose message_delta had an
+	// empty stop_reason. The producer normalises the two apart
+	// (providers.yieldSplittingFinish); this makes losing it impossible rather
+	// than merely unlikely.
+	if c.FinishReason != "" {
+		s.stop = StopReason(c.FinishReason)
+	}
+
 	switch {
 	case len(c.ToolCalls) > 0:
 		for _, tc := range c.ToolCalls {
@@ -95,10 +106,17 @@ func (s *StreamWriter) Chunk(c llm.StreamChunk) error {
 		})
 
 	case c.FinishReason != "":
-		s.stop = StopReason(c.FinishReason)
 		return s.closeBlock()
 
 	case c.Usage != nil:
+		// Anthropic's wire format has no way to close a block after
+		// message_delta, so the last chance to close one is here. Normally the
+		// finish chunk already did it and this is a no-op; it is not a no-op
+		// for a stream that ends without one, and an SDK reading a message
+		// whose block never closed is entitled to reject it.
+		if err := s.closeBlock(); err != nil {
+			return err
+		}
 		if err := s.event("message_delta", map[string]any{
 			"type":  "message_delta",
 			"delta": map[string]any{"stop_reason": s.stop, "stop_sequence": nil},

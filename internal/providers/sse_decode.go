@@ -80,10 +80,12 @@ type streamDecodeOptions struct {
 //
 // Whatever the upstream does, the sequence it emits obeys the llm.StreamChunk
 // contract: deltas, then exactly one finish-reason chunk — synthesized if the
-// upstream never sent one — and usage always on a chunk of its own, never
-// riding along with a delta. How many usage chunks come out is the upstream's
-// business and coalesceUsage's: one per report when it is off, one in total
-// when it is on, none either way if the upstream reported no usage.
+// upstream never sent one — and then usage. Neither the finish reason nor usage
+// ever rides along with a delta, however the upstream bundled them, because the
+// egresses read a chunk by the first field they find on it. How many usage
+// chunks come out is the upstream's business and coalesceUsage's: one per report
+// when it is off, one in total when it is on, none either way if the upstream
+// reported no usage.
 //
 // If yield returns an error the stream stops and that error is returned.
 func decodeSSEStream(body io.Reader, opts streamDecodeOptions, yield func(llm.StreamChunk) error) error {
@@ -120,14 +122,15 @@ func decodeSSEStream(body io.Reader, opts streamDecodeOptions, yield func(llm.St
 			sawToolCalls = true
 		}
 		if chunk.Usage == nil {
-			if err := yieldDelta(chunk, yield); err != nil {
+			if err := yieldSplittingFinish(chunk, yield); err != nil {
 				return err
 			}
 			continue
 		}
-		// Usage is present. Either way it is split off the chunk it rode in
-		// on, because the IR documents usage as its own chunk and every egress
-		// relies on that shape.
+		// Usage is present. Either way it is split off the chunk it rode in on,
+		// for the same reason the finish reason is: the IR documents both as
+		// chunks of their own, and an egress reads a chunk by the first field it
+		// finds on it — so a signal bundled onto a delta is a signal dropped.
 		usage := chunk.Usage
 		chunk.Usage = nil
 		switch {
@@ -147,7 +150,7 @@ func decodeSSEStream(body io.Reader, opts streamDecodeOptions, yield func(llm.St
 			sawFinish = true
 		}
 		if hasPayload(chunk) {
-			if err := yieldDelta(chunk, yield); err != nil {
+			if err := yieldSplittingFinish(chunk, yield); err != nil {
 				return err
 			}
 		}
@@ -180,20 +183,15 @@ func decodeSSEStream(body io.Reader, opts streamDecodeOptions, yield func(llm.St
 	return nil
 }
 
-// yieldDelta emits one non-usage chunk, splitting the finish reason off a
-// chunk that also carries a delta so it arrives on a chunk of its own.
+// yieldSplittingFinish emits one non-usage chunk, moving the finish reason onto
+// a chunk of its own when the chunk it arrived on also carries a delta. It is
+// the same split usage gets in the loop above, for the reason stated there.
 //
-// This is the same treatment usage already gets, and for the same reason: the
-// IR documents the finish reason as its own chunk and the egresses rely on it.
-// The Anthropic writer dispatches on the first field it finds, so a bundled
-// chunk loses its finish reason outright — the text block is never closed and
-// stop_reason ships empty, which is a malformed Messages stream.
-//
-// Vendors differ. OpenAI and xAI send the finish reason alone, on a chunk with
-// an empty delta, so nothing here fires for them. Vertex AI bundles it onto
-// the last content chunk (observed live), and Groq needs it synthesized onto
-// a chunk that may already carry a delta.
-func yieldDelta(c llm.StreamChunk, yield func(llm.StreamChunk) error) error {
+// Vendors differ about where the finish reason goes. OpenAI and xAI send it
+// alone, on a chunk with an empty delta, so nothing here fires for them. Vertex
+// AI bundles it onto the last content chunk (observed live), and Groq needs it
+// synthesized onto a chunk that may already carry a delta.
+func yieldSplittingFinish(c llm.StreamChunk, yield func(llm.StreamChunk) error) error {
 	if c.FinishReason == "" || !hasDelta(c) {
 		return yield(c)
 	}
