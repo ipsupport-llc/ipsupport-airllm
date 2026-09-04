@@ -94,13 +94,21 @@ func vertexThenMockPlan() *routing.Plan {
 	}
 }
 
-// cumulativeUsageStream is Vertex's streaming shape: usage repeated on every
-// chunk, growing as it goes, rather than once at the end.
+// cumulativeUsageStream is Vertex's streaming shape, as observed live against
+// the real service: usage repeated on every chunk and growing as it goes
+// rather than reported once at the end, and the finish reason bundled onto the
+// last content chunk rather than sent alone on a delta-free one.
+//
+// Both quirks matter and neither is cosmetic. An earlier version of this
+// fixture put the finish reason on its own chunk the way OpenAI does, and that
+// spelling hid a real defect: the Anthropic egress dispatches on the first
+// field it finds, so a bundled chunk left the text block unclosed and shipped
+// an empty stop_reason. Keep it bundled.
 var cumulativeUsageStream = []string{
 	`{"choices":[{"delta":{"role":"assistant"}}],"usage":{"prompt_tokens":9,"completion_tokens":0,"total_tokens":9}}`,
 	`{"choices":[{"delta":{"content":"Hel"}}],"usage":{"prompt_tokens":9,"completion_tokens":1,"total_tokens":10}}`,
-	`{"choices":[{"delta":{"content":"lo"}}],"usage":{"prompt_tokens":9,"completion_tokens":2,"total_tokens":11}}`,
-	`{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":4,"total_tokens":13}}`,
+	`{"choices":[{"delta":{"content":"l"}}],"usage":{"prompt_tokens":9,"completion_tokens":2,"total_tokens":11}}`,
+	`{"choices":[{"delta":{"content":"o"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":4,"total_tokens":13}}`,
 	"[DONE]",
 }
 
@@ -205,6 +213,16 @@ func TestVertexStreamEndsTheAnthropicMessageOnce(t *testing.T) {
 	}
 	if n := strings.Count(out, "event: message_delta"); n != 1 {
 		t.Errorf("message_delta appeared %d times, want exactly 1", n)
+	}
+	// Ending once is not the same as ending well. Vertex bundles the finish
+	// reason onto its last content chunk, and an egress that lets that reason
+	// go missing still emits one message_stop — while leaving the text block
+	// open and stop_reason empty, which an SDK reads as a malformed message.
+	if n := strings.Count(out, "event: content_block_stop"); n != 1 {
+		t.Errorf("content_block_stop appeared %d times, want exactly 1 (the text block must be closed):\n%s", n, out)
+	}
+	if !strings.Contains(out, `"stop_reason":"end_turn"`) {
+		t.Errorf("message_delta carries no mapped stop_reason; Vertex's bundled finish reason was dropped:\n%s", out)
 	}
 	if got := sink.assembled(); got != "Hello" {
 		t.Errorf("assembled content = %q, want the whole answer", got)
