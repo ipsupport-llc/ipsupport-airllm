@@ -91,8 +91,8 @@ than failing.
 | `GET` | `/api/admin/usage/breakdown` | Usage across all keys grouped by provider and by model over the last `hours` (default 24, max 168). Returns `{"providers":[...],"models":[...]}` |
 | `GET`/`PUT` | `/api/admin/roles` · `/api/admin/roles/{role}` | Role policies (allowed models, passthrough, limits) |
 | `GET`/`PUT`/`DELETE` | `/api/admin/aliases` · `/api/admin/aliases/{alias}` | Model alias catalog (targets, strategy, fallback tiers) |
-| `GET`/`PUT` | `/api/admin/providers` · `/api/admin/providers/{name}` | Providers (kind, base URL, sealed credential, max concurrency, enabled) |
-| `GET` | `/api/admin/providers/{name}/models` | Live upstream model ids for one provider (5-min cache; `unsupported: true` when the kind cannot list) |
+| `GET`/`PUT` | `/api/admin/providers` · `/api/admin/providers/{name}` | Providers (kind, base URL, structured `config`, sealed credential, max concurrency, enabled). See [Provider fields](#provider-fields) below and [Provider kinds](configuration.md#provider-kinds). |
+| `GET` | `/api/admin/providers/{name}/models` | Upstream model ids for one provider, for the alias editor's dropdown (5-min cache; `unsupported: true` when the kind cannot list). Live from the vendor's catalogue for the OpenAI-compatible kinds; for `vertex` a short **curated** list, since its compatibility surface publishes none — a model missing from it can still be typed by hand. |
 | `GET`/`PUT` | `/api/admin/pricing` · `/api/admin/pricing/{model}` | Per-provider/model pricing (USD per 1M of the row's unit — `tokens`, `audio_second`, or `text_char`); provider `""` = any |
 | `POST` | `/api/admin/pricing/import/{provider}` | Import a provider's whole catalog pricing (e.g. OpenRouter, which publishes it) into the pricing table. `{"imported": N}`, or `{"imported": 0, "unsupported": true}` when the provider's kind doesn't publish pricing |
 | `GET`/`PUT` | `/api/admin/dlp` | DLP policy (incl. Sensitive Info Detection patterns + custom patterns) |
@@ -103,6 +103,24 @@ than failing.
 | `GET` | `/api/admin/webhooks` · `POST` · `DELETE /{id}` | Alert webhook endpoints (HMAC-signed delivery) |
 | `POST` | `/api/admin/dataset/export` | Export reviewed captures as a labeled JSONL training artifact |
 | `GET` | `/api/admin/audit` | Admin audit log |
+
+### Provider fields
+
+`PUT /api/admin/providers/{name}` takes `kind`, `base_url`, `enabled`,
+`max_concurrency`, and three fields worth spelling out:
+
+| Field | Meaning |
+|-------|---------|
+| `config` | Kind-specific structured configuration, stored as JSON. Today only `vertex` uses it, for `{"project": "...", "location": "..."}`. **A save that omits it keeps what is stored** — unlike `base_url` or `enabled`, which are replaced wholesale — so a client that knows nothing about a kind's configuration cannot erase it as a side effect of an unrelated edit. A configuration that could never serve a request is rejected on save. |
+| `api_key` | Static key for the OpenAI-compatible kinds. Blank keeps the stored credential. |
+| `credential_json` | A Google service-account JSON key for `vertex`. Blank keeps the stored credential — and, when nothing is stored, means the gateway authenticates as its own federated identity. |
+
+`api_key` and `credential_json` seal into the same column, so a request setting
+both is rejected rather than resolved by picking one.
+
+`GET /api/admin/providers` returns `config` verbatim (it holds a cloud project
+and location, not secrets) and reports the credential only as
+`has_credential` — reading the configuration never discloses it.
 
 ## Control-plane — audit (`airllm_auditor`)
 
