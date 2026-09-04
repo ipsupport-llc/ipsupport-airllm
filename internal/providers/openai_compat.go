@@ -1,7 +1,6 @@
 package providers
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -10,7 +9,6 @@ import (
 	"log/slog"
 	"mime/multipart"
 	"net/http"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,11 +18,6 @@ import (
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/openai"
 )
-
-// debugUpstreamSSE logs every upstream request body and raw SSE line when
-// DEBUG_UPSTREAM_SSE=1. Diagnostic only — never enable where prompts must
-// stay out of logs.
-var debugUpstreamSSE = os.Getenv("DEBUG_UPSTREAM_SSE") == "1"
 
 // OpenAICompat is a real upstream that speaks the OpenAI chat-completions API:
 // OpenAI, OpenRouter, xAI (Grok), and Ollama. They differ only by base URL and
@@ -187,83 +180,7 @@ func (p *OpenAICompat) ChatStream(ctx context.Context, in llm.ChatRequest, yield
 		return httpError(p.name, resp.StatusCode, b)
 	}
 
-	sc := bufio.NewScanner(resp.Body)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	var sawFinish, sawToolCalls bool
-	for sc.Scan() {
-		line := sc.Text()
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		data := strings.TrimSpace(line[len("data:"):])
-		if data == "" {
-			continue
-		}
-		if debugUpstreamSSE {
-			slog.Info("upstream sse", "provider", p.name, "data", data)
-		}
-		if data == "[DONE]" {
-			break
-		}
-		chunk, err := openai.ParseStreamChunk([]byte(data))
-		if err != nil {
-			// skip a malformed chunk rather than abort the stream, but
-			// leave a trace: silent drops have hidden real defects.
-			slog.Warn("dropping malformed upstream chunk", "provider", p.name, "err", err)
-			continue
-		}
-		if chunk.FinishReason != "" {
-			sawFinish = true
-		}
-		if len(chunk.ToolCalls) > 0 {
-			sawToolCalls = true
-		}
-		if chunk.Usage == nil {
-			if err := yield(chunk); err != nil {
-				return err
-			}
-			continue
-		}
-		// Usage is present. Two upstream quirks land here, both from Groq:
-		// (1) finish_reason and usage arrive bundled in the SAME message
-		// instead of separate chunks like OpenAI/xAI send, and (2)
-		// finish_reason is never populated at all. The IR documents usage
-		// as its own terminal chunk (every egress relies on that shape),
-		// so split it out here — and synthesize the missing finish_reason
-		// while we're at it, in the correct position (before usage).
-		usage := chunk.Usage
-		chunk.Usage = nil
-		if !sawFinish {
-			chunk.FinishReason = synthesizedFinishReason(sawToolCalls)
-			sawFinish = true
-		}
-		if chunk.Role != "" || chunk.Content != "" || len(chunk.ToolCalls) > 0 || chunk.FinishReason != "" {
-			if err := yield(chunk); err != nil {
-				return err
-			}
-		}
-		if err := yield(llm.StreamChunk{Usage: usage}); err != nil {
-			return err
-		}
-	}
-	if err := sc.Err(); err != nil {
-		return err
-	}
-	if !sawFinish {
-		if err := yield(llm.StreamChunk{FinishReason: synthesizedFinishReason(sawToolCalls)}); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// synthesizedFinishReason picks the finish reason to fabricate for an
-// upstream that never sent one.
-func synthesizedFinishReason(sawToolCalls bool) string {
-	if sawToolCalls {
-		return "tool_calls"
-	}
-	return "stop"
+	return decodeSSEStream(resp.Body, streamDecodeOptions{provider: p.name}, yield)
 }
 
 // ListModels fetches GET {base}/models and returns the sorted, de-duplicated
