@@ -31,7 +31,7 @@ one listener.
 | `apikey` | Key generation, hashing, prefix/last-4 |
 | `policy` | Per-role allowed-model gate |
 | `routing` | Alias catalog → ordered targets (strategy + fallback tiers) |
-| `providers` | Provider registry; OpenAI-compatible HTTP/SSE client; concurrency semaphores |
+| `providers` | Provider registry; OpenAI-compatible HTTP/SSE client; the Vertex AI client and its OAuth2 token source; concurrency semaphores |
 | `openai` / `anthropic` | Protocol codecs (parse, marshal, SSE) |
 | `llm` | Protocol-neutral intermediate representation |
 | `limits` | Redis rolling-window counters (check-before / increment-after) |
@@ -72,8 +72,9 @@ one listener.
 ## Storage
 
 - **Postgres** is the source of truth: identity, keys, role policies, providers
-  (with sealed credentials), pricing, the usage ledger, DLP incidents, the
-  capture index, and the `settings` table that backs runtime config.
+  (with sealed credentials and a per-kind `config` object — a cloud project and
+  location for `vertex`), pricing, the usage ledger, DLP incidents, the capture
+  index, and the `settings` table that backs runtime config.
 - **Redis** holds only the rolling-window usage counters (time-bucketed).
 - **Blob store** holds capture bodies, always sealed with AES-256-GCM. A
   filesystem implementation backs local dev; an object store backs deploys.

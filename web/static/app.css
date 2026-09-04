@@ -285,6 +285,9 @@ tr.err-row td { color: var(--err); }
 
 /* ---------- Forms / buttons ---------- */
 label.field { display: block; margin-bottom: 0.9rem; }
+/* A field whose kind does not apply — the display above would otherwise
+   beat the user-agent rule for [hidden]. */
+label.field[hidden] { display: none; }
 label.field .lab {
   display: block;
   color: var(--muted);

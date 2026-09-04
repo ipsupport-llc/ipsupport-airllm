@@ -843,7 +843,7 @@ async function adminProviders(c) {
     panelTable("Providers", ["Name", "Kind", "Base URL", "Key", "Concurrency", "Enabled", ""],
       ps.map((p) => `<tr><td class="mono">${esc(p.name)}</td><td>${esc(p.kind)}</td>
         <td class="mono">${esc(p.base_url) || "—"}</td>
-        <td>${p.has_credential ? `<span class="badge active">set</span>` : `<span class="badge neutral">none</span>`}</td>
+        <td>${credentialBadge(p)}</td>
         <td>${p.max_concurrency > 0 ? p.max_concurrency : "∞"}</td>
         <td>${p.enabled ? "yes" : "no"}</td>
         <td style="text-align:right"><button class="btn ghost sm" data-edit='${esc(JSON.stringify(p))}'>Edit</button></td></tr>`));
@@ -852,17 +852,52 @@ async function adminProviders(c) {
     b.addEventListener("click", () => editProvider(c, JSON.parse(b.getAttribute("data-edit")))));
 }
 
+// isVertex reports whether a provider record or a form's values describe the
+// one kind that is addressed by structured configuration and authenticated by
+// a refreshing token rather than a static key.
+function isVertex(p) { return p.kind === "vertex"; }
+
+// credentialBadge says what a provider authenticates with. A vertex provider
+// with nothing stored is not missing its key — it authenticates as the pod's
+// own identity, which is the recommended configuration and must not read as
+// broken in the list.
+function credentialBadge(p) {
+  if (p.has_credential) return `<span class="badge active">set</span>`;
+  if (isVertex(p)) return `<span class="badge active">federated</span>`;
+  return `<span class="badge neutral">none</span>`;
+}
+
 function editProvider(c, p) {
+  const cfg = p.config || {};
   modalForm(p.name ? `Edit provider ${p.name}` : "New provider", [
     { name: "name", label: "Name", value: p.name || "", disabled: !!p.name },
-    { name: "kind", label: "Kind", type: "select", options: ["mock", "openai", "openrouter", "xai", "groq", "ollama", "anthropic"], value: p.kind || "mock" },
+    { name: "kind", label: "Kind", type: "select", options: ["mock", "openai", "openrouter", "xai", "groq", "ollama", "anthropic", "vertex"], value: p.kind || "mock" },
     { name: "base_url", label: "Base URL (optional override)", value: p.base_url || "" },
-    { name: "api_key", label: p.has_credential ? "API key (set — blank keeps current)" : "API key", type: "password", value: "", placeholder: p.has_credential ? "•••••• stored" : "" },
+    // Vertex is addressed by project and location rather than by a URL, and
+    // holds an OAuth2 credential rather than a key — so its fields appear
+    // only for that kind, and the API-key field steps aside rather than
+    // being repurposed for a credential it cannot carry.
+    { name: "project", label: "Cloud project", value: cfg.project || "", showWhen: isVertex },
+    { name: "location", label: "Location (blank = global)", value: cfg.location || "", showWhen: isVertex },
+    { name: "api_key", label: p.has_credential ? "API key (set — blank keeps current)" : "API key", type: "password", value: "", placeholder: p.has_credential ? "•••••• stored" : "", showWhen: (v) => !isVertex(v) },
+    { name: "credential_json", type: "textarea", value: "", showWhen: isVertex,
+      label: p.has_credential
+        ? "Service-account JSON (stored — blank keeps it)"
+        : "Service-account JSON — leave blank to authenticate as the pod's own identity" },
     { name: "max_concurrency", label: "Max concurrency (0 = unlimited)", value: p.max_concurrency ?? 0 },
     { name: "enabled", label: "Enabled", type: "checkbox", value: p.enabled !== false },
   ], async (v) => {
-    const x = await api("PUT", `/api/admin/providers/${encodeURIComponent(v.name)}`,
-      { kind: v.kind, base_url: v.base_url, enabled: v.enabled, api_key: v.api_key, max_concurrency: Number(v.max_concurrency) || 0 });
+    const body = { kind: v.kind, base_url: v.base_url, enabled: v.enabled, max_concurrency: Number(v.max_concurrency) || 0 };
+    if (isVertex(v)) {
+      // Only the kind that has structured configuration sends it: the admin
+      // API keeps the stored configuration when a save omits it, so an empty
+      // object from another kind would erase a project as a side effect.
+      body.config = { project: v.project.trim(), location: v.location.trim() };
+      body.credential_json = v.credential_json.trim();
+    } else {
+      body.api_key = v.api_key;
+    }
+    const x = await api("PUT", `/api/admin/providers/${encodeURIComponent(v.name)}`, body);
     if (x.ok) { toast("Provider saved"); adminProviders(c); return true; }
     toast((x.data && x.data.error) || "Failed", "err"); return false;
   });
@@ -1303,21 +1338,28 @@ function panelTable(title, cols, rowsHtml) {
   </div>`;
 }
 
+// modalForm renders a small form in a modal. A field may carry
+// `showWhen(values)`, in which case it is shown only while that predicate
+// holds — enough for a form whose shape depends on one of its own fields,
+// like a provider kind that is addressed and authenticated differently from
+// every other one. Hidden fields stay in the DOM and are still submitted,
+// so the caller decides what a hidden value means.
 function modalForm(title, fields, onSubmit) {
   const bg = document.createElement("div");
   bg.className = "modal-bg";
   bg.innerHTML = `<div class="modal"><h3>${esc(title)}</h3><form id="mf">
     ${fields.map((f) => {
+      const open = `<label class="field" data-field="${f.name}"><span class="lab">${esc(f.label)}</span>`;
       if (f.type === "checkbox") {
-        return `<label class="field"><span class="lab">${esc(f.label)}</span>
+        return `${open}
           <input type="checkbox" name="${f.name}" ${f.value ? "checked" : ""} style="width:auto" /></label>`;
       }
       if (f.type === "textarea") {
-        return `<label class="field"><span class="lab">${esc(f.label)}</span>
+        return `${open}
           <textarea name="${f.name}">${esc(f.value)}</textarea></label>`;
       }
       if (f.type === "select") {
-        return `<label class="field"><span class="lab">${esc(f.label)}</span>
+        return `${open}
           <select name="${f.name}" ${f.disabled ? "disabled" : ""}>${(f.options || []).map((o) => {
             const val = typeof o === "object" ? o.value : o;
             const label = typeof o === "object" ? o.label : o;
@@ -1325,11 +1367,11 @@ function modalForm(title, fields, onSubmit) {
           }).join("")}</select></label>`;
       }
       if (f.type === "password") {
-        return `<label class="field"><span class="lab">${esc(f.label)}</span>
+        return `${open}
           <input type="password" name="${f.name}" value="${esc(f.value)}" autocomplete="new-password"
             placeholder="${esc(f.placeholder || "")}" /></label>`;
       }
-      return `<label class="field"><span class="lab">${esc(f.label)}</span>
+      return `${open}
         <input name="${f.name}" value="${esc(f.value)}" ${f.disabled ? "disabled" : ""} /></label>`;
     }).join("")}
     <div class="row" style="justify-content:flex-end;margin-top:.5rem">
@@ -1337,17 +1379,34 @@ function modalForm(title, fields, onSubmit) {
       <button type="submit" class="btn">Save</button>
     </div></form></div>`;
   document.body.appendChild(bg);
+  const form = $("#mf", bg);
   const close = () => bg.remove();
   $("#mf-cancel", bg).addEventListener("click", close);
   bg.addEventListener("click", (e) => { if (e.target === bg) close(); });
-  $("#mf", bg).addEventListener("submit", async (e) => {
-    e.preventDefault();
+
+  const values = () => {
     const v = {};
     fields.forEach((f) => {
-      const el = e.target[f.name];
+      const el = form[f.name];
       v[f.name] = f.type === "checkbox" ? el.checked : el.value;
     });
-    const ok = await onSubmit(v);
+    return v;
+  };
+  const conditional = fields.filter((f) => f.showWhen);
+  if (conditional.length) {
+    const applyVisibility = () => {
+      const v = values();
+      conditional.forEach((f) => {
+        $(`[data-field="${f.name}"]`, bg).hidden = !f.showWhen(v);
+      });
+    };
+    applyVisibility();
+    form.addEventListener("change", applyVisibility);
+  }
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const ok = await onSubmit(values());
     if (ok !== false) close();
   });
 }
