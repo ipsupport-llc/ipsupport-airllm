@@ -120,7 +120,7 @@ func decodeSSEStream(body io.Reader, opts streamDecodeOptions, yield func(llm.St
 			sawToolCalls = true
 		}
 		if chunk.Usage == nil {
-			if err := yield(chunk); err != nil {
+			if err := yieldDelta(chunk, yield); err != nil {
 				return err
 			}
 			continue
@@ -147,7 +147,7 @@ func decodeSSEStream(body io.Reader, opts streamDecodeOptions, yield func(llm.St
 			sawFinish = true
 		}
 		if hasPayload(chunk) {
-			if err := yield(chunk); err != nil {
+			if err := yieldDelta(chunk, yield); err != nil {
 				return err
 			}
 		}
@@ -180,11 +180,42 @@ func decodeSSEStream(body io.Reader, opts streamDecodeOptions, yield func(llm.St
 	return nil
 }
 
+// yieldDelta emits one non-usage chunk, splitting the finish reason off a
+// chunk that also carries a delta so it arrives on a chunk of its own.
+//
+// This is the same treatment usage already gets, and for the same reason: the
+// IR documents the finish reason as its own chunk and the egresses rely on it.
+// The Anthropic writer dispatches on the first field it finds, so a bundled
+// chunk loses its finish reason outright — the text block is never closed and
+// stop_reason ships empty, which is a malformed Messages stream.
+//
+// Vendors differ. OpenAI and xAI send the finish reason alone, on a chunk with
+// an empty delta, so nothing here fires for them. Vertex AI bundles it onto
+// the last content chunk (observed live), and Groq needs it synthesized onto
+// a chunk that may already carry a delta.
+func yieldDelta(c llm.StreamChunk, yield func(llm.StreamChunk) error) error {
+	if c.FinishReason == "" || !hasDelta(c) {
+		return yield(c)
+	}
+	finish := c.FinishReason
+	c.FinishReason = ""
+	if err := yield(c); err != nil {
+		return err
+	}
+	return yield(llm.StreamChunk{FinishReason: finish})
+}
+
+// hasDelta reports whether a chunk carries incremental output of its own —
+// something a client renders — as opposed to being a bare signal chunk.
+func hasDelta(c llm.StreamChunk) bool {
+	return c.Role != "" || c.Content != "" || len(c.ToolCalls) > 0
+}
+
 // hasPayload reports whether a chunk still carries something a client needs
 // once usage has been split off it — an all-zero remainder is dropped rather
 // than yielded as an empty chunk.
 func hasPayload(c llm.StreamChunk) bool {
-	return c.Role != "" || c.Content != "" || len(c.ToolCalls) > 0 || c.FinishReason != ""
+	return hasDelta(c) || c.FinishReason != ""
 }
 
 // synthesizedFinishReason picks the finish reason to fabricate for an

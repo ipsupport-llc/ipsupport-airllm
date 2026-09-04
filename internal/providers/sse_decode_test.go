@@ -114,6 +114,30 @@ func TestDecodeSSEStreamNonCoalescingOutput(t *testing.T) {
 			},
 		},
 		{
+			name: "upstream bundles the finish reason onto a content delta; they split apart",
+			payloads: []string{
+				`{"choices":[{"delta":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`,
+				"[DONE]",
+			},
+			want: []llm.StreamChunk{
+				{Role: "assistant", Content: "hi"},
+				{FinishReason: "stop"},
+				{Usage: usage(3, 1, 4)},
+			},
+		},
+		{
+			name: "a finish reason bundled onto a tool-call delta splits too",
+			payloads: []string{
+				`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"file","arguments":"{\"a\":1}"}}]},"finish_reason":"tool_calls"}]}`,
+				"[DONE]",
+			},
+			want: []llm.StreamChunk{
+				{ToolCalls: toolCall},
+				{FinishReason: "tool_calls"},
+			},
+		},
+		{
 			name: "no usage chunk at all still ends with a finish signal",
 			payloads: []string{
 				`{"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}`,
@@ -158,10 +182,14 @@ func TestDecodeSSEStreamCoalescesCumulativeUsage(t *testing.T) {
 	)
 
 	got := decodeAll(t, body, streamDecodeOptions{provider: "vertex", coalesceUsage: true})
+	// Vertex's last chunk carries all three of content, finish_reason and
+	// usage. All three come apart: this is the shape observed live against
+	// the real service, so it is the shape the contract is pinned against.
 	want := []llm.StreamChunk{
 		{Role: "assistant", Content: "he"},
 		{Content: "llo"},
-		{Content: "!", FinishReason: "stop"},
+		{Content: "!"},
+		{FinishReason: "stop"},
 		{Usage: usage(7, 3, 10)},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -198,7 +226,7 @@ func TestDecodeSSEStreamCoalescingEmitsNoUsageWhenUpstreamSendsNone(t *testing.T
 	)
 
 	got := decodeAll(t, body, streamDecodeOptions{provider: "vertex", coalesceUsage: true})
-	want := []llm.StreamChunk{{Content: "hi", FinishReason: "stop"}}
+	want := []llm.StreamChunk{{Content: "hi"}, {FinishReason: "stop"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got: %+v, want: %+v", got, want)
 	}
@@ -213,7 +241,7 @@ func TestDecodeSSEStreamSkipsMalformedChunksAndNonDataLines(t *testing.T) {
 		"data: [DONE]\n\n"
 
 	got := decodeAll(t, body, streamDecodeOptions{provider: "up"})
-	want := []llm.StreamChunk{{Content: "hi", FinishReason: "stop"}}
+	want := []llm.StreamChunk{{Content: "hi"}, {FinishReason: "stop"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got: %+v, want: %+v", got, want)
 	}
