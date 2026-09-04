@@ -30,6 +30,23 @@ config:                                         # non-secret env (rendered into 
     rolesClaim: ""
     roleMap: ""
 
+# Google Cloud Workload Identity Federation. OFF by default — enabling it is the ONLY
+# thing that changes the rendered release, so an upgrade that leaves it off is a no-op.
+#
+# When on, the pod gets a projected OIDC token plus an "external account" credential
+# config (read-only mounts, so app.securityContext.readOnlyRootFilesystem stays on).
+# That is what lets a `vertex` provider be registered with an EMPTY credential: no
+# service-account key stored anywhere. The cloud side — pool, provider and an IAM
+# policy letting THIS namespace impersonate the service account — is a prerequisite
+# the chart cannot check. See docs/operations.md#google-workload-identity-federation.
+googleWorkloadIdentity:
+  enabled: false
+  projectNumber: ""                             # numeric project number owning the pool (NOT the project id) — QUOTE it
+  poolId: ""                                    # workload identity pool id
+  providerId: ""                                # provider id within that pool
+  serviceAccount: ""                            # SA email to impersonate, e.g. airllm@my-project.iam.gserviceaccount.com
+  tokenExpirationSeconds: 3600                  # kubelet refreshes the projected token well before this
+
 app:
   replicaCount: 2                               # used only when app.autoscaling.enabled=false
   service:

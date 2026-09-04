@@ -175,6 +175,43 @@ prints the in-cluster Sidecar URL to paste into **Admin → DLP**:
   A normal `dlp-bert` Service uses kube-proxy load-balancing; a headless one
   (`dlpBert.service.headless=true`) gives the pool one endpoint per pod.
 
+### Google Workload Identity Federation
+
+Off by default (`googleWorkloadIdentity.enabled: false`), and it is the only part
+of the chart this switch touches — an upgrade that leaves it off renders byte-for-byte
+what it rendered before.
+
+Turn it on and the gateway pod holds its own cloud identity, which is what lets a
+[`vertex` provider](configuration.md#vertex-ai-vertex) be registered with an **empty
+credential**: no service-account key in the database, none on disk, nothing to
+rotate. The chart renders an `external_account` credential config into a ConfigMap,
+projects a service-account token with the pool provider as its audience, mounts both
+**read-only** (so `readOnlyRootFilesystem` stays on), and points
+`GOOGLE_APPLICATION_CREDENTIALS` at the config.
+
+```yaml
+googleWorkloadIdentity:
+  enabled: true
+  projectNumber: "123456789012"   # numeric project number owning the pool, not the project id — keep the quotes
+  poolId: my-cluster
+  providerId: my-cluster-oidc
+  serviceAccount: airllm@my-project.iam.gserviceaccount.com
+  tokenExpirationSeconds: 3600
+```
+
+`projectNumber` is a **string**: unquoted, YAML makes it a float and the audience
+renders in scientific notation, which STS rejects only at the first token refresh.
+The schema rejects an unquoted one outright. All four identifiers are required when
+enabled, and templating fails on a missing one rather than shipping a pod that cannot
+mint a token.
+
+The cloud side is a prerequisite the chart cannot check: a workload identity pool and
+a provider trusting the cluster's OIDC issuer, and an IAM policy on that service
+account permitting **this release's namespace and service account** to impersonate it.
+Give it the model-API role only — the gateway has no business holding the rest of the
+project. When any of that is wrong the pod still starts and every other provider keeps
+serving; the Vertex provider alone is disabled, loudly, in the log.
+
 ### Observability wiring
 
 - `metrics.serviceMonitor.enabled=true` renders a `ServiceMonitor` scraping the
