@@ -46,6 +46,12 @@ type contentBlockWire struct {
 	// tool_result
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   json.RawMessage `json:"content,omitempty"`
+	// image (source.type == "base64" only — see design spec's Out of scope)
+	Source *struct {
+		Type      string `json:"type"`
+		MediaType string `json:"media_type"`
+		Data      string `json:"data"`
+	} `json:"source,omitempty"`
 }
 
 // DecodeMessagesRequest parses an Anthropic Messages request into the IR.
@@ -116,6 +122,12 @@ func convertMessage(mw messageWire) []llm.Message {
 		switch blk.Type {
 		case "text":
 			texts = append(texts, blk.Text)
+		case "image":
+			if blk.Source != nil && blk.Source.Type == "base64" {
+				base.Images = append(base.Images, llm.Image{
+					URL: "data:" + blk.Source.MediaType + ";base64," + blk.Source.Data,
+				})
+			}
 		case "tool_use":
 			args := string(blk.Input)
 			if args == "" {
@@ -137,7 +149,7 @@ func convertMessage(mw messageWire) []llm.Message {
 	base.Content = strings.Join(texts, "")
 
 	var out []llm.Message
-	if base.Content != "" || len(base.ToolCalls) > 0 {
+	if base.Content != "" || len(base.ToolCalls) > 0 || len(base.Images) > 0 {
 		out = append(out, base)
 	}
 	return append(out, toolResults...)

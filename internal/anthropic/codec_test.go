@@ -118,6 +118,58 @@ func TestStopReason(t *testing.T) {
 	}
 }
 
+func TestDecodeImageBlockContent(t *testing.T) {
+	body := `{
+		"model": "claude-x",
+		"max_tokens": 100,
+		"messages": [{
+			"role": "user",
+			"content": [
+				{"type": "text", "text": "what is this?"},
+				{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+			]
+		}]
+	}`
+	req, err := DecodeMessagesRequest(strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Messages) != 1 {
+		t.Fatalf("want 1 message, got %d", len(req.Messages))
+	}
+	m := req.Messages[0]
+	if m.Content != "what is this?" {
+		t.Errorf("Content = %q", m.Content)
+	}
+	if len(m.Images) != 1 || m.Images[0].URL != "data:image/png;base64,AAAA" {
+		t.Errorf("Images = %+v", m.Images)
+	}
+}
+
+func TestDecodeImageOnlyMessageNotDropped(t *testing.T) {
+	body := `{
+		"model": "claude-x",
+		"max_tokens": 100,
+		"messages": [{
+			"role": "user",
+			"content": [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "BBBB"}}]
+		}]
+	}`
+	req, err := DecodeMessagesRequest(strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Messages) != 1 {
+		t.Fatalf("an image-only message must not be silently dropped — got %d messages", len(req.Messages))
+	}
+	if req.Messages[0].Content != "" {
+		t.Errorf("Content = %q, want empty", req.Messages[0].Content)
+	}
+	if len(req.Messages[0].Images) != 1 || req.Messages[0].Images[0].URL != "data:image/jpeg;base64,BBBB" {
+		t.Errorf("Images = %+v", req.Messages[0].Images)
+	}
+}
+
 type bufFlusher struct{ b strings.Builder }
 
 func (f *bufFlusher) Write(p []byte) (int, error) { return f.b.Write(p) }
