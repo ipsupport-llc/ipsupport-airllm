@@ -170,6 +170,51 @@ func TestDecodeImageOnlyMessageNotDropped(t *testing.T) {
 	}
 }
 
+func TestDecodeURLSourceImageBlock(t *testing.T) {
+	body := `{
+		"model": "claude-x",
+		"max_tokens": 100,
+		"messages": [{
+			"role": "user",
+			"content": [{"type": "image", "source": {"type": "url", "url": "https://example.com/a.png"}}]
+		}]
+	}`
+	req, err := DecodeMessagesRequest(strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Messages) != 1 {
+		t.Fatalf("url-source image-only message must not be dropped — got %d messages", len(req.Messages))
+	}
+	if len(req.Messages[0].Images) != 1 || req.Messages[0].Images[0].URL != "https://example.com/a.png" {
+		t.Errorf("Images = %+v", req.Messages[0].Images)
+	}
+}
+
+func TestDecodeUnsupportedImageSourceDoesNotPanic(t *testing.T) {
+	body := `{
+		"model": "claude-x",
+		"max_tokens": 100,
+		"messages": [{
+			"role": "user",
+			"content": [
+				{"type": "text", "text": "hi"},
+				{"type": "image", "source": {"type": "something-future"}}
+			]
+		}]
+	}`
+	req, err := DecodeMessagesRequest(strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Messages) != 1 || req.Messages[0].Content != "hi" {
+		t.Fatalf("expected the text part to still decode normally, got %+v", req.Messages)
+	}
+	if len(req.Messages[0].Images) != 0 {
+		t.Errorf("an unsupported source type must not produce a bogus Image, got %+v", req.Messages[0].Images)
+	}
+}
+
 type bufFlusher struct{ b strings.Builder }
 
 func (f *bufFlusher) Write(p []byte) (int, error) { return f.b.Write(p) }

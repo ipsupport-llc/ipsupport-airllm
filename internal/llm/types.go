@@ -6,6 +6,7 @@ package llm
 
 import (
 	"encoding/json"
+	"log/slog"
 	"strings"
 )
 
@@ -66,7 +67,12 @@ func (m *Message) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, &w); err != nil {
 		return err
 	}
-	m.Role, m.Name, m.ToolCalls, m.ToolCallID = w.Role, w.Name, w.ToolCalls, w.ToolCallID
+	// Reset the receiver instead of only assigning fields piecemeal: Images
+	// below is populated via append, and encoding/json can reuse existing
+	// slice elements when decoding into an already-populated []Message, so
+	// a stale receiver could otherwise leak a prior element's images into
+	// this one.
+	*m = Message{Role: w.Role, Name: w.Name, ToolCalls: w.ToolCalls, ToolCallID: w.ToolCallID}
 
 	var parts []contentPart
 	if err := json.Unmarshal(w.Content, &parts); err != nil {
@@ -80,7 +86,11 @@ func (m *Message) UnmarshalJSON(b []byte) error {
 		case "image_url":
 			if p.ImageURL != nil {
 				m.Images = append(m.Images, Image{URL: p.ImageURL.URL, Detail: p.ImageURL.Detail})
+			} else {
+				slog.Warn("openai image_url content part missing image_url object; dropping")
 			}
+		default:
+			slog.Warn("openai content part has unrecognized type; dropping", "type", p.Type)
 		}
 	}
 	m.Content = strings.Join(texts, "")

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"strings"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
@@ -46,11 +47,12 @@ type contentBlockWire struct {
 	// tool_result
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   json.RawMessage `json:"content,omitempty"`
-	// image (source.type == "base64" only — see design spec's Out of scope)
+	// image — base64 (inline) or url (Anthropic's remote-fetch source)
 	Source *struct {
 		Type      string `json:"type"`
-		MediaType string `json:"media_type"`
-		Data      string `json:"data"`
+		MediaType string `json:"media_type,omitempty"`
+		Data      string `json:"data,omitempty"`
+		URL       string `json:"url,omitempty"`
 	} `json:"source,omitempty"`
 }
 
@@ -123,10 +125,21 @@ func convertMessage(mw messageWire) []llm.Message {
 		case "text":
 			texts = append(texts, blk.Text)
 		case "image":
-			if blk.Source != nil && blk.Source.Type == "base64" {
+			switch {
+			case blk.Source == nil:
+				slog.Warn("anthropic image block missing source; dropping", "role", mw.Role)
+			case blk.Source.Type == "base64" && blk.Source.MediaType != "" && blk.Source.Data != "":
 				base.Images = append(base.Images, llm.Image{
 					URL: "data:" + blk.Source.MediaType + ";base64," + blk.Source.Data,
 				})
+			case blk.Source.Type == "base64":
+				slog.Warn("anthropic base64 image block missing media_type or data; dropping", "role", mw.Role)
+			case blk.Source.Type == "url" && blk.Source.URL != "":
+				base.Images = append(base.Images, llm.Image{URL: blk.Source.URL})
+			case blk.Source.Type == "url":
+				slog.Warn("anthropic url image block missing url; dropping", "role", mw.Role)
+			default:
+				slog.Warn("anthropic image block has unsupported source type; dropping", "role", mw.Role, "source_type", blk.Source.Type)
 			}
 		case "tool_use":
 			args := string(blk.Input)

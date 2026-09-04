@@ -109,6 +109,37 @@ func TestMessageUnmarshalMultipleImages(t *testing.T) {
 	}
 }
 
+func TestMessageUnmarshalFallbackResetsReceiver(t *testing.T) {
+	// Simulate encoding/json reusing an existing slice element: decode
+	// twice into the SAME Message value. If the fallback branch didn't
+	// reset the receiver, the second decode's Images would still carry
+	// the first decode's image.
+	var m Message
+	body1 := `{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,FIRST"}}]}`
+	if err := json.Unmarshal([]byte(body1), &m); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Images) != 1 || m.Images[0].URL != "data:image/png;base64,FIRST" {
+		t.Fatalf("first decode: Images = %+v", m.Images)
+	}
+
+	body2 := `{"role":"user","content":"just text now, no images"}`
+	if err := json.Unmarshal([]byte(body2), &m); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Images) != 0 {
+		t.Errorf("second decode (plain string, no images) must not carry over the first decode's Images, got %+v", m.Images)
+	}
+
+	body3 := `{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,SECOND"}}]}`
+	if err := json.Unmarshal([]byte(body3), &m); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Images) != 1 || m.Images[0].URL != "data:image/png;base64,SECOND" {
+		t.Errorf("third decode: Images = %+v, want exactly one image from THIS decode, not accumulated from the first", m.Images)
+	}
+}
+
 func TestMessageUnmarshalMalformedContentErrors(t *testing.T) {
 	var m Message
 	err := json.Unmarshal([]byte(`{"role":"user","content":42}`), &m)
