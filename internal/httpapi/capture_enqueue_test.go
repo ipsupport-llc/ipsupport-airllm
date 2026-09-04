@@ -146,3 +146,20 @@ func TestCaptureBodyNoFindingsNoChange(t *testing.T) {
 		t.Error("body without findings must be stored unmodified even with Redact=true")
 	}
 }
+
+// TestCaptureBodyNeverIncludesImages proves the persistence guarantee:
+// a message carrying Images must never leak the image URL/data into the
+// serialized capture body, regardless of DLP redaction settings.
+func TestCaptureBodyNeverIncludesImages(t *testing.T) {
+	imageMarker := "totally-unique-fake-image-payload-marker-xyz123"
+	msgs := []llm.Message{{
+		Role: "user", Content: "describe this",
+		Images: []llm.Image{{URL: "data:image/png;base64," + imageMarker}},
+	}}
+
+	body := captureBody(msgs, "a description", false, nil)
+
+	if bytes.Contains(body, []byte(imageMarker)) {
+		t.Errorf("captured body must never contain image data, got: %s", body)
+	}
+}

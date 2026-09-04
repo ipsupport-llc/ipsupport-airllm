@@ -437,3 +437,28 @@ func TestDlpEnforceScopeAndBudget(t *testing.T) {
 		}
 	})
 }
+
+// TestDlpEnforceIgnoresImages proves Images is invisible to DLP scanning
+// by construction: a message with a planted secret in Content and a
+// realistic-looking data URI in Images must produce byte-identical
+// dlpEnforce results to the same message with Images unset.
+func TestDlpEnforceIgnoresImages(t *testing.T) {
+	s := newDLPEnforceTestServer(t, "http://unused.invalid")
+	secret := "sk-ant-api03-aaaabbbbccccddddeeee1234"
+
+	withoutImages := llm.ChatRequest{Model: "m", Messages: []llm.Message{{Role: "user", Content: "key: " + secret}}}
+	withImages := llm.ChatRequest{Model: "m", Messages: []llm.Message{{
+		Role: "user", Content: "key: " + secret,
+		Images: []llm.Image{{URL: "data:image/png;base64,verylongfakeimagedatathatlookslikea/realimage=="}},
+	}}}
+
+	blocked1, msg1, res1 := s.dlpEnforce(context.Background(), authedKey{}, "openai", &withoutImages, false)
+	blocked2, msg2, res2 := s.dlpEnforce(context.Background(), authedKey{}, "openai", &withImages, false)
+
+	if blocked1 != blocked2 || msg1 != msg2 {
+		t.Errorf("blocked/message differ: (%v,%q) vs (%v,%q)", blocked1, msg1, blocked2, msg2)
+	}
+	if len(res1.Findings) != len(res2.Findings) {
+		t.Errorf("finding count differs: %d vs %d — Images must not affect scanning", len(res1.Findings), len(res2.Findings))
+	}
+}

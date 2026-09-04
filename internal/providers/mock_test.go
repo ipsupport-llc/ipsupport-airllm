@@ -189,3 +189,33 @@ func TestMockSynthesize(t *testing.T) {
 		t.Error("want a non-empty ContentType")
 	}
 }
+
+func TestMockChatEchoesImageCount(t *testing.T) {
+	m := NewMock("mock")
+	req := llm.ChatRequest{
+		Model: "mock-gpt",
+		Messages: []llm.Message{{
+			Role: "user", Content: "what is this",
+			Images: []llm.Image{{URL: "data:image/png;base64,AAAA"}, {URL: "data:image/png;base64,BBBB"}},
+		}},
+	}
+	resp, err := m.Chat(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := resp.Choices[0].Message.Content
+	if !strings.Contains(content, "2 image(s) attached") {
+		t.Errorf("expected image count echoed, got %q", content)
+	}
+}
+
+func TestMockChatNoImagesUnaffected(t *testing.T) {
+	m := NewMock("mock")
+	resp, err := m.Chat(context.Background(), userReq("hello world"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(resp.Choices[0].Message.Content, "image") {
+		t.Errorf("a request with no images must not mention images: %q", resp.Choices[0].Message.Content)
+	}
+}
