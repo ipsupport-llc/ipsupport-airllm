@@ -1,0 +1,19 @@
+-- Tokens a model spends thinking are output tokens the vendor bills at the
+-- output rate, and until now they landed nowhere: Vertex AI's OpenAI-compatible
+-- surface leaves them out of completion_tokens and reports them only inside
+-- total_tokens, so the ledger recorded neither the tokens nor their cost. On
+-- measured Gemini traffic they outnumbered the visible output almost five to
+-- one.
+--
+-- They are now folded into completion_tokens, which is what the vendor bills,
+-- and this column records how much of that was thinking — a breakdown of
+-- completion_tokens, NOT an addition to it. Summing the two double-counts.
+-- Carried separately because "how much am I paying to think" is a question a
+-- single output count cannot answer.
+--
+-- Additive with a default, so it cannot disturb the rows already stored. Rows
+-- written before this ship read 0, which is indistinguishable from a genuine
+-- no-reasoning request: past Vertex rows under-report their completion tokens
+-- and their cost, and no backfill can recover the difference because the total
+-- was never stored either.
+ALTER TABLE usage_ledger ADD COLUMN reasoning_tokens bigint NOT NULL DEFAULT 0;

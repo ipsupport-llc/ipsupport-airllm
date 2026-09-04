@@ -2,6 +2,7 @@ package providers
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -265,5 +266,54 @@ func TestDecodeSSEStreamStopsOnYieldError(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("yield called %d times, want 1 — decoding must stop at the first error", n)
+	}
+}
+
+// TestDecodeSSEStreamKeepsReasoningTokens pins the payload whose parts do not
+// sum to its total. The difference is thinking the vendor billed and reported
+// nowhere else, so it must survive the decode — under both coalescing modes,
+// because the fix belongs to the shared loop and not to one provider.
+func TestDecodeSSEStreamKeepsReasoningTokens(t *testing.T) {
+	// Vertex's live shape: cumulative usage on every chunk, the last of which
+	// reports 10 + 30 against a total of 186.
+	body := sseBody(
+		`{"choices":[{"delta":{"role":"assistant","content":"o"}}],"usage":{"prompt_tokens":10,"completion_tokens":0,"total_tokens":98}}`,
+		`{"choices":[{"delta":{"content":"k"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":30,"total_tokens":186}}`,
+		"[DONE]",
+	)
+	want := &llm.Usage{PromptTokens: 10, CompletionTokens: 176, TotalTokens: 186, ReasoningTokens: 146}
+
+	for _, coalesce := range []bool{true, false} {
+		t.Run(fmt.Sprintf("coalesceUsage=%v", coalesce), func(t *testing.T) {
+			got := decodeAll(t, body, streamDecodeOptions{provider: "vertex", coalesceUsage: coalesce})
+			last := got[len(got)-1]
+			if last.Usage == nil {
+				t.Fatalf("the stream ended without a usage chunk: %+v", got)
+			}
+			if *last.Usage != *want {
+				t.Errorf("final usage = %+v, want %+v — the 146 tokens between the parts and the total were dropped",
+					*last.Usage, *want)
+			}
+		})
+	}
+}
+
+// The reasoning count OpenAI-shaped upstreams spell out is read too, and is
+// NOT added to a completion count that already contains it.
+func TestDecodeSSEStreamReadsCompletionTokensDetails(t *testing.T) {
+	body := sseBody(
+		`{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}`,
+		`{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":176,"total_tokens":186,"completion_tokens_details":{"reasoning_tokens":146}}}`,
+		"[DONE]",
+	)
+
+	got := decodeAll(t, body, streamDecodeOptions{provider: "openai"})
+	want := []llm.StreamChunk{
+		{Content: "ok"},
+		{FinishReason: "stop"},
+		{Usage: &llm.Usage{PromptTokens: 10, CompletionTokens: 176, TotalTokens: 186, ReasoningTokens: 146}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("stream wrong\n got: %+v\nwant: %+v", got, want)
 	}
 }

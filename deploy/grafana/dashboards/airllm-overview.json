@@ -99,6 +99,7 @@
         },
         "overrides": []
       },
+      "description": "The reasoning series is a SHARE of completion, not a third quantity: thinking tokens are billed at the output rate and are already counted inside completion. Do not stack these series \u2014 read reasoning against completion as a ratio.",
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
       "id": 4,
       "options": {

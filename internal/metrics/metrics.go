@@ -10,6 +10,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
 )
 
 // Metrics holds the gateway's collectors and their registry.
@@ -81,12 +83,27 @@ func (m *Metrics) ObserveComponent(component string, d time.Duration) {
 	m.component.WithLabelValues(component).Observe(d.Seconds())
 }
 
-func (m *Metrics) RecordUsage(ingress string, prompt, completion int, cost float64) {
+// RecordUsage adds one request's tokens and cost to the counters. It takes the
+// whole llm.Usage for the reason finalizeUsage does: the counts only mean what
+// they say together, and an empty Usage says "no tokens" more plainly than a
+// row of zeros — which is what the audio paths, priced by seconds or
+// characters rather than tokens, pass.
+//
+// The "reasoning" series is a BREAKDOWN of "completion", not a fourth quantity
+// alongside it: those tokens are already inside the completion count, which is
+// what the vendor bills. A dashboard that sums the kinds double-counts them;
+// the useful query is the ratio of the two. It is only touched when a request
+// reported reasoning, so the series stays absent on an instance that never
+// runs a reasoning model.
+func (m *Metrics) RecordUsage(ingress string, u llm.Usage, cost float64) {
 	if m == nil {
 		return
 	}
-	m.tokens.WithLabelValues(ingress, "prompt").Add(float64(prompt))
-	m.tokens.WithLabelValues(ingress, "completion").Add(float64(completion))
+	m.tokens.WithLabelValues(ingress, "prompt").Add(float64(u.PromptTokens))
+	m.tokens.WithLabelValues(ingress, "completion").Add(float64(u.CompletionTokens))
+	if u.ReasoningTokens > 0 {
+		m.tokens.WithLabelValues(ingress, "reasoning").Add(float64(u.ReasoningTokens))
+	}
 	m.cost.WithLabelValues(ingress).Add(cost)
 }
 

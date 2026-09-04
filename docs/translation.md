@@ -30,8 +30,10 @@ to every other protocol.
 
 Messages (role, content, name), tool definitions, tool calls and tool
 results, tool_choice (passed through as raw JSON), temperature, max_tokens,
-stream flag, usage (prompt/completion tokens), finish/stop reason, and
-streaming deltas (role, content, tool-call, finish, usage).
+stream flag, usage (prompt/completion tokens, and the reasoning share of the
+completion count — see
+[API reference → Reasoning tokens](api.md#reasoning-tokens)), finish/stop
+reason, and streaming deltas (role, content, tool-call, finish, usage).
 
 ## Cross-protocol caveats
 
@@ -42,6 +44,9 @@ equivalent. When a request crosses protocols, these may degrade:
   OpenAI-shaped IR.
 - **OpenAI `logprobs`, `n>1`, `seed`, `response_format`** — not mapped.
 - **Reasoning controls** (`reasoning_effort`, extended thinking) — not mapped.
+  Reasoning *usage* is a separate matter and is not lossy: thinking tokens are
+  counted, priced and capped on every path, and the Anthropic egress reports
+  them inside `output_tokens`, which is where Anthropic itself puts them.
 - **System prompt fidelity** — Anthropic `system` becomes a leading system
   message; structured system blocks are flattened to text.
 - **Tool result shaping** — Anthropic `tool_result` blocks become IR `tool`
