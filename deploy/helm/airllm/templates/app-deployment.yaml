@@ -1,6 +1,10 @@
 {{- if not .Values.existingSecret }}
 {{- fail "existingSecret is required: create a Secret with keys database-url, redis-url, master-key, session-key (+ oidc-client-secret when authMode=oidc, admin-password optional) and set .Values.existingSecret to its name" }}
 {{- end }}
+{{- $wif := .Values.googleWorkloadIdentity }}
+{{- if and $wif.enabled (or (not $wif.projectNumber) (not $wif.poolId) (not $wif.providerId) (not $wif.serviceAccount)) }}
+{{- fail "googleWorkloadIdentity.enabled=true requires projectNumber, poolId, providerId and serviceAccount" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -18,6 +22,13 @@ spec:
       app.kubernetes.io/component: gateway
   template:
     metadata:
+      {{- if $wif.enabled }}
+      annotations:
+        # The impersonated service account lives ONLY in the credential ConfigMap, and
+        # the Google SDK parses that file once at startup. Without this, changing it
+        # would leave the pod impersonating the old identity until an unrelated restart.
+        checksum/gcp-wif: {{ include (print $.Template.BasePath "/gcp-wif-credential-config.yaml") . | sha256sum }}
+      {{- end }}
       labels:
         {{- include "airllm.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: gateway
@@ -76,6 +87,12 @@ spec:
                   name: {{ .Values.existingSecret }}
                   key: oidc-client-secret
             {{- end }}
+            {{- if $wif.enabled }}
+            # Points the Google SDK at the external-account config, so the `vertex`
+            # provider can mint OAuth2 tokens as the pod's own cloud identity.
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: {{ include "airllm.gcpWifCredentialFile" . | quote }}
+            {{- end }}
           startupProbe:
             # Gates liveness until the app has booted (migrations run on start);
             # allows up to ~60s before liveness takes over.
@@ -103,6 +120,15 @@ spec:
             - name: tmp
               mountPath: /tmp
             {{- end }}
+            {{- if $wif.enabled }}
+            # Both read-only, so they cost nothing against readOnlyRootFilesystem.
+            - name: gcp-token
+              mountPath: {{ include "airllm.gcpWifTokenFile" . | dir | quote }}
+              readOnly: true
+            - name: gcp-creds
+              mountPath: {{ include "airllm.gcpWifCredentialFile" . | dir | quote }}
+              readOnly: true
+            {{- end }}
       volumes:
         - name: captures
           {{- if .Values.app.capture.persistence.enabled }}
@@ -114,6 +140,18 @@ spec:
         {{- if .Values.app.securityContext.readOnlyRootFilesystem }}
         - name: tmp
           emptyDir: {}
+        {{- end }}
+        {{- if $wif.enabled }}
+        - name: gcp-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: {{ include "airllm.gcpWifAudience" . | quote }}
+                  expirationSeconds: {{ $wif.tokenExpirationSeconds | default 3600 }}
+                  path: {{ include "airllm.gcpWifTokenFile" . | base }}
+        - name: gcp-creds
+          configMap:
+            name: {{ include "airllm.fullname" . }}-gcp-wif
         {{- end }}
       {{- with .Values.app.nodeSelector }}
       nodeSelector:

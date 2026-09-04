@@ -46,3 +46,23 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- $tag := .image.tag | default .root.Chart.AppVersion -}}
 {{- printf "%s:%s" .image.repository $tag -}}
 {{- end -}}
+
+{{/*
+WIF audience — the pool provider's resource name. Rendered in TWO places that must
+agree (the projected token and the credential config), and a mismatch is only
+rejected by STS at refresh time, long after rollout — so it is computed once here.
+*/}}
+{{- define "airllm.gcpWifAudience" -}}
+{{- $wif := .Values.googleWorkloadIdentity -}}
+{{- printf "//iam.googleapis.com/projects/%s/locations/global/workloadIdentityPools/%s/providers/%s" $wif.projectNumber $wif.poolId $wif.providerId -}}
+{{- end -}}
+
+{{/* Credential config the Google SDK reads (GOOGLE_APPLICATION_CREDENTIALS). */}}
+{{- define "airllm.gcpWifCredentialFile" -}}
+/var/run/secrets/gcp/creds/credential-config.json
+{{- end -}}
+
+{{/* Projected token the credential config points at. */}}
+{{- define "airllm.gcpWifTokenFile" -}}
+/var/run/secrets/gcp/tokens/token
+{{- end -}}

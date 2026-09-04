@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "title": "AirLLM Helm values",
   "type": "object",
-  "required": ["image", "existingSecret", "config", "app", "dlpBert", "metrics"],
+  "required": ["image", "existingSecret", "config", "app", "dlpBert", "metrics", "googleWorkloadIdentity"],
   "properties": {
     "nameOverride": { "type": "string" },
     "fullnameOverride": { "type": "string" },
@@ -24,6 +24,17 @@
         "authMode": { "type": "string", "enum": ["local", "oidc"] },
         "adminUsername": { "type": "string" },
         "captureBlobDir": { "type": "string" }
+      }
+    },
+    "googleWorkloadIdentity": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "projectNumber": { "type": "string" },
+        "poolId": { "type": "string" },
+        "providerId": { "type": "string" },
+        "serviceAccount": { "type": "string" },
+        "tokenExpirationSeconds": { "type": "integer", "minimum": 600, "maximum": 43200 }
       }
     },
     "app": {

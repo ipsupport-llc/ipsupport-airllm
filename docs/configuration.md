@@ -215,7 +215,9 @@ missing from the dropdown can still be typed in by hand.
 - **Leave it blank** and the gateway authenticates with the ambient Google
   application default credentials: the pod's own federated identity in the
   cluster, your own `gcloud` credentials on a laptop. Nothing long-lived is
-  stored anywhere, and this is the intended configuration in the cluster.
+  stored anywhere, and this is the intended configuration in the cluster — the
+  Helm chart projects that identity into the pod, off by default, under
+  [Operations → Google Workload Identity Federation](operations.md#google-workload-identity-federation).
 - **Paste a service-account JSON key** where no federated identity exists — on a
   plain VM, say. It is sealed at rest like any other credential. The console
   gives it a field of its own; the API-key field is not used by this kind.
