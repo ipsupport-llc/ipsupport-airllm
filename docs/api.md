@@ -40,9 +40,9 @@ prefix and last-4, and shown in full exactly once at creation.
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/v1/chat/completions` | OpenAI Chat Completions. Non-streaming and SSE (`stream: true`). |
+| `POST` | `/v1/chat/completions` | OpenAI Chat Completions. Non-streaming and SSE (`stream: true`). Accepts standard OpenAI multi-part vision content (`content: [{"type":"text",...},{"type":"image_url",...}]`). |
 | `GET` | `/v1/models` | OpenAI model list, filtered by the key's allowed models |
-| `POST` | `/v1/messages` | Anthropic Messages. Non-streaming and SSE. |
+| `POST` | `/v1/messages` | Anthropic Messages. Non-streaming and SSE. Accepts Anthropic's own image content blocks (`{"type":"image","source":{"type":"base64",...}}` or `{"type":"image","source":{"type":"url",...}}`). |
 | `POST` | `/v1/audio/transcriptions` | OpenAI-shaped batch speech-to-text (`multipart/form-data`: `model`, `file`, optional `language`/`prompt`). Always responds `{"text": "..."}`; `response_format` is accepted but ignored. |
 | `POST` | `/v1/audio/speech` | OpenAI-shaped batch text-to-speech (JSON: `model`, `input`, optional `voice`/`response_format`). Responds with raw audio bytes and the upstream `Content-Type`. |
 
@@ -50,6 +50,15 @@ The `model` field accepts a configured **alias** (e.g. `mock-gpt`) or, when the
 key's role allows passthrough, an explicit `provider/model`. Cross-protocol
 calls are translated; same-protocol calls pass through. See
 [`translation.md`](translation.md).
+
+**Vision / image content**: both ingress protocols accept images in their
+respective native multi-part content formats and forward them to the real
+upstream unchanged. Two things to know: (1) this gateway does not verify
+that an alias's target model is actually vision-capable before making the
+call — a text-only model gets a live error from the real upstream, not a
+clean local one; (2) the practical image size ceiling is the existing
+16 MiB request body cap (`internal/httpapi/server.go`'s `maxRequestBody`) —
+there's no separate, larger limit for vision requests.
 
 Errors use the caller's protocol shape (OpenAI error object vs Anthropic error
 object). When every routing target is busy the gateway returns `429` rather
