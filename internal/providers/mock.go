@@ -131,9 +131,13 @@ func (m *Mock) ChatStream(_ context.Context, req llm.ChatRequest, yield func(llm
 }
 
 func (m *Mock) content(req llm.ChatRequest) string {
-	return fmt.Sprintf(
+	base := fmt.Sprintf(
 		"Mock response from provider %q (model %q). You said: %s",
 		m.name, req.Model, lastUserText(req.Messages))
+	if n := lastUserImageCount(req.Messages); n > 0 {
+		base += fmt.Sprintf(" (with %d image(s) attached)", n)
+	}
+	return base
 }
 
 func (m *Mock) wantsToolCall(req llm.ChatRequest) bool {
@@ -159,6 +163,15 @@ func lastUserText(msgs []llm.Message) string {
 		}
 	}
 	return ""
+}
+
+func lastUserImageCount(msgs []llm.Message) int {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "user" {
+			return len(msgs[i].Images)
+		}
+	}
+	return 0
 }
 
 func joinMessages(msgs []llm.Message) string {

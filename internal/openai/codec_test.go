@@ -55,6 +55,34 @@ func TestDecodeChatRequestRejectsMultiChoice(t *testing.T) {
 	}
 }
 
+func TestDecodeChatRequestVisionContentArray(t *testing.T) {
+	body := `{
+		"model": "text",
+		"messages": [{
+			"role": "user",
+			"content": [
+				{"type": "text", "text": "what is in this image?"},
+				{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+			]
+		}],
+		"max_tokens": 30
+	}`
+	req, err := DecodeChatRequest(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("the exact bug report payload must decode without error, got: %v", err)
+	}
+	if len(req.Messages) != 1 {
+		t.Fatalf("want 1 message, got %d", len(req.Messages))
+	}
+	m := req.Messages[0]
+	if m.Content != "what is in this image?" {
+		t.Errorf("Content = %q", m.Content)
+	}
+	if len(m.Images) != 1 || m.Images[0].URL != "data:image/png;base64,AAAA" {
+		t.Errorf("Images = %+v", m.Images)
+	}
+}
+
 func TestEncodeChatRequestMergesExtras(t *testing.T) {
 	req := llm.ChatRequest{
 		Model:    "m",
