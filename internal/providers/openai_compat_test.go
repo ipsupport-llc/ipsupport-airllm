@@ -199,7 +199,9 @@ func TestHTTPErrorUnrecognizedBodyLeavesCodeEmpty(t *testing.T) {
 		[]byte(`not even json`),
 		[]byte(``),
 		[]byte(`{"error":{"type":"invalid_request_error","code":null}}`), // OpenAI sends real null codes for many error kinds
-		[]byte(`{"error":{"message":"model does not support tool calling","type":"invalid_request_error","code":null}}`), // similarly generic type/code, unrelated message — must not false-positive on "multimodal"
+		// contains "multimodal" AND "does not support", just not contiguously
+		// as the one phrase the pattern actually targets — must not false-positive.
+		[]byte(`{"error":{"message":"processed a multimodal request successfully; note the endpoint does not support streaming for this model","type":"invalid_request_error","code":null}}`),
 	}
 	for _, body := range cases {
 		err := httpError("x", 400, body)

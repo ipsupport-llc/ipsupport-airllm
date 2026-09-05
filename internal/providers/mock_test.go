@@ -142,6 +142,37 @@ func TestMockCtxFailFallbackWorthy(t *testing.T) {
 	}
 }
 
+func TestMockNovisionFallbackWorthy(t *testing.T) {
+	m := NewMock("mock")
+
+	novisionReq := llm.ChatRequest{Model: "mock-novision", Messages: []llm.Message{{Role: "user", Content: "x"}}}
+	_, err := m.Chat(context.Background(), novisionReq)
+	if err == nil {
+		t.Fatal("novision model must return an error")
+	}
+	pe, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("want *Error, got %T", err)
+	}
+	if pe.Code != ErrCodeMultimodalNotSupported {
+		t.Errorf("Code = %q, want %q", pe.Code, ErrCodeMultimodalNotSupported)
+	}
+	if IsRetryable(err) {
+		t.Error("novision error must NOT be Retryable (it's a target-specific failure, not transient)")
+	}
+	if !IsFallbackWorthy(err) {
+		t.Error("novision error must be fallback-worthy via its Code")
+	}
+
+	err = m.ChatStream(context.Background(), novisionReq, func(llm.StreamChunk) error {
+		t.Fatal("novision model must not yield any chunk")
+		return nil
+	})
+	if !IsFallbackWorthy(err) {
+		t.Error("ChatStream novision error must be fallback-worthy via its Code")
+	}
+}
+
 func TestMockChatStreamYieldError(t *testing.T) {
 	m := NewMock("mock")
 	sentinel := context.Canceled
