@@ -334,18 +334,32 @@ Two consequences worth knowing:
   recover the difference: the `total_tokens` the gap is computed from was never
   stored. The whole affected window is small and closed — every Vertex row ever
   written falls between 2026-09-04 19:18 and 22:17 UTC: 38 requests,
-  5 686 prompt / 514 completion tokens, `$0.002992`. The one call whose
-  `total_tokens` was observed by hand spent 146 thinking tokens against 30
-  visible ones; applying that ratio puts the unrecorded output at roughly
-  2 500 tokens, or about `$0.006` more at $2.50 per 1M — so the true bill for
-  that window is near `$0.009`, **about 3x what the ledger says**. The single
-  call was under-reported 5.7x because it had a 10-token prompt and its bill
-  was almost all output; across the window the 5 686 prompt tokens dominate,
-  and those were always counted correctly, which is why the aggregate multiple
-  is lower than the per-call one. Six of the 38 rows recorded zero completion
-  tokens while certainly having thought, so 3x is a floor rather than a
-  midpoint. Read pre-cutover Vertex numbers as a lower bound, not a
-  measurement.
+  5 686 prompt / 514 completion tokens, `$0.002992`.
+
+  How far short that `$0.002992` falls cannot be pinned down, because the ratio
+  of thinking to visible output varies by an order of magnitude with the prompt.
+  Three measured calls on `gemini-2.5-flash`, thinking tokens against visible
+  ones: **146 / 30** (4.9x), **696 / 36** (19.3x), **500 / 22** (22.7x).
+  Applying each to the window's 514 recorded output tokens:
+
+  | Ratio from | Unrecorded output | True cost | Multiple |
+  |---|---|---|---|
+  | 146 / 30 | ~2 500 | `$0.0092` | 3.1x |
+  | 696 / 36 | ~9 900 | `$0.0278` | 9.3x |
+  | 500 / 22 | ~11 700 | `$0.0322` | 10.7x |
+
+  So **somewhere between 3x and 11x**, and 3x is the floor twice over: six of
+  the 38 rows recorded *zero* completion tokens while certainly having thought,
+  and their thinking is absent from the denominator entirely. The aggregate
+  multiple stays below the per-call one (a single call was 22.6x short) only
+  because the window's 5 686 prompt tokens dominate its recorded cost and those
+  were always counted correctly. Read pre-cutover Vertex numbers as a lower
+  bound, not a measurement.
+- **Thinking usually dwarfs the answer.** On the three calls above, 82-97% of
+  the billed output was thinking — a one-sentence reply cost 522 output tokens,
+  of which 500 were reasoning. A Vertex tier therefore costs several times what
+  its unit price against visible output suggests, and the `reasoning` share is
+  the number to watch, not the unit rate.
 - **A small `max_tokens` is spent on thinking first.** A Gemini 2.5 Flash call
   capped at 32 tokens came back with empty content and `completion_tokens 0`
   against `total_tokens 42`: the whole cap went on thinking. That is now
