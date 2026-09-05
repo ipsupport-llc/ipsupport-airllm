@@ -27,9 +27,9 @@ const (
 )
 
 // classifyUpstreamErr maps an executor error to an HTTP status: all-busy is a
-// 429 (back off and retry); a recognized context-length/model-not-found
-// error that still failed on every fallback tier is a 400 the client can
-// act on; anything else is a 502 upstream error.
+// 429 (back off and retry); a recognized context-length/model-not-found/
+// multimodal-not-supported error that still failed on every fallback tier is
+// a 400 the client can act on; anything else is a 502 upstream error.
 func classifyUpstreamErr(err error) (int, string) {
 	if errors.Is(err, errAllBusy) {
 		return http.StatusTooManyRequests, "rate_limit_error"
@@ -37,7 +37,7 @@ func classifyUpstreamErr(err error) (int, string) {
 	var pe *providers.Error
 	if errors.As(err, &pe) {
 		switch pe.Code {
-		case providers.ErrCodeContextLengthExceeded, providers.ErrCodeModelNotFound:
+		case providers.ErrCodeContextLengthExceeded, providers.ErrCodeModelNotFound, providers.ErrCodeMultimodalNotSupported:
 			return http.StatusBadRequest, "invalid_request_error"
 		}
 	}

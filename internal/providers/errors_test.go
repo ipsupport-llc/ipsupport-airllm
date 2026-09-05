@@ -13,7 +13,7 @@ func TestIsFallbackWorthyRetryable(t *testing.T) {
 }
 
 func TestIsFallbackWorthyKnownCode(t *testing.T) {
-	for _, code := range []string{ErrCodeContextLengthExceeded, ErrCodeModelNotFound} {
+	for _, code := range []string{ErrCodeContextLengthExceeded, ErrCodeModelNotFound, ErrCodeMultimodalNotSupported} {
 		err := &Error{Status: 400, Retryable: false, Code: code}
 		if !IsFallbackWorthy(err) {
 			t.Errorf("code %q must be fallback-worthy even though Retryable=false", code)

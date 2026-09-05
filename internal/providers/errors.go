@@ -5,14 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 )
 
 // Known error codes that make a failure fallback-worthy even though it is
 // not retryable against the same target — see IsFallbackWorthy.
 const (
-	ErrCodeContextLengthExceeded = "context_length_exceeded"
-	ErrCodeModelNotFound         = "model_not_found"
+	ErrCodeContextLengthExceeded  = "context_length_exceeded"
+	ErrCodeModelNotFound          = "model_not_found"
+	ErrCodeMultimodalNotSupported = "multimodal_not_supported"
 )
 
 // Error is a provider call failure. Retryable failures (e.g. upstream 429 or
@@ -51,7 +53,7 @@ func IsFallbackWorthy(err error) bool {
 	var pe *Error
 	if errors.As(err, &pe) {
 		switch pe.Code {
-		case ErrCodeContextLengthExceeded, ErrCodeModelNotFound:
+		case ErrCodeContextLengthExceeded, ErrCodeModelNotFound, ErrCodeMultimodalNotSupported:
 			return true
 		}
 	}
@@ -62,10 +64,26 @@ func IsFallbackWorthy(err error) bool {
 // cloud vendor this codebase talks to (Groq, xAI, OpenRouter), uses.
 type openAIErrorBody struct {
 	Error struct {
-		Type string `json:"type"`
-		Code string `json:"code"`
+		Type    string `json:"type"`
+		Code    string `json:"code"`
+		Message string `json:"message"`
 	} `json:"error"`
 }
+
+// ollamaMultimodalRejectionPattern matches Ollama's OpenAI-compat shim
+// rejecting an image sent to a non-vision model. Unlike the codes above,
+// this one has no stable machine-readable signal anywhere in the response:
+// Ollama's outer envelope arrives with code:null and a generic type
+// ("invalid_request_error", same as many unrelated errors), and the real
+// error is itself double-nested — a JSON-encoded string sitting inside the
+// outer message field, whose own type is just as generic. The literal
+// English text is the only thing that distinguishes this error, so this
+// matches directly against the decoded outer message string (which already
+// contains that text verbatim, nested-JSON escaping and all) rather than
+// unmarshaling the inner JSON separately. Fragile to Ollama rewording this
+// message in a future version — known and accepted, there is nothing more
+// precise to match on.
+var ollamaMultimodalRejectionPattern = regexp.MustCompile(`(?i)does not support multimodal`)
 
 // llamaCppErrorBody is the error shape llama.cpp's server (and Ollama, which
 // wraps it) uses — distinct from the OpenAI shape: the reason lives in
@@ -124,6 +142,9 @@ func classifyErrorBody(body []byte) string {
 		switch oa.Error.Code {
 		case ErrCodeContextLengthExceeded, ErrCodeModelNotFound:
 			return oa.Error.Code
+		}
+		if ollamaMultimodalRejectionPattern.MatchString(oa.Error.Message) {
+			return ErrCodeMultimodalNotSupported
 		}
 	}
 	var lc llamaCppErrorBody

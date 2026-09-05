@@ -178,6 +178,14 @@ func TestClassifyUpstreamErrModelNotFound(t *testing.T) {
 	}
 }
 
+func TestClassifyUpstreamErrMultimodalNotSupported(t *testing.T) {
+	err := &providers.Error{Status: 400, Retryable: false, Code: providers.ErrCodeMultimodalNotSupported, Message: "no vision"}
+	code, typ := classifyUpstreamErr(err)
+	if code != http.StatusBadRequest || typ != "invalid_request_error" {
+		t.Errorf("got (%d, %q), want (400, invalid_request_error)", code, typ)
+	}
+}
+
 func TestClassifyUpstreamErrUnrecognizedStaysUpstreamError(t *testing.T) {
 	err := &providers.Error{Status: 400, Retryable: false, Message: "malformed"}
 	code, typ := classifyUpstreamErr(err)

@@ -14,6 +14,10 @@
 /web/build/
 /web/.svelte-kit/
 
+# python (dlp-bert)
+__pycache__/
+*.pyc
+
 # sdd scratch
 .superpowers/
 
