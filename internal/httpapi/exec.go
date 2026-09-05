@@ -37,7 +37,7 @@ func classifyUpstreamErr(err error) (int, string) {
 	var pe *providers.Error
 	if errors.As(err, &pe) {
 		switch pe.Code {
-		case providers.ErrCodeContextLengthExceeded, providers.ErrCodeModelNotFound:
+		case providers.ErrCodeContextLengthExceeded, providers.ErrCodeModelNotFound, providers.ErrCodeMultimodalNotSupported:
 			return http.StatusBadRequest, "invalid_request_error"
 		}
 	}

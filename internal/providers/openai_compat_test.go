@@ -176,6 +176,22 @@ func TestHTTPErrorParsesLlamaCppStyleContextSizeExceeded(t *testing.T) {
 	}
 }
 
+func TestHTTPErrorParsesOllamaMultimodalRejection(t *testing.T) {
+	// Real body captured live from Ollama's OpenAI-compat shim rejecting an
+	// image sent to a non-vision model: double-nested, the outer envelope's
+	// own code is null and its message is a JSON-encoded string holding the
+	// real error.
+	body := []byte(`{"error":{"message":"{\"error\":{\"code\":400,\"message\":\"Multimodal data provided, but model does not support multimodal requests.\",\"type\":\"invalid_request_error\"}}","type":"invalid_request_error","param":null,"code":null}}`)
+	err := httpError("ollama-local", 400, body)
+	pe := err.(*Error)
+	if pe.Code != ErrCodeMultimodalNotSupported {
+		t.Errorf("Code = %q, want %q", pe.Code, ErrCodeMultimodalNotSupported)
+	}
+	if pe.Retryable {
+		t.Error("a 400 must still be Retryable=false — Code is additive, not a replacement")
+	}
+}
+
 func TestHTTPErrorUnrecognizedBodyLeavesCodeEmpty(t *testing.T) {
 	cases := [][]byte{
 		[]byte(`{"error":{"message":"bad request","type":"invalid_request_error","code":"something_else"}}`),
@@ -183,6 +199,7 @@ func TestHTTPErrorUnrecognizedBodyLeavesCodeEmpty(t *testing.T) {
 		[]byte(`not even json`),
 		[]byte(``),
 		[]byte(`{"error":{"type":"invalid_request_error","code":null}}`), // OpenAI sends real null codes for many error kinds
+		[]byte(`{"error":{"message":"model does not support tool calling","type":"invalid_request_error","code":null}}`), // similarly generic type/code, unrelated message — must not false-positive on "multimodal"
 	}
 	for _, body := range cases {
 		err := httpError("x", 400, body)
