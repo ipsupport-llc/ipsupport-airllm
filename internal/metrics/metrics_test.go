@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
 )
 
 func TestNewRegistersAndRecords(t *testing.T) {
@@ -12,7 +14,7 @@ func TestNewRegistersAndRecords(t *testing.T) {
 	m.RecordRequest("openai", 200, 12*time.Millisecond)
 	m.RecordRequest("openai", 200, 8*time.Millisecond)
 	m.ObserveComponent("provider", 5*time.Millisecond)
-	m.RecordUsage("openai", 10, 20, 0.001)
+	m.RecordUsage("openai", llm.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30, ReasoningTokens: 8}, 0.001)
 	m.IncRateLimited("usage_limit")
 	m.DLPModelObserve(3 * time.Millisecond)
 	m.DLPModelSkipped("all_busy")
@@ -25,6 +27,11 @@ func TestNewRegistersAndRecords(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(m.tokens.WithLabelValues("openai", "completion")); got != 20 {
 		t.Errorf("tokens completion = %v, want 20", got)
+	}
+	// Reasoning is a breakdown of completion, not a fourth quantity: the
+	// completion count above still holds every billed output token.
+	if got := testutil.ToFloat64(m.tokens.WithLabelValues("openai", "reasoning")); got != 8 {
+		t.Errorf("tokens reasoning = %v, want 8", got)
 	}
 	if got := testutil.ToFloat64(m.rateLimited.WithLabelValues("usage_limit")); got != 1 {
 		t.Errorf("rate_limited{usage_limit} = %v, want 1", got)
@@ -39,7 +46,7 @@ func TestNilSafe(t *testing.T) {
 	// Must not panic.
 	m.RecordRequest("openai", 200, time.Millisecond)
 	m.ObserveComponent("dlp", time.Millisecond)
-	m.RecordUsage("anthropic", 1, 1, 0.0)
+	m.RecordUsage("anthropic", llm.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2}, 0.0)
 	m.IncRateLimited("provider_busy")
 	m.DLPModelObserve(time.Millisecond)
 	m.DLPModelSkipped("all_busy")

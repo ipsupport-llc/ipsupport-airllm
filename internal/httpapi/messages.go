@@ -63,14 +63,14 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		code, typ := classifyUpstreamErr(callErr)
 		entry.Status = code
 		entry.ErrorMsg = callErr.Error()
-		s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, 0, 0)
+		s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, llm.Usage{})
 		writeProtocolError(w, r, code, typ, callErr.Error())
 		return
 	}
 
 	resp.Model = req.Model
 	entry.Status = http.StatusOK
-	s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+	s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, resp.Usage)
 
 	var responseText string
 	if len(resp.Choices) > 0 {
@@ -117,12 +117,12 @@ func (s *Server) streamMessages(w http.ResponseWriter, r *http.Request, req llm.
 		if !started {
 			code, typ := classifyUpstreamErr(err)
 			entry.Status = code
-			s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, 0, 0)
+			s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, llm.Usage{})
 			writeProtocolError(w, r, code, typ, err.Error())
 			return
 		}
 		entry.Status = http.StatusOK
-		s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, usage.PromptTokens, usage.CompletionTokens)
+		s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, usage)
 		s.enqueueCapture(ak, "anthropic", req.Model, target.Provider, target.UpstreamModel,
 			http.StatusOK, usage.PromptTokens, usage.CompletionTokens, entry.CostUSD,
 			dlpRes, req.Messages, sink.assembled())
@@ -130,7 +130,7 @@ func (s *Server) streamMessages(w http.ResponseWriter, r *http.Request, req llm.
 	}
 
 	entry.Status = http.StatusOK
-	s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, usage.PromptTokens, usage.CompletionTokens)
+	s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, usage)
 	s.enqueueCapture(ak, "anthropic", req.Model, target.Provider, target.UpstreamModel,
 		http.StatusOK, usage.PromptTokens, usage.CompletionTokens, entry.CostUSD,
 		dlpRes, req.Messages, sink.assembled())

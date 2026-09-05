@@ -20,10 +20,13 @@ type Entry struct {
 	UpstreamProtocol string
 	PromptTokens     int
 	CompletionTokens int
-	CostUSD          float64
-	Status           int
-	LatencyMS        int64
-	ErrorMsg         string
+	// ReasoningTokens is the share of CompletionTokens spent thinking — a
+	// breakdown of that number, not an addition to it. See llm.Usage.
+	ReasoningTokens int
+	CostUSD         float64
+	Status          int
+	LatencyMS       int64
+	ErrorMsg        string
 }
 
 // Ledger writes usage rows.
@@ -41,12 +44,12 @@ func (l *Ledger) Record(ctx context.Context, e Entry) {
 		INSERT INTO usage_ledger (
 			key_id, user_id, alias, provider_name, upstream_model,
 			ingress_protocol, upstream_protocol,
-			prompt_tokens, completion_tokens, cost_usd,
+			prompt_tokens, completion_tokens, reasoning_tokens, cost_usd,
 			status, latency_ms, error
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
 		nullUUID(e.KeyID), nullUUID(e.UserID), e.Alias, e.ProviderName, e.UpstreamModel,
 		e.IngressProtocol, e.UpstreamProtocol,
-		e.PromptTokens, e.CompletionTokens, e.CostUSD,
+		e.PromptTokens, e.CompletionTokens, e.ReasoningTokens, e.CostUSD,
 		e.Status, e.LatencyMS, e.ErrorMsg,
 	)
 	if err != nil {

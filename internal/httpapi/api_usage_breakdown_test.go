@@ -47,23 +47,25 @@ func TestUsageBreakdownQueries(t *testing.T) {
 	}
 
 	insert := `INSERT INTO usage_ledger
-		(alias, provider_name, upstream_model, prompt_tokens, completion_tokens, cost_usd, status, latency_ms)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
+		(alias, provider_name, upstream_model, prompt_tokens, completion_tokens, reasoning_tokens, cost_usd, status, latency_ms)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
 
 	// bp-openai / alias-a: 3 rows, one erroring (status 500), total cost 3.50.
-	mustExec(insert, "alias-a", "bp-openai", "gpt-4", 100, 50, 1.00, 200, 100)
-	mustExec(insert, "alias-a", "bp-openai", "gpt-4", 200, 100, 2.00, 200, 200)
-	mustExec(insert, "alias-a", "bp-openai", "gpt-4", 50, 25, 0.50, 500, 300)
+	// The middle row spent 40 of its 100 output tokens thinking; the other two
+	// did none, which is how a mixed model's traffic actually looks.
+	mustExec(insert, "alias-a", "bp-openai", "gpt-4", 100, 50, 0, 1.00, 200, 100)
+	mustExec(insert, "alias-a", "bp-openai", "gpt-4", 200, 100, 40, 2.00, 200, 200)
+	mustExec(insert, "alias-a", "bp-openai", "gpt-4", 50, 25, 0, 0.50, 500, 300)
 
 	// bp-mock / alias-b: 1 row, higher cost than bp-openai's total (5.00 > 3.50)
 	// so it must sort first under ORDER BY cost DESC.
-	mustExec(insert, "alias-b", "bp-mock", "mock-1", 10, 10, 5.00, 200, 50)
+	mustExec(insert, "alias-b", "bp-mock", "mock-1", 10, 10, 0, 5.00, 200, 50)
 
 	// Row with an empty provider_name: a request that exhausted every target
 	// (ledgered as a failure with no provider). Must be excluded from the
 	// provider breakdown but VISIBLE in the model breakdown — otherwise
 	// failures disappear from the report.
-	mustExec(insert, "alias-c", "", "untracked", 999, 999, 100.00, 502, 10)
+	mustExec(insert, "alias-c", "", "untracked", 999, 999, 0, 100.00, 502, 10)
 
 	// Scope to this test's fixture providers via the where-clause injection
 	// point (mirroring how handleUsageBreakdown adds "AND user_id = $2") so
@@ -79,7 +81,7 @@ func TestUsageBreakdownQueries(t *testing.T) {
 	var provs []providerUsage
 	for provRows.Next() {
 		var p providerUsage
-		if err := provRows.Scan(&p.Provider, &p.Requests, &p.TokensIn, &p.TokensOut, &p.CostUSD, &p.P95ms, &p.Errors); err != nil {
+		if err := provRows.Scan(&p.Provider, &p.Requests, &p.TokensIn, &p.TokensOut, &p.TokensReasoning, &p.CostUSD, &p.P95ms, &p.Errors); err != nil {
 			provRows.Close()
 			t.Fatalf("scan provider row: %v", err)
 		}
@@ -116,6 +118,16 @@ func TestUsageBreakdownQueries(t *testing.T) {
 	if openai.TokensIn != 350 || openai.TokensOut != 175 {
 		t.Errorf("bp-openai tokens = %d in / %d out, want 350/175", openai.TokensIn, openai.TokensOut)
 	}
+	// The thinking share aggregates as its own sum and stays INSIDE the 175
+	// output tokens above: an operator reading the two columns is reading one
+	// quantity and a part of it, not two quantities to add.
+	if openai.TokensReasoning != 40 {
+		t.Errorf("bp-openai thinking tokens = %d, want 40", openai.TokensReasoning)
+	}
+	if openai.TokensReasoning > openai.TokensOut {
+		t.Errorf("thinking tokens (%d) exceed output tokens (%d); the breakdown is no longer a share of the output",
+			openai.TokensReasoning, openai.TokensOut)
+	}
 	if openai.Errors != 1 {
 		t.Errorf("bp-openai errors = %d, want 1", openai.Errors)
 	}
@@ -131,7 +143,7 @@ func TestUsageBreakdownQueries(t *testing.T) {
 	var models []modelUsage
 	for modelRows.Next() {
 		var m modelUsage
-		if err := modelRows.Scan(&m.Alias, &m.Provider, &m.UpstreamModel, &m.Requests, &m.TokensIn, &m.TokensOut, &m.CostUSD, &m.P95ms, &m.Errors); err != nil {
+		if err := modelRows.Scan(&m.Alias, &m.Provider, &m.UpstreamModel, &m.Requests, &m.TokensIn, &m.TokensOut, &m.TokensReasoning, &m.CostUSD, &m.P95ms, &m.Errors); err != nil {
 			modelRows.Close()
 			t.Fatalf("scan model row: %v", err)
 		}
@@ -159,6 +171,9 @@ func TestUsageBreakdownQueries(t *testing.T) {
 			if m.Requests != 3 {
 				t.Errorf("alias-a model requests = %d, want 3", m.Requests)
 			}
+			if m.TokensReasoning != 40 {
+				t.Errorf("alias-a model thinking tokens = %d, want 40", m.TokensReasoning)
+			}
 		}
 	}
 	if !gotOpenaiModel {
@@ -181,15 +196,15 @@ func TestRecentRequestsQuery(t *testing.T) {
 	// Explicit, distinct ts values: both rows would otherwise default to the
 	// same now() inside one transaction, making ORDER BY ts DESC ambiguous.
 	insert := `INSERT INTO usage_ledger
-		(ts, alias, provider_name, upstream_model, prompt_tokens, completion_tokens, cost_usd, status, latency_ms, error)
-		VALUES (now() - interval '1 second', $1, $2, $3, $4, $5, $6, $7, $8, $9)`
-	if _, err := tx.Exec(ctx, insert, "rr-alias-a", "rr-openai", "gpt-4", 100, 50, 1.00, 200, 120, ""); err != nil {
+		(ts, alias, provider_name, upstream_model, prompt_tokens, completion_tokens, reasoning_tokens, cost_usd, status, latency_ms, error)
+		VALUES (now() - interval '1 second', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
+	if _, err := tx.Exec(ctx, insert, "rr-alias-a", "rr-openai", "gpt-4", 100, 50, 20, 1.00, 200, 120, ""); err != nil {
 		t.Fatalf("insert older row: %v", err)
 	}
 	insertNewer := `INSERT INTO usage_ledger
-		(ts, alias, provider_name, upstream_model, prompt_tokens, completion_tokens, cost_usd, status, latency_ms, error)
-		VALUES (now(), $1, $2, $3, $4, $5, $6, $7, $8, $9)`
-	if _, err := tx.Exec(ctx, insertNewer, "rr-alias-b", "", "", 0, 0, 0, 502, 30, "provider busy"); err != nil {
+		(ts, alias, provider_name, upstream_model, prompt_tokens, completion_tokens, reasoning_tokens, cost_usd, status, latency_ms, error)
+		VALUES (now(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
+	if _, err := tx.Exec(ctx, insertNewer, "rr-alias-b", "", "", 0, 0, 0, 0, 502, 30, "provider busy"); err != nil {
 		t.Fatalf("insert failed row: %v", err)
 	}
 
@@ -202,7 +217,8 @@ func TestRecentRequestsQuery(t *testing.T) {
 	for rows.Next() {
 		var req recentRequest
 		if err := rows.Scan(&req.Ts, &req.Alias, &req.Provider, &req.UpstreamModel, &req.Status,
-			&req.LatencyMS, &req.TokensIn, &req.TokensOut, &req.CostUSD, &req.ErrorMsg); err != nil {
+			&req.LatencyMS, &req.TokensIn, &req.TokensOut, &req.TokensReasoning, &req.CostUSD,
+			&req.ErrorMsg); err != nil {
 			t.Fatalf("scan: %v", err)
 		}
 		got = append(got, req)
@@ -223,5 +239,8 @@ func TestRecentRequestsQuery(t *testing.T) {
 	}
 	if got[1].Alias != "rr-alias-a" || got[1].Provider != "rr-openai" || got[1].Status != 200 {
 		t.Errorf("older row = %+v, want rr-alias-a/rr-openai/200", got[1])
+	}
+	if got[1].TokensReasoning != 20 {
+		t.Errorf("older row thinking tokens = %d, want 20", got[1].TokensReasoning)
 	}
 }

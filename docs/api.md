@@ -64,6 +64,34 @@ Errors use the caller's protocol shape (OpenAI error object vs Anthropic error
 object). When every routing target is busy the gateway returns `429` rather
 than failing.
 
+### Reasoning tokens
+
+`completion_tokens` (`output_tokens` on the Anthropic ingress) is **every token
+billed at the output rate**, including whatever the model spent thinking. That
+holds regardless of how the upstream reported it: OpenAI-shaped vendors count
+thinking inside `completion_tokens`, while Vertex AI leaves it out and lets it
+show only in `total_tokens`, and the gateway reconciles both before metering.
+
+When a response did any thinking, the OpenAI ingress also reports the share:
+
+```json
+"usage": {
+  "prompt_tokens": 10,
+  "completion_tokens": 176,
+  "total_tokens": 186,
+  "completion_tokens_details": {"reasoning_tokens": 146}
+}
+```
+
+`completion_tokens_details` is **omitted entirely** when there was no thinking,
+so a response from a non-reasoning model carries the same three fields it
+always did. One related tidy-up: `total_tokens` is now always
+`prompt_tokens + completion_tokens`, where an upstream that omitted its own
+total used to leave the client a `total_tokens` of `0` beside non-zero parts. The reasoning count is a breakdown of `completion_tokens`, not an addition
+to it — adding the two double-counts. Operators see the same split as
+`tokens_reasoning` in the usage breakdown; see
+[Operations → Reasoning tokens](operations.md#reasoning-tokens).
+
 ## Control-plane — self-service (session)
 
 | Method | Path | Purpose |
@@ -74,7 +102,7 @@ than failing.
 | `POST` | `/api/keys` | Create a key (token returned once). Body: `{"name"}` |
 | `POST` | `/api/keys/{id}/revoke` | Revoke one of the caller's keys |
 | `GET` | `/api/usage` | The caller's rolling-window usage (tokens + cost) |
-| `GET` | `/api/usage/breakdown` | The caller's usage grouped by provider and by model over the last `hours` (default 24, max 168). Returns `{"providers":[...],"models":[...]}` |
+| `GET` | `/api/usage/breakdown` | The caller's usage grouped by provider and by model over the last `hours` (default 24, max 168). Returns `{"providers":[...],"models":[...]}`; each row carries `tokens_in`, `tokens_out` and `tokens_reasoning` — see [Reasoning tokens](#reasoning-tokens) |
 
 ## Control-plane — admin (`airllm_admin`)
 
@@ -88,7 +116,7 @@ than failing.
 | `GET` | `/api/admin/keys` | List all keys |
 | `POST` | `/api/admin/keys/{id}/revoke` | Revoke any key |
 | `GET` | `/api/admin/usage` | Usage across all keys |
-| `GET` | `/api/admin/usage/breakdown` | Usage across all keys grouped by provider and by model over the last `hours` (default 24, max 168). Returns `{"providers":[...],"models":[...]}` |
+| `GET` | `/api/admin/usage/breakdown` | Usage across all keys grouped by provider and by model over the last `hours` (default 24, max 168). Returns `{"providers":[...],"models":[...]}`; each row carries `tokens_in`, `tokens_out` and `tokens_reasoning` — see [Reasoning tokens](#reasoning-tokens) |
 | `GET`/`PUT` | `/api/admin/roles` · `/api/admin/roles/{role}` | Role policies (allowed models, passthrough, limits) |
 | `GET`/`PUT`/`DELETE` | `/api/admin/aliases` · `/api/admin/aliases/{alias}` | Model alias catalog (targets, strategy, fallback tiers) |
 | `GET`/`PUT` | `/api/admin/providers` · `/api/admin/providers/{name}` | Providers (kind, base URL, structured `config`, sealed credential, max concurrency, enabled). See [Provider fields](#provider-fields) below and [Provider kinds](configuration.md#provider-kinds). |

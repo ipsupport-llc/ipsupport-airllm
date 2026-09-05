@@ -65,14 +65,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		code, typ := classifyUpstreamErr(callErr)
 		entry.Status = code
 		entry.ErrorMsg = callErr.Error()
-		s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, 0, 0)
+		s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, llm.Usage{})
 		writeProtocolError(w, r, code, typ, callErr.Error())
 		return
 	}
 
 	resp.Model = req.Model
 	entry.Status = http.StatusOK
-	s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+	s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, resp.Usage)
 
 	var responseText string
 	if len(resp.Choices) > 0 {
@@ -119,12 +119,12 @@ func (s *Server) streamChatCompletions(w http.ResponseWriter, r *http.Request, r
 		if !started {
 			code, typ := classifyUpstreamErr(err)
 			entry.Status = code
-			s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, 0, 0)
+			s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, llm.Usage{})
 			writeProtocolError(w, r, code, typ, err.Error())
 			return
 		}
 		entry.Status = http.StatusOK // headers already sent; cannot signal failure
-		s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, usage.PromptTokens, usage.CompletionTokens)
+		s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, usage)
 		s.enqueueCapture(ak, "openai", req.Model, target.Provider, target.UpstreamModel,
 			http.StatusOK, usage.PromptTokens, usage.CompletionTokens, entry.CostUSD,
 			dlpRes, req.Messages, sink.assembled())
@@ -134,7 +134,7 @@ func (s *Server) streamChatCompletions(w http.ResponseWriter, r *http.Request, r
 	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher.Flush()
 	entry.Status = http.StatusOK
-	s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, usage.PromptTokens, usage.CompletionTokens)
+	s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, usage)
 	s.enqueueCapture(ak, "openai", req.Model, target.Provider, target.UpstreamModel,
 		http.StatusOK, usage.PromptTokens, usage.CompletionTokens, entry.CostUSD,
 		dlpRes, req.Messages, sink.assembled())

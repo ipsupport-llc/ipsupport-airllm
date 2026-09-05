@@ -9,25 +9,31 @@ import (
 )
 
 type providerUsage struct {
-	Provider  string  `json:"provider"`
-	Requests  int64   `json:"requests"`
-	TokensIn  int64   `json:"tokens_in"`
-	TokensOut int64   `json:"tokens_out"`
-	CostUSD   float64 `json:"cost_usd"`
-	P95ms     int64   `json:"p95_ms"`
-	Errors    int64   `json:"errors"`
+	Provider  string `json:"provider"`
+	Requests  int64  `json:"requests"`
+	TokensIn  int64  `json:"tokens_in"`
+	TokensOut int64  `json:"tokens_out"`
+	// TokensReasoning is the share of TokensOut the models spent thinking.
+	// TokensOut already counts those tokens — it is every token billed at the
+	// output rate — so this is a breakdown of that column, never one to add
+	// to it. Rows written before reasoning was accounted for read 0.
+	TokensReasoning int64   `json:"tokens_reasoning"`
+	CostUSD         float64 `json:"cost_usd"`
+	P95ms           int64   `json:"p95_ms"`
+	Errors          int64   `json:"errors"`
 }
 
 type modelUsage struct {
-	Alias         string  `json:"alias"`
-	Provider      string  `json:"provider"`
-	UpstreamModel string  `json:"upstream_model"`
-	Requests      int64   `json:"requests"`
-	TokensIn      int64   `json:"tokens_in"`
-	TokensOut     int64   `json:"tokens_out"`
-	CostUSD       float64 `json:"cost_usd"`
-	P95ms         int64   `json:"p95_ms"`
-	Errors        int64   `json:"errors"`
+	Alias           string  `json:"alias"`
+	Provider        string  `json:"provider"`
+	UpstreamModel   string  `json:"upstream_model"`
+	Requests        int64   `json:"requests"`
+	TokensIn        int64   `json:"tokens_in"`
+	TokensOut       int64   `json:"tokens_out"`
+	TokensReasoning int64   `json:"tokens_reasoning"`
+	CostUSD         float64 `json:"cost_usd"`
+	P95ms           int64   `json:"p95_ms"`
+	Errors          int64   `json:"errors"`
 }
 
 // breakdownProviderQuery and breakdownModelQuery are exported as consts so
@@ -40,13 +46,14 @@ const breakdownProviderQuery = `
 	       count(*),
 	       COALESCE(SUM(prompt_tokens), 0),
 	       COALESCE(SUM(completion_tokens), 0),
+	       COALESCE(SUM(reasoning_tokens), 0),
 	       COALESCE(SUM(cost_usd), 0),
 	       COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms), 0)::bigint,
 	       count(*) FILTER (WHERE status >= 400)
 	FROM usage_ledger
 	WHERE ts > now() - make_interval(hours => $1) AND provider_name <> '' %s
 	GROUP BY provider_name
-	ORDER BY 5 DESC, 2 DESC`
+	ORDER BY 6 DESC, 2 DESC`
 
 // The model query keeps rows with an empty provider_name: a request that
 // exhausted every target is ledgered without a provider, and hiding it would
@@ -56,13 +63,14 @@ const breakdownModelQuery = `
 	       count(*),
 	       COALESCE(SUM(prompt_tokens), 0),
 	       COALESCE(SUM(completion_tokens), 0),
+	       COALESCE(SUM(reasoning_tokens), 0),
 	       COALESCE(SUM(cost_usd), 0),
 	       COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms), 0)::bigint,
 	       count(*) FILTER (WHERE status >= 400)
 	FROM usage_ledger
 	WHERE ts > now() - make_interval(hours => $1) %s
 	GROUP BY alias, provider_name, upstream_model
-	ORDER BY 7 DESC, 4 DESC`
+	ORDER BY 8 DESC, 4 DESC`
 
 // usageBreakdown aggregates the ledger by provider and by model over the last
 // `hours`. where is an optional "AND user_id = $2" clause bound after $1,
@@ -78,7 +86,7 @@ func (s *Server) usageBreakdown(ctx context.Context, where string, hours int, wh
 	provs := []providerUsage{}
 	for rows.Next() {
 		var p providerUsage
-		if err := rows.Scan(&p.Provider, &p.Requests, &p.TokensIn, &p.TokensOut, &p.CostUSD, &p.P95ms, &p.Errors); err != nil {
+		if err := rows.Scan(&p.Provider, &p.Requests, &p.TokensIn, &p.TokensOut, &p.TokensReasoning, &p.CostUSD, &p.P95ms, &p.Errors); err != nil {
 			rows.Close()
 			return nil, nil, err
 		}
@@ -98,7 +106,7 @@ func (s *Server) usageBreakdown(ctx context.Context, where string, hours int, wh
 	models := []modelUsage{}
 	for rows.Next() {
 		var m modelUsage
-		if err := rows.Scan(&m.Alias, &m.Provider, &m.UpstreamModel, &m.Requests, &m.TokensIn, &m.TokensOut, &m.CostUSD, &m.P95ms, &m.Errors); err != nil {
+		if err := rows.Scan(&m.Alias, &m.Provider, &m.UpstreamModel, &m.Requests, &m.TokensIn, &m.TokensOut, &m.TokensReasoning, &m.CostUSD, &m.P95ms, &m.Errors); err != nil {
 			return nil, nil, err
 		}
 		models = append(models, m)
@@ -130,23 +138,24 @@ func (s *Server) handleAdminUsageBreakdown(w http.ResponseWriter, r *http.Reques
 }
 
 type recentRequest struct {
-	Ts            time.Time `json:"ts"`
-	Alias         string    `json:"alias"`
-	Provider      string    `json:"provider"`
-	UpstreamModel string    `json:"upstream_model"`
-	Status        int       `json:"status"`
-	LatencyMS     int64     `json:"latency_ms"`
-	TokensIn      int64     `json:"tokens_in"`
-	TokensOut     int64     `json:"tokens_out"`
-	CostUSD       float64   `json:"cost_usd"`
-	ErrorMsg      string    `json:"error"`
+	Ts              time.Time `json:"ts"`
+	Alias           string    `json:"alias"`
+	Provider        string    `json:"provider"`
+	UpstreamModel   string    `json:"upstream_model"`
+	Status          int       `json:"status"`
+	LatencyMS       int64     `json:"latency_ms"`
+	TokensIn        int64     `json:"tokens_in"`
+	TokensOut       int64     `json:"tokens_out"`
+	TokensReasoning int64     `json:"tokens_reasoning"`
+	CostUSD         float64   `json:"cost_usd"`
+	ErrorMsg        string    `json:"error"`
 }
 
 // recentRequestsQuery is exported so the integration test runs the exact
 // query the handler does.
 const recentRequestsQuery = `
 	SELECT ts, alias, provider_name, upstream_model, status, latency_ms,
-	       prompt_tokens, completion_tokens, cost_usd, error
+	       prompt_tokens, completion_tokens, reasoning_tokens, cost_usd, error
 	FROM usage_ledger
 	ORDER BY ts DESC
 	LIMIT $1`
@@ -179,7 +188,8 @@ func (s *Server) handleAdminUsageRecent(w http.ResponseWriter, r *http.Request) 
 	for rows.Next() {
 		var req recentRequest
 		if err := rows.Scan(&req.Ts, &req.Alias, &req.Provider, &req.UpstreamModel, &req.Status,
-			&req.LatencyMS, &req.TokensIn, &req.TokensOut, &req.CostUSD, &req.ErrorMsg); err != nil {
+			&req.LatencyMS, &req.TokensIn, &req.TokensOut, &req.TokensReasoning, &req.CostUSD,
+			&req.ErrorMsg); err != nil {
 			writeControlError(w, http.StatusInternalServerError, "failed to load recent requests")
 			return
 		}

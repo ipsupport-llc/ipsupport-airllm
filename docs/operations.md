@@ -259,7 +259,7 @@ All metrics are prefixed `airllm_`.
 | `airllm_http_requests_total` | counter | `ingress`, `status` | Every HTTP request, labeled by ingress (`openai` / `anthropic` / `control`) and HTTP status code |
 | `airllm_http_request_duration_seconds` | histogram | `ingress` | End-to-end request duration |
 | `airllm_component_duration_seconds` | histogram | `component` | Per-stage latency: `routing`, `limits`, `dlp`, `provider` |
-| `airllm_tokens_total` | counter | `ingress`, `direction` | Tokens metered; `direction` is `prompt` or `completion` |
+| `airllm_tokens_total` | counter | `ingress`, `direction` | Tokens metered; `direction` is `prompt`, `completion`, or `reasoning`. **`reasoning` is a share of `completion`, not a third quantity** — see [Reasoning tokens](#reasoning-tokens). Summing the directions double-counts thinking |
 | `airllm_cost_usd_total` | counter | `ingress` | Cost in USD metered per ingress |
 | `airllm_rate_limited_total` | counter | `reason` | 429 responses: `usage_limit` (rolling window) or `provider_busy` (all targets saturated) |
 | `airllm_dlp_model_requests_inflight` | gauge | — | In-flight BERT-NER sidecar scans (the saturation indicator for the DLP bottleneck) |
@@ -295,6 +295,81 @@ p95 latency/hour) without requiring Prometheus. They are fed by the
 
 - `GET /api/usage/series` — current user's data (last 24 h, hourly buckets).
 - `GET /api/admin/usage/series` — gateway-wide data (admin only).
+
+### Reasoning tokens
+
+A model that thinks before it answers spends tokens doing it, and every vendor
+bills them at the **output** rate. They do not agree on how to report them:
+
+- **OpenAI-shaped vendors** count them inside `completion_tokens` and break the
+  share out under `usage.completion_tokens_details.reasoning_tokens`.
+- **Vertex AI's OpenAI-compatible surface** leaves them out of
+  `completion_tokens` entirely. They appear only as the gap between
+  `total_tokens` and the two parts — a response measured live reported
+  `prompt_tokens 10, completion_tokens 30, total_tokens 186`.
+
+The gateway reconciles both on decode (`llm.Usage.Normalize`). Afterwards
+`completion_tokens` is **everything billed at the output rate**, thinking
+included, and the reasoning share is carried separately — spelled `reasoning`
+everywhere it surfaces:
+
+| Where | Name |
+|-------|------|
+| Ledger | `usage_ledger.reasoning_tokens` |
+| Breakdown / recent-requests API | `tokens_reasoning` |
+| Console | shown in the Tokens column as `176 (146 reasoning)` |
+| Prometheus | `airllm_tokens_total{direction="reasoning"}` |
+| Request log | `reasoning_tokens`, present only when non-zero |
+| Client response | `usage.completion_tokens_details.reasoning_tokens`, emitted only when non-zero |
+
+Everywhere it appears it is a **breakdown of the output count, never an
+addition to it**. Cost and the rolling per-key caps read prompt + completion, so
+they are correct for a reasoning model without a rule of their own.
+
+Two consequences worth knowing:
+
+- **Ledger rows written before this shipped read `reasoning_tokens = 0`, and
+  that is not the same as "did no thinking".** Vertex rows from that period
+  under-report both their output tokens and their cost, and no backfill can
+  recover the difference: the `total_tokens` the gap is computed from was never
+  stored. The whole affected window is small and closed — every Vertex row ever
+  written falls between 2026-09-04 19:18 and 22:17 UTC: 38 requests,
+  5 686 prompt / 514 completion tokens, `$0.002992`. The one call whose
+  `total_tokens` was observed by hand spent 146 thinking tokens against 30
+  visible ones; applying that ratio puts the unrecorded output at roughly
+  2 500 tokens, or about `$0.006` more at $2.50 per 1M — so the true bill for
+  that window is near `$0.009`, **about 3x what the ledger says**. The single
+  call was under-reported 5.7x because it had a 10-token prompt and its bill
+  was almost all output; across the window the 5 686 prompt tokens dominate,
+  and those were always counted correctly, which is why the aggregate multiple
+  is lower than the per-call one. Six of the 38 rows recorded zero completion
+  tokens while certainly having thought, so 3x is a floor rather than a
+  midpoint. Read pre-cutover Vertex numbers as a lower bound, not a
+  measurement.
+- **A small `max_tokens` is spent on thinking first.** A Gemini 2.5 Flash call
+  capped at 32 tokens came back with empty content and `completion_tokens 0`
+  against `total_tokens 42`: the whole cap went on thinking. That is now
+  visible in the ledger rather than invisible.
+
+### Vertex AI prices
+
+Google publishes no machine-readable price list for these models, so the
+`pricing` rows are entered by hand. Re-checked 2026-09-05 against Google's
+published rates, per 1M tokens:
+
+| Model | Input | Output (thinking included) |
+|-------|-------|----------------------------|
+| `google/gemini-2.5-flash` | $0.30 | $2.50 |
+| `google/gemini-2.5-flash-lite` | $0.10 | $0.40 |
+| `google/gemini-2.5-pro` | $1.25 | $10.00 |
+
+**Known gap:** Gemini 2.5 Pro is billed at $2.50 / $15.00 for prompts over
+200 000 tokens, and the pricing table has one flat rate per model with no
+context tier — so a very large Pro prompt is priced at half what it costs.
+Flash and Flash-Lite have no such tier and are exact. The curated model list
+also offers `google/gemini-3-flash` and `google/gemini-3-pro`, which have **no
+price rows at all**; an alias pointed at either meters tokens but costs $0
+until rows are added.
 
 ## Scaling the DLP BERT sidecar
 

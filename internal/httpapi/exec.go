@@ -78,19 +78,33 @@ func limitMessage(d limits.Decision) string {
 
 // finalizeUsage computes cost, fills the ledger entry, records it, and (on a
 // successful request with non-zero usage) increments the rolling counters.
-func (s *Server) finalizeUsage(ctx context.Context, entry ledger.Entry, keyID, upstreamModel string, prompt, completion int) {
-	entry.PromptTokens = prompt
-	entry.CompletionTokens = completion
-	costMicro := s.pricing.CostMicroUSD(entry.ProviderName, upstreamModel, prompt, completion)
+//
+// It takes the whole llm.Usage rather than a pair of counts because that type
+// carries the invariant the money depends on: CompletionTokens is everything
+// billed at the output rate, thinking included, and ReasoningTokens is the
+// share of it that was thinking. Cost and the rolling caps therefore read the
+// same two numbers they always did and are right for a reasoning model without
+// knowing what one is; the reasoning count rides along for the ledger, the
+// metrics and the log line, where an operator can see the split.
+func (s *Server) finalizeUsage(ctx context.Context, entry ledger.Entry, keyID, upstreamModel string, u llm.Usage) {
+	entry.PromptTokens = u.PromptTokens
+	entry.CompletionTokens = u.CompletionTokens
+	entry.ReasoningTokens = u.ReasoningTokens
+	costMicro := s.pricing.CostMicroUSD(entry.ProviderName, upstreamModel, u.PromptTokens, u.CompletionTokens)
 	entry.CostUSD = float64(costMicro) / 1e6
 	s.ledger.Record(ctx, entry)
-	s.metrics.RecordUsage(entry.IngressProtocol, prompt, completion, entry.CostUSD)
+	s.metrics.RecordUsage(entry.IngressProtocol, u, entry.CostUSD)
 
 	logAttrs := []any{
 		"alias", entry.Alias, "provider", entry.ProviderName, "upstream_model", upstreamModel,
 		"ingress", entry.IngressProtocol, "status", entry.Status,
-		"prompt_tokens", prompt, "completion_tokens", completion,
+		"prompt_tokens", u.PromptTokens, "completion_tokens", u.CompletionTokens,
 		"cost_usd", entry.CostUSD, "latency_ms", entry.LatencyMS,
+	}
+	// Logged only when there is one, so the shape of every existing log line
+	// is untouched and a search for the attribute finds reasoning traffic.
+	if u.ReasoningTokens > 0 {
+		logAttrs = append(logAttrs, "reasoning_tokens", u.ReasoningTokens)
 	}
 	if entry.ErrorMsg != "" {
 		slog.Error("request completed", append(logAttrs, "error", entry.ErrorMsg)...)
@@ -98,8 +112,8 @@ func (s *Server) finalizeUsage(ctx context.Context, entry ledger.Entry, keyID, u
 		slog.Info("request completed", logAttrs...)
 	}
 
-	if entry.Status == http.StatusOK && (prompt > 0 || completion > 0) {
-		if err := s.limiter.Add(ctx, keyID, int64(prompt+completion), costMicro, 0, 0); err != nil {
+	if entry.Status == http.StatusOK && (u.PromptTokens > 0 || u.CompletionTokens > 0) {
+		if err := s.limiter.Add(ctx, keyID, u.BilledTokens(), costMicro, 0, 0); err != nil {
 			slog.Error("limiter add failed", "err", err)
 		}
 	}
@@ -121,7 +135,7 @@ func (s *Server) finalizeUsage(ctx context.Context, entry ledger.Entry, keyID, u
 func (s *Server) finalizeAudioUsage(ctx context.Context, entry ledger.Entry, keyID string, costMicro, audioSeconds, ttsChars int64) {
 	entry.CostUSD = float64(costMicro) / 1e6
 	s.ledger.Record(ctx, entry)
-	s.metrics.RecordUsage(entry.IngressProtocol, 0, 0, entry.CostUSD)
+	s.metrics.RecordUsage(entry.IngressProtocol, llm.Usage{}, entry.CostUSD)
 
 	logAttrs := []any{
 		"alias", entry.Alias, "provider", entry.ProviderName, "upstream_model", entry.UpstreamModel,

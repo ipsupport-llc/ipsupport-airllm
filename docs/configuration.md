@@ -246,7 +246,19 @@ under **Admin → Pricing**, and spell each model exactly as the alias target
 spells it: cost is looked up by the target's `upstream_model` string, before
 the publisher prefix is normalised for the wire. A target spelled
 `gemini-2.5-pro` and priced as `google/gemini-2.5-pro` therefore costs nothing.
-Spelling both with the prefix is the convention.
+Spelling both with the prefix is the convention. The rows in use, and the two
+gaps in them, are listed under
+[Operations → Vertex AI prices](operations.md#vertex-ai-prices).
+
+**Thinking tokens are billed and are now counted.** Gemini 2.5 models think by
+default, Google bills the thinking at the output rate, and its
+OpenAI-compatible surface reports it nowhere except inside `total_tokens`. The
+gateway folds that difference into the completion count on decode, so cost and
+the rolling per-key caps see it; the thinking share is recorded separately —
+see [Operations → Reasoning tokens](operations.md#reasoning-tokens). Two
+practical consequences: a Vertex tier costs meaningfully more per request than
+its unit price suggests, and a small `max_tokens` can be spent entirely on
+thinking before any text is produced.
 
 ## Per-role policy
 

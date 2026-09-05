@@ -687,6 +687,16 @@ async function adminUsage(c) {
     breakdownTables(b.data || {}) + recentRequestsTable((r.data || {}).requests || []);
 }
 
+// tokensOut renders an output token count with the reasoning share in
+// parentheses when there is one. The share is PART OF the output count, not an
+// extra alongside it — Google and OpenAI both bill thinking at the output rate
+// — so it reads as an annotation rather than a second number, and a row from a
+// model that did not think looks exactly as it always did.
+function tokensOut(out, reasoning) {
+  const tok = (n) => (+n || 0).toLocaleString("en-US");
+  return +reasoning > 0 ? `${tok(out)} (${tok(reasoning)} reasoning)` : tok(out);
+}
+
 // recentRequestsTable renders the last N ledger rows, newest first — a raw
 // per-request tail (status, latency, error) alongside the aggregates above.
 function recentRequestsTable(reqs) {
@@ -698,7 +708,7 @@ function recentRequestsTable(reqs) {
     <td class="mono">${esc(x.upstream_model)}</td>
     <td>${x.status}</td>
     <td>${x.latency_ms} ms</td>
-    <td class="mono">${tok(x.tokens_in)} / ${tok(x.tokens_out)}</td>
+    <td class="mono">${tok(x.tokens_in)} / ${tokensOut(x.tokens_out, x.tokens_reasoning)}</td>
     <td>$${(+x.cost_usd).toFixed(4)}</td>
     <td class="mono">${esc(x.error || "")}</td></tr>`);
   return panelTable("Recent requests",
@@ -1311,11 +1321,11 @@ function breakdownTables(d) {
   const tok = (n) => (+n || 0).toLocaleString("en-US");
   const provRows = (d.providers || []).map((p) => `<tr>
     <td>${esc(p.provider)}</td><td>${p.requests}</td>
-    <td class="mono">${tok(p.tokens_in)} / ${tok(p.tokens_out)}</td>
+    <td class="mono">${tok(p.tokens_in)} / ${tokensOut(p.tokens_out, p.tokens_reasoning)}</td>
     <td>$${(+p.cost_usd).toFixed(4)}</td><td>${p.p95_ms} ms</td><td>${p.errors}</td></tr>`);
   const modelRows = (d.models || []).map((m) => `<tr>
     <td class="mono">${esc(m.alias)}</td><td>${esc(m.provider)}</td><td class="mono">${esc(m.upstream_model)}</td>
-    <td>${m.requests}</td><td class="mono">${tok(m.tokens_in)} / ${tok(m.tokens_out)}</td>
+    <td>${m.requests}</td><td class="mono">${tok(m.tokens_in)} / ${tokensOut(m.tokens_out, m.tokens_reasoning)}</td>
     <td>$${(+m.cost_usd).toFixed(4)}</td>
     <td>${m.p95_ms} ms</td><td>${m.errors}</td></tr>`);
   const empty = (title) => `<div class="panel">

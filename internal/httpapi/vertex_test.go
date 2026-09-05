@@ -12,6 +12,7 @@ import (
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/anthropic"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/pricing"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
 )
@@ -279,5 +280,128 @@ func TestVertexTokenSourceFailureFallsBackToTheNextTier(t *testing.T) {
 	}
 	if target.Provider != "mock-ok" {
 		t.Errorf("target.Provider = %q, want mock-ok", target.Provider)
+	}
+}
+
+// vertexUnderReportedUsage is the usage object Vertex AI returned on the live
+// default path on 2026-09-04: 10 and 30 do not add up to 186. The missing 146
+// are thinking tokens, which Google bills at the output rate and its
+// OpenAI-compatible surface reports nowhere else. Before ticket 10 the gateway
+// read two of the three numbers and charged for 40 tokens out of 186.
+const vertexUnderReportedUsage = `"usage":{"prompt_tokens":10,"completion_tokens":30,"total_tokens":186}`
+
+// vertexFlashPrices is the price table entered by hand for this model — $0.30
+// per 1M in, $2.50 per 1M out — re-checked on 2026-09-05 against Google's
+// published rates.
+func vertexFlashPrices() *pricing.Table {
+	t := pricing.New()
+	t.Set("vertex", "gemini-2.5-flash", pricing.Price{InputPer1M: 0.30, OutputPer1M: 2.50, Unit: "tokens"})
+	return t
+}
+
+// TestVertexChatAccountsForReasoningTokens drives the measured payload through
+// routing and the real provider and asserts on the three things the tokens
+// were missing from: the metered counts, the cost, and the quantity charged
+// against the key's rolling caps.
+func TestVertexChatAccountsForReasoningTokens(t *testing.T) {
+	up, _ := fakeVertex(t, http.StatusOK, `{
+		"id":"c1","model":"google/gemini-2.5-flash",
+		"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],
+		`+vertexUnderReportedUsage+`}`)
+
+	s := newRunChatTestServer(t, providers.NewVertex("vertex", up.URL, stubTokens{token: "t"}))
+	resp, target, err := s.runChat(context.Background(), vertexOnlyPlan(),
+		llm.ChatRequest{Messages: []llm.Message{{Role: "user", Content: "hi"}}})
+	if err != nil {
+		t.Fatalf("runChat: %v", err)
+	}
+	if target.Provider != "vertex" {
+		t.Fatalf("target.Provider = %q, want vertex", target.Provider)
+	}
+
+	want := llm.Usage{PromptTokens: 10, CompletionTokens: 176, TotalTokens: 186, ReasoningTokens: 146}
+	if resp.Usage != want {
+		t.Fatalf("metered usage = %+v, want %+v — the 146 tokens between the parts and the total are billed output",
+			resp.Usage, want)
+	}
+
+	// Cost, at the rate Google actually bills those tokens. 10 in and 176 out
+	// is $0.000443; reading completion_tokens alone gave $0.000078, which is
+	// the 5.7x under-reporting ticket 10 was filed for.
+	const wantMicro = 443
+	if got := vertexFlashPrices().CostMicroUSD("vertex", "gemini-2.5-flash",
+		resp.Usage.PromptTokens, resp.Usage.CompletionTokens); got != wantMicro {
+		t.Errorf("cost = %d micro-USD, want %d", got, wantMicro)
+	}
+
+	// And against the key's rolling token caps, which saw 40 of these 186.
+	if got := resp.Usage.BilledTokens(); got != 186 {
+		t.Errorf("billed tokens = %d, want 186", got)
+	}
+}
+
+// TestVertexStreamAccountsForReasoningTokens is the same payload on the
+// streaming path, where the coalescing loop picks one of several cumulative
+// reports: the one it picks must be normalized too.
+func TestVertexStreamAccountsForReasoningTokens(t *testing.T) {
+	up := fakeVertexStream(t,
+		`{"choices":[{"delta":{"role":"assistant"}}],"usage":{"prompt_tokens":10,"completion_tokens":0,"total_tokens":98}}`,
+		`{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],`+vertexUnderReportedUsage+`}`,
+		"[DONE]",
+	)
+	s := newRunChatTestServer(t, providers.NewVertex("vertex", up.URL, stubTokens{token: "t"}))
+
+	var chunks []llm.StreamChunk
+	sink := &fakeStreamSink{onChunk: func(c llm.StreamChunk) { chunks = append(chunks, c) }}
+	_, usage, started, err := s.runStream(context.Background(), vertexOnlyPlan(),
+		llm.ChatRequest{Messages: []llm.Message{{Role: "user", Content: "hi"}}}, sink)
+	if err != nil {
+		t.Fatalf("runStream: %v", err)
+	}
+	if !started {
+		t.Fatal("the stream never started")
+	}
+
+	want := llm.Usage{PromptTokens: 10, CompletionTokens: 176, TotalTokens: 186, ReasoningTokens: 146}
+	if usage != want {
+		t.Fatalf("metered usage = %+v, want %+v", usage, want)
+	}
+
+	// The client still sees exactly one usage report, and it carries the
+	// normalized counts rather than the vendor's inconsistent ones.
+	var reports []llm.Usage
+	for _, c := range chunks {
+		if c.Usage != nil {
+			reports = append(reports, *c.Usage)
+		}
+	}
+	if len(reports) != 1 {
+		t.Fatalf("client saw %d usage reports, want exactly 1: %+v", len(reports), reports)
+	}
+	if reports[0] != want {
+		t.Errorf("client usage = %+v, want %+v", reports[0], want)
+	}
+}
+
+// TestVertexUsageWithoutReasoningIsUnchanged is the other half of the
+// contract: a response whose parts sum to its total must be accounted exactly
+// as it was before reasoning existed, with no reasoning count appearing from
+// nowhere.
+func TestVertexUsageWithoutReasoningIsUnchanged(t *testing.T) {
+	up, _ := fakeVertex(t, http.StatusOK, `{
+		"id":"c1","model":"google/gemini-2.5-flash",
+		"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],
+		"usage":{"prompt_tokens":42,"completion_tokens":11,"total_tokens":53}}`)
+
+	s := newRunChatTestServer(t, providers.NewVertex("vertex", up.URL, stubTokens{token: "t"}))
+	resp, _, err := s.runChat(context.Background(), vertexOnlyPlan(),
+		llm.ChatRequest{Messages: []llm.Message{{Role: "user", Content: "hi"}}})
+	if err != nil {
+		t.Fatalf("runChat: %v", err)
+	}
+
+	want := llm.Usage{PromptTokens: 42, CompletionTokens: 11, TotalTokens: 53}
+	if resp.Usage != want {
+		t.Errorf("usage = %+v, want %+v unchanged", resp.Usage, want)
 	}
 }
