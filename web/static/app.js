@@ -1034,9 +1034,8 @@ async function editAlias(c, a) {
   // Upstream model suggestions: fetched per provider, memoized (as an
   // in-flight promise, so concurrent requests for the same provider share
   // one fetch) for the lifetime of this modal. Failure or unsupported ->
-  // empty list; the input stays free-text either way.
+  // empty list; the model control falls back to free text either way.
   const modelLists = {};
-  let rowSeq = 0;
   function fetchModels(prov) {
     if (!(prov in modelLists)) {
       modelLists[prov] = api("GET", `/api/admin/providers/${encodeURIComponent(prov)}/models`)
@@ -1045,12 +1044,28 @@ async function editAlias(c, a) {
     }
     return modelLists[prov];
   }
-  async function loadModels(prov, dl, provSel) {
+  // renderModelControl fills slot with a real <select class="t-model"> when
+  // the provider's catalog is non-empty, or a free-text <input class="t-model">
+  // otherwise — a datalist-based free-text input looks the same on desktop
+  // but its suggestion dropdown is unreliable on mobile Safari, effectively
+  // making model selection impossible on a phone. Reading .t-model's .value
+  // works identically for either element, so the save path below never
+  // needs to know which one is present.
+  async function renderModelControl(slot, provSel, current) {
+    const prov = provSel.value;
     const models = await fetchModels(prov);
     // Stale guard: the user may have switched provider again while this
-    // fetch was in flight — never overwrite a newer selection's list.
-    if (provSel && provSel.value !== prov) return;
-    dl.innerHTML = models.map((m) => `<option value="${esc(m)}">`).join("");
+    // fetch was in flight — never overwrite a newer selection's control.
+    if (provSel.value !== prov) return;
+    if (models.length === 0) {
+      slot.innerHTML = `<input class="t-model" placeholder="upstream model" value="${esc(current)}" style="width:100%" />`;
+      return;
+    }
+    // Keep `current` selectable even if the catalog doesn't list it — an
+    // existing alias may point at a model since removed from the catalog.
+    const opts = current && !models.includes(current) ? [current, ...models] : models;
+    slot.innerHTML = `<select class="t-model" style="width:100%">${opts.map((m) =>
+      `<option value="${esc(m)}" ${m === current ? "selected" : ""}>${esc(m)}</option>`).join("")}</select>`;
   }
   function addRow(t) {
     const row = document.createElement("div");
@@ -1059,8 +1074,7 @@ async function editAlias(c, a) {
     row.innerHTML = `
       <input class="t-prio" type="number" min="0" value="${Number(t.priority) || 0}" title="priority / tier (same number = load-balanced)" style="width:64px" />
       <select class="t-prov" style="width:auto">${provOpts(t.provider)}</select>
-      <input class="t-model" list="al-models-${rowSeq}" placeholder="upstream model" value="${esc(t.upstream_model || "")}" style="flex:1;min-width:120px" />
-      <datalist id="al-models-${rowSeq}"></datalist>
+      <span class="t-model-slot" style="flex:1;min-width:120px;display:inline-flex"></span>
       <select class="t-proto" style="width:auto">
         <option ${t.upstream_protocol !== "anthropic" ? "selected" : ""}>openai</option>
         <option ${t.upstream_protocol === "anthropic" ? "selected" : ""}>anthropic</option>
@@ -1068,16 +1082,14 @@ async function editAlias(c, a) {
       <input class="t-label" placeholder="label (X-Backend-Model)" value="${esc(t.display_label || "")}" style="width:150px" />
       <button type="button" class="btn danger sm t-del" title="remove">×</button>`;
     row.querySelector(".t-del").addEventListener("click", () => row.remove());
-    rowSeq++;
-    const dl = row.querySelector("datalist");
+    const slot = row.querySelector(".t-model-slot");
     const provSel = row.querySelector(".t-prov");
-    loadModels(provSel.value, dl, provSel);
+    renderModelControl(slot, provSel, t.upstream_model || "");
     provSel.addEventListener("change", () => {
-      // Clear the stale model name: it belongs to the previous provider, and
-      // the browser filters datalist suggestions by the input's text — with
-      // the old name left in place the refreshed list appears empty.
-      row.querySelector(".t-model").value = "";
-      loadModels(provSel.value, dl, provSel);
+      // Switching provider invalidates the previous model selection —
+      // models are provider-specific — so the new control always starts
+      // with no prior value.
+      renderModelControl(slot, provSel, "");
     });
     tdiv.appendChild(row);
   }

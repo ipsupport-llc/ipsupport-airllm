@@ -379,7 +379,13 @@ input[type="checkbox"] { accent-color: var(--accent); }
   position: fixed; inset: 0;
   background: rgba(10, 8, 6, 0.65);
   backdrop-filter: blur(3px);
-  display: grid; place-items: center;
+  /* `safe center` falls back to start-alignment instead of overflowing off
+     both edges when the modal is taller than the viewport (common on short
+     mobile screens with several alias targets) — combined with overflow-y
+     below, that's what keeps Save/Cancel reachable instead of permanently
+     off-screen with no scroll able to reach them. */
+  display: grid; place-items: safe center;
+  overflow-y: auto;
   padding: 1rem; z-index: 50;
   animation: fade 0.15s ease-out both;
 }
@@ -437,4 +443,12 @@ input[type="checkbox"] { accent-color: var(--accent); }
   .sidebar-foot { margin: 0 0 0 auto; border: none; }
   /* Wide tables scroll horizontally instead of being clipped by the panel. */
   .panel table { display: block; overflow-x: auto; white-space: nowrap; min-width: 100%; }
+  /* Otherwise a scrollable table's cut-off right edge looks identical to
+     content that's just missing — a fade hints there's more to swipe to. */
+  .panel { position: relative; }
+  .panel:has(table)::after {
+    content: ""; position: absolute; top: 0; right: 0; bottom: 0; width: 24px;
+    background: linear-gradient(to right, transparent, var(--bg-elev));
+    pointer-events: none;
+  }
 }
