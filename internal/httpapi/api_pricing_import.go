@@ -43,24 +43,38 @@ func (s *Server) handleAdminPricingImport(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer tx.Rollback(r.Context())
+	// A catalog publishes flat rates and knows nothing of context tiers, so the
+	// upsert leaves the tier columns alone — a hand-entered threshold survives
+	// an import. RETURNING reads back what the row ends up holding, so the
+	// in-memory table below is set from the stored row rather than from the
+	// catalog entry, which would drop that threshold until the next reload.
+	type importedPrice struct {
+		model string
+		price pricing.Price
+	}
+	stored := make([]importedPrice, 0, len(prices))
 	for _, mp := range prices {
-		if _, err := tx.Exec(r.Context(), `
+		p := pricing.Price{InputPer1M: mp.InputPer1M, OutputPer1M: mp.OutputPer1M}
+		if err := tx.QueryRow(r.Context(), `
 			INSERT INTO pricing (provider, model, input_per_1m, output_per_1m)
 			VALUES ($1, $2, $3, $4)
 			ON CONFLICT (provider, model) DO UPDATE SET
-				input_per_1m = EXCLUDED.input_per_1m, output_per_1m = EXCLUDED.output_per_1m, updated_at = now()`,
-			name, mp.ID, mp.InputPer1M, mp.OutputPer1M); err != nil {
+				input_per_1m = EXCLUDED.input_per_1m, output_per_1m = EXCLUDED.output_per_1m, updated_at = now()
+			RETURNING unit, context_threshold, input_per_1m_above, output_per_1m_above`,
+			name, mp.ID, mp.InputPer1M, mp.OutputPer1M).
+			Scan(&p.Unit, &p.ContextThreshold, &p.InputPer1MAbove, &p.OutputPer1MAbove); err != nil {
 			writeControlError(w, http.StatusInternalServerError, "failed to import pricing")
 			return
 		}
+		stored = append(stored, importedPrice{mp.ID, p})
 	}
 	if err := tx.Commit(r.Context()); err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to import pricing")
 		return
 	}
 
-	for _, mp := range prices {
-		s.pricing.Set(name, mp.ID, pricing.Price{InputPer1M: mp.InputPer1M, OutputPer1M: mp.OutputPer1M})
+	for _, row := range stored {
+		s.pricing.Set(name, row.model, row.price)
 	}
 	s.audit(r.Context(), sess.principal.Subject, "pricing.import", name, map[string]int{"imported": len(prices)})
 	writeJSON(w, http.StatusOK, map[string]int{"imported": len(prices)})

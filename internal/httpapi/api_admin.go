@@ -536,25 +536,39 @@ func (s *Server) handleAdminDeleteAlias(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
+// priceRow is the wire shape of a pricing row, shared by the list and save
+// handlers so the two cannot drift. The context-tier fields are always present:
+// an untiered row reports a zero threshold, which is what it is.
+//
+// Model is the row's identity and the save path takes it from the URL, so a
+// body carrying a different one is checked rather than quietly discarded.
+type priceRow struct {
+	Provider    string  `json:"provider"`
+	Model       string  `json:"model"`
+	InputPer1M  float64 `json:"input_per_1m"`
+	OutputPer1M float64 `json:"output_per_1m"`
+	Unit        string  `json:"unit"`
+
+	ContextThreshold int     `json:"context_threshold"`
+	InputPer1MAbove  float64 `json:"input_per_1m_above"`
+	OutputPer1MAbove float64 `json:"output_per_1m_above"`
+}
+
 func (s *Server) handleAdminPricing(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.st.PG.Query(r.Context(),
-		`SELECT provider, model, input_per_1m, output_per_1m, unit FROM pricing ORDER BY provider, model`)
+		`SELECT provider, model, input_per_1m, output_per_1m, unit,
+			context_threshold, input_per_1m_above, output_per_1m_above
+		 FROM pricing ORDER BY provider, model`)
 	if err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to list pricing")
 		return
 	}
 	defer rows.Close()
-	type price struct {
-		Provider    string  `json:"provider"`
-		Model       string  `json:"model"`
-		InputPer1M  float64 `json:"input_per_1m"`
-		OutputPer1M float64 `json:"output_per_1m"`
-		Unit        string  `json:"unit"`
-	}
-	out := []price{}
+	out := []priceRow{}
 	for rows.Next() {
-		var p price
-		if err := rows.Scan(&p.Provider, &p.Model, &p.InputPer1M, &p.OutputPer1M, &p.Unit); err != nil {
+		var p priceRow
+		if err := rows.Scan(&p.Provider, &p.Model, &p.InputPer1M, &p.OutputPer1M, &p.Unit,
+			&p.ContextThreshold, &p.InputPer1MAbove, &p.OutputPer1MAbove); err != nil {
 			writeControlError(w, http.StatusInternalServerError, "failed to read pricing")
 			return
 		}
@@ -566,31 +580,45 @@ func (s *Server) handleAdminPricing(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAdminPutPricing(w http.ResponseWriter, r *http.Request) {
 	sess, _ := sessionFrom(r.Context())
 	model := r.PathValue("model")
-	var body struct {
-		Provider    string  `json:"provider"`
-		InputPer1M  float64 `json:"input_per_1m"`
-		OutputPer1M float64 `json:"output_per_1m"`
-		Unit        string  `json:"unit"`
-	}
+	var body priceRow
 	if err := decodeJSON(r, &body); err != nil {
 		writeControlError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
+	if body.Model != "" && body.Model != model {
+		writeControlError(w, http.StatusBadRequest, "model in body does not match the URL")
+		return
+	}
 	if body.Unit == "" {
-		body.Unit = "tokens"
+		body.Unit = pricing.UnitTokens
+	}
+	p := pricing.Price{
+		InputPer1M: body.InputPer1M, OutputPer1M: body.OutputPer1M, Unit: body.Unit,
+		ContextThreshold: body.ContextThreshold,
+		InputPer1MAbove:  body.InputPer1MAbove, OutputPer1MAbove: body.OutputPer1MAbove,
+	}
+	// Rejected here rather than stored and discovered on a bill: a threshold
+	// with a missing rate above it would price a long prompt at nothing.
+	if err := p.Validate(); err != nil {
+		writeControlError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	_, err := s.st.PG.Exec(r.Context(), `
-		INSERT INTO pricing (provider, model, input_per_1m, output_per_1m, unit)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO pricing (provider, model, input_per_1m, output_per_1m, unit,
+			context_threshold, input_per_1m_above, output_per_1m_above)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (provider, model) DO UPDATE SET
 			input_per_1m = EXCLUDED.input_per_1m, output_per_1m = EXCLUDED.output_per_1m,
-			unit = EXCLUDED.unit, updated_at = now()`,
-		body.Provider, model, body.InputPer1M, body.OutputPer1M, body.Unit)
+			unit = EXCLUDED.unit, context_threshold = EXCLUDED.context_threshold,
+			input_per_1m_above = EXCLUDED.input_per_1m_above,
+			output_per_1m_above = EXCLUDED.output_per_1m_above, updated_at = now()`,
+		body.Provider, model, body.InputPer1M, body.OutputPer1M, body.Unit,
+		body.ContextThreshold, body.InputPer1MAbove, body.OutputPer1MAbove)
 	if err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to save pricing")
 		return
 	}
-	s.pricing.Set(body.Provider, model, pricing.Price{InputPer1M: body.InputPer1M, OutputPer1M: body.OutputPer1M, Unit: body.Unit})
+	s.pricing.Set(body.Provider, model, p)
 	s.audit(r.Context(), sess.principal.Subject, "pricing.put", model, body)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
 }
