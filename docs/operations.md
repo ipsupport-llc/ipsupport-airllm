@@ -371,19 +371,27 @@ Google publishes no machine-readable price list for these models, so the
 `pricing` rows are entered by hand. Re-checked 2026-09-05 against Google's
 published rates, per 1M tokens:
 
-| Model | Input | Output (thinking included) |
-|-------|-------|----------------------------|
-| `google/gemini-2.5-flash` | $0.30 | $2.50 |
-| `google/gemini-2.5-flash-lite` | $0.10 | $0.40 |
-| `google/gemini-2.5-pro` | $1.25 | $10.00 |
+| Model | Input | Output (thinking included) | Above 200 000 prompt tokens |
+|-------|-------|----------------------------|-----------------------------|
+| `google/gemini-2.5-flash` | $0.30 | $2.50 | no tier |
+| `google/gemini-2.5-flash-lite` | $0.10 | $0.40 | no tier |
+| `google/gemini-2.5-pro` | $1.25 | $10.00 | $2.50 / $15.00 |
 
-**Known gap:** Gemini 2.5 Pro is billed at $2.50 / $15.00 for prompts over
-200 000 tokens, and the pricing table has one flat rate per model with no
-context tier — so a very large Pro prompt is priced at half what it costs.
-Flash and Flash-Lite have no such tier and are exact. The curated model list
-also offers `google/gemini-3-flash` and `google/gemini-3-pro`, which have **no
-price rows at all**; an alias pointed at either meters tokens but costs $0
-until rows are added.
+Pro's second pair of rates is entered on the row itself as a
+[long-prompt tier](configuration.md#long-prompt-price-tiers) — the whole call
+reprices, output included, once the prompt passes 200 000 tokens. Flash and
+Flash-Lite have no such tier and are flat at any prompt size.
+
+**Known gap:** the curated model list also offers `google/gemini-3-flash` and
+`google/gemini-3-pro`, which have **no price rows at all** — an alias pointed
+at either meters tokens but costs $0 — and neither id is verified against what
+Vertex actually serves, so pricing them as they are spelled today would be
+worse than leaving them unpriced. Which Gemini 3 models this instance should
+offer is an open decision. What is settled is that the family is tiered the
+same way 2.5 Pro is, so whichever ids that list lands on want tiered rows
+rather than flat ones: Gemini **3.1** Pro — a distinct model from the
+`gemini-3-pro` in the list — publishes $2.00 / $12.00 up to 200 000 prompt
+tokens and $4.00 / $18.00 above it (read 2026-09-08).
 
 ## Scaling the DLP BERT sidecar
 

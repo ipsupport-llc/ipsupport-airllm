@@ -923,9 +923,10 @@ async function adminPricing(c) {
       <select id="import-provider">${providers.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("")}</select>
       <button class="btn ghost sm" id="import-prices">Import prices</button>
     </div>` +
-    panelTable("Pricing", ["Provider", "Model", "Unit", "Input", "Output", ""],
+    panelTable("Pricing", ["Provider", "Model", "Unit", "Input", "Output", "Long-prompt tier", ""],
       ps.map((p) => `<tr><td class="mono">${esc(p.provider) || "(any)"}</td><td class="mono">${esc(p.model)}</td>
         <td>${esc(p.unit || "tokens")}</td><td>${p.input_per_1m}</td><td>${p.output_per_1m}</td>
+        <td class="mono">${esc(contextTierLabel(p))}</td>
         <td style="text-align:right"><button class="btn ghost sm" data-edit='${esc(JSON.stringify(p))}'>Edit</button></td></tr>`));
   $("#new-price").addEventListener("click", () => editPrice(c, {}));
   document.querySelectorAll("[data-edit]").forEach((b) =>
@@ -943,10 +944,23 @@ async function adminPricing(c) {
   });
 }
 
+// A vendor that charges more above a context threshold (Gemini 2.5 Pro doubles
+// above 200k prompt tokens) is one row with a breakpoint on it, so the list has
+// to say so — otherwise the row's visible rates are half the story.
+function contextTierLabel(p) {
+  const t = Number(p.context_threshold) || 0;
+  if (t <= 0) return "—";
+  return `> ${t.toLocaleString("en-US")} → ${p.input_per_1m_above} / ${p.output_per_1m_above}`;
+}
+
 async function editPrice(c, p) {
   const pr = await api("GET", "/api/admin/providers");
   const providers = ((pr.data && pr.data.providers) || []).map((x) => x.name);
   const providerOptions = [{ value: "", label: "(any)" }, ...providers.map((n) => ({ value: n, label: n }))];
+  // The two above-threshold rates are only meaningful on a token row that has a
+  // breakpoint, so they appear once one is entered rather than sitting empty on
+  // every audio row.
+  const tiered = (v) => v.unit === "tokens" && (Number(v.context_threshold) || 0) > 0;
   modalForm(p.model ? `Edit price ${p.model}` : "New price", [
     { name: "model", label: "Upstream model", value: p.model || "", disabled: !!p.model },
     { name: "provider", label: "Provider", type: "select", options: providerOptions, value: p.provider || "", disabled: !!p.model },
@@ -954,9 +968,25 @@ async function editPrice(c, p) {
       options: ["tokens", "audio_second", "text_char"], value: p.unit || "tokens" },
     { name: "input_per_1m", label: "Input $ / 1M", value: p.input_per_1m ?? 0 },
     { name: "output_per_1m", label: "Output $ / 1M", value: p.output_per_1m ?? 0 },
+    { name: "context_threshold", label: "Long-prompt threshold (prompt tokens, 0 = none)",
+      value: p.context_threshold ?? 0, showWhen: (v) => v.unit === "tokens" },
+    { name: "input_per_1m_above", label: "Input $ / 1M above the threshold",
+      value: p.input_per_1m_above ?? 0, showWhen: tiered },
+    { name: "output_per_1m_above", label: "Output $ / 1M above the threshold",
+      value: p.output_per_1m_above ?? 0, showWhen: tiered },
   ], async (v) => {
-    const x = await api("PUT", `/api/admin/pricing/${encodeURIComponent(v.model)}`,
-      { provider: v.provider, unit: v.unit, input_per_1m: Number(v.input_per_1m), output_per_1m: Number(v.output_per_1m) });
+    // Sent only for the row shape that reads them, so clearing the threshold
+    // (or switching to an audio unit) does not leave behind rates nothing will
+    // ever look at. Same predicate the fields are shown by, so what was
+    // visible is exactly what is saved.
+    const tier = tiered(v);
+    const x = await api("PUT", `/api/admin/pricing/${encodeURIComponent(v.model)}`, {
+      provider: v.provider, unit: v.unit,
+      input_per_1m: Number(v.input_per_1m), output_per_1m: Number(v.output_per_1m),
+      context_threshold: tier ? Number(v.context_threshold) : 0,
+      input_per_1m_above: tier ? Number(v.input_per_1m_above) : 0,
+      output_per_1m_above: tier ? Number(v.output_per_1m_above) : 0,
+    });
     if (x.ok) { toast("Pricing saved"); adminPricing(c); return true; }
     toast((x.data && x.data.error) || "Failed", "err"); return false;
   });
@@ -1423,7 +1453,11 @@ function modalForm(title, fields, onSubmit) {
       });
     };
     applyVisibility();
+    // Both events: `change` alone is enough for a <select>, but a field gated
+    // on a typed number (a pricing threshold) would otherwise only reveal its
+    // dependants once the operator blurred the box.
     form.addEventListener("change", applyVisibility);
+    form.addEventListener("input", applyVisibility);
   }
 
   form.addEventListener("submit", async (e) => {

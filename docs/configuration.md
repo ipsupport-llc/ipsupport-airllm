@@ -167,7 +167,40 @@ Importing prices (`POST /api/admin/pricing/import/{provider}`) reads the kind's
 own `/models` catalogue. Every compatible kind accepts the call, but in
 practice only OpenRouter publishes prices there, so the others import nothing.
 `vertex` does not implement the interface at all and answers
-`unsupported: true` — see its pricing note below.
+`unsupported: true` — see its pricing note below. A catalogue publishes flat
+rates only, so an import leaves any hand-entered long-prompt tier on the row
+alone rather than flattening it.
+
+### Long-prompt price tiers
+
+Some vendors charge a second, higher pair of rates once the prompt crosses a
+context threshold. Gemini 2.5 Pro is $1.25 / $10.00 per 1M tokens up to 200 000
+prompt tokens and $2.50 / $15.00 above it — exactly double, input and output
+both. A `tokens` price row carries that on itself, under **Admin → Pricing**:
+
+- **Long-prompt threshold** — the prompt-token count the vendor's higher rates
+  start above. `0` means the model has no tier, which is the default and what
+  every existing row reads.
+- **Input / Output $ / 1M above the threshold** — the second pair of rates.
+
+Three things about how it prices, all of them the vendor's arithmetic rather
+than a choice made here:
+
+- The threshold is read off the **prompt** count, and it reprices the **whole
+  call** — the output of a long prompt is billed at the high output rate too.
+  It is not a blended rate applied only to the tokens past the breakpoint.
+- The breakpoint itself is still the low rate, matching the vendor's "up to N
+  tokens" wording; only a strictly larger prompt crosses over.
+- Cost feeds the rolling `cost_usd` cap on the key from the same figure, so a
+  long prompt counts against the cap at what it actually cost. Before this
+  existed the cap let through twice the spend on a tiered model.
+
+The tier belongs to the row the lookup picked, so a provider-specific row is
+not lent the wildcard row's threshold. A threshold with either above-rate left
+at zero is refused when you save it — it would price a long prompt at nothing,
+which is worse than the flat rate it replaced — and a threshold cannot be set
+on an `audio_second` or `text_char` row, which are not priced by prompt tokens
+at all.
 
 ### Vertex AI (`vertex`)
 
@@ -246,8 +279,10 @@ under **Admin → Pricing**, and spell each model exactly as the alias target
 spells it: cost is looked up by the target's `upstream_model` string, before
 the publisher prefix is normalised for the wire. A target spelled
 `gemini-2.5-pro` and priced as `google/gemini-2.5-pro` therefore costs nothing.
-Spelling both with the prefix is the convention. The rows in use, and the two
-gaps in them, are listed under
+Spelling both with the prefix is the convention. Pro charges more above 200 000
+prompt tokens, which the row expresses as a
+[long-prompt tier](#long-prompt-price-tiers). The rows in use, and the gap left
+in them, are listed under
 [Operations → Vertex AI prices](operations.md#vertex-ai-prices).
 
 **Thinking tokens are billed and are now counted.** Gemini 2.5 models think by
