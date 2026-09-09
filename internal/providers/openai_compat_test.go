@@ -192,6 +192,20 @@ func TestHTTPErrorParsesOllamaMultimodalRejection(t *testing.T) {
 	}
 }
 
+func TestHTTPErrorParsesReasoningEffortUnsupported(t *testing.T) {
+	// Real body captured live from OpenAI rejecting tool calls combined with
+	// a client-supplied reasoning_effort on gpt-6-astra via /v1/chat/completions.
+	body := []byte(`{"error":{"message":"Function tools with reasoning_effort are not supported for gpt-6-astra in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'.","type":"invalid_request_error","param":"reasoning_effort","code":null}}`)
+	err := httpError("openai", 400, body)
+	pe := err.(*Error)
+	if pe.Code != ErrCodeReasoningEffortUnsupported {
+		t.Errorf("Code = %q, want %q", pe.Code, ErrCodeReasoningEffortUnsupported)
+	}
+	if pe.Retryable {
+		t.Error("a 400 must still be Retryable=false — Code is additive, not a replacement")
+	}
+}
+
 func TestHTTPErrorUnrecognizedBodyLeavesCodeEmpty(t *testing.T) {
 	cases := [][]byte{
 		[]byte(`{"error":{"message":"bad request","type":"invalid_request_error","code":"something_else"}}`),
@@ -202,6 +216,9 @@ func TestHTTPErrorUnrecognizedBodyLeavesCodeEmpty(t *testing.T) {
 		// contains "multimodal" AND "does not support", just not contiguously
 		// as the one phrase the pattern actually targets — must not false-positive.
 		[]byte(`{"error":{"message":"processed a multimodal request successfully; note the endpoint does not support streaming for this model","type":"invalid_request_error","code":null}}`),
+		// a different rejected parameter — must not be mistaken for the
+		// reasoning_effort-specific signal.
+		[]byte(`{"error":{"message":"Unknown parameter: 'foo'.","type":"invalid_request_error","param":"foo","code":null}}`),
 	}
 	for _, body := range cases {
 		err := httpError("x", 400, body)

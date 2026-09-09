@@ -44,17 +44,21 @@ func (m *Mock) ListModelPricing(_ context.Context) ([]ModelPrice, error) {
 }
 
 // Chat returns a deterministic mock completion for req. An upstream model
-// containing "ctxfail" yields a non-retryable context-length error, and one
+// containing "ctxfail" yields a non-retryable context-length error, one
 // containing "novision" yields a non-retryable multimodal-not-supported
-// error, both used to exercise fallback-worthy errors. An upstream model
-// containing "fail" yields a retryable error, used to exercise routing
-// fallback.
+// error, and one containing "noreasoning" yields a non-retryable
+// reasoning-effort-unsupported error, all used to exercise fallback-worthy
+// errors. An upstream model containing "fail" yields a retryable error,
+// used to exercise routing fallback.
 func (m *Mock) Chat(_ context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
 	if strings.Contains(req.Model, "ctxfail") {
 		return llm.ChatResponse{}, &Error{Status: 400, Retryable: false, Code: ErrCodeContextLengthExceeded, Message: "mock upstream context-length error for model " + req.Model}
 	}
 	if strings.Contains(req.Model, "novision") {
 		return llm.ChatResponse{}, &Error{Status: 400, Retryable: false, Code: ErrCodeMultimodalNotSupported, Message: "mock upstream multimodal-not-supported error for model " + req.Model}
+	}
+	if strings.Contains(req.Model, "noreasoning") {
+		return llm.ChatResponse{}, &Error{Status: 400, Retryable: false, Code: ErrCodeReasoningEffortUnsupported, Message: "mock upstream reasoning-effort-unsupported error for model " + req.Model}
 	}
 	if strings.Contains(req.Model, "fail") {
 		return llm.ChatResponse{}, &Error{Status: 503, Retryable: true, Message: "mock upstream failure for model " + req.Model}
@@ -95,14 +99,18 @@ func (m *Mock) Chat(_ context.Context, req llm.ChatRequest) (llm.ChatResponse, e
 // ChatStream emits the same logical response as Chat, chunk by chunk. It
 // fails (before yielding anything) for "ctxfail" models with a non-retryable
 // context-length error, for "novision" models with a non-retryable
-// multimodal-not-supported error, or for "fail" models with a retryable
-// error, so the router can fall back to the next target.
+// multimodal-not-supported error, for "noreasoning" models with a
+// non-retryable reasoning-effort-unsupported error, or for "fail" models
+// with a retryable error, so the router can fall back to the next target.
 func (m *Mock) ChatStream(_ context.Context, req llm.ChatRequest, yield func(llm.StreamChunk) error) error {
 	if strings.Contains(req.Model, "ctxfail") {
 		return &Error{Status: 400, Retryable: false, Code: ErrCodeContextLengthExceeded, Message: "mock upstream context-length error for model " + req.Model}
 	}
 	if strings.Contains(req.Model, "novision") {
 		return &Error{Status: 400, Retryable: false, Code: ErrCodeMultimodalNotSupported, Message: "mock upstream multimodal-not-supported error for model " + req.Model}
+	}
+	if strings.Contains(req.Model, "noreasoning") {
+		return &Error{Status: 400, Retryable: false, Code: ErrCodeReasoningEffortUnsupported, Message: "mock upstream reasoning-effort-unsupported error for model " + req.Model}
 	}
 	if strings.Contains(req.Model, "fail") {
 		return &Error{Status: 503, Retryable: true, Message: "mock upstream failure for model " + req.Model}
