@@ -124,7 +124,7 @@ func (r *Router) Resolve(ctx context.Context, model string, allowPassthrough boo
 	}
 
 	rows, err := r.st.PG.Query(ctx, `
-		SELECT t.priority, t.provider_name, t.upstream_model, t.upstream_protocol, t.display_label
+		SELECT t.priority, t.provider_name, t.upstream_model, p.kind, t.display_label
 		FROM alias_targets t
 		JOIN providers p ON p.name = t.provider_name AND p.enabled = true
 		WHERE t.alias = $1
@@ -138,9 +138,20 @@ func (r *Router) Resolve(ctx context.Context, model string, allowPassthrough boo
 	lastPriority := -1
 	for rows.Next() {
 		var priority int
+		var kind string
 		var t Target
-		if err := rows.Scan(&priority, &t.Provider, &t.UpstreamModel, &t.UpstreamProtocol, &t.DisplayLabel); err != nil {
+		if err := rows.Scan(&priority, &t.Provider, &t.UpstreamModel, &kind, &t.DisplayLabel); err != nil {
 			return nil, err
+		}
+		// UpstreamProtocol is derived from the provider's own kind, the same
+		// way passthroughTarget below does it — never operator-chosen. Every
+		// registered kind (openai/openrouter/xai/groq/ollama/vertex/...)
+		// currently speaks OpenAI wire format regardless of what a human
+		// might have picked per-target; "anthropic" only means anything once
+		// a real Anthropic-speaking provider kind exists.
+		t.UpstreamProtocol = "openai"
+		if kind == "anthropic" {
+			t.UpstreamProtocol = "anthropic"
 		}
 		if len(tiers) == 0 || priority != lastPriority {
 			tiers = append(tiers, []Target{})

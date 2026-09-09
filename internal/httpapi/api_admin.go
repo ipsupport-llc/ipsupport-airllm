@@ -394,20 +394,22 @@ func providerConfigToStore(kind string, supplied json.RawMessage, stored, baseUR
 	return config, nil
 }
 
+// aliasTarget has no upstream_protocol field: it's derived from the
+// provider's own kind (see routing.Router.Resolve), never operator-chosen —
+// alias_targets.upstream_protocol is legacy, unread schema kept only to
+// avoid a migration.
 type aliasTarget struct {
-	Priority         int    `json:"priority"`
-	Provider         string `json:"provider"`
-	UpstreamModel    string `json:"upstream_model"`
-	UpstreamProtocol string `json:"upstream_protocol"`
-	DisplayLabel     string `json:"display_label"`
+	Priority      int    `json:"priority"`
+	Provider      string `json:"provider"`
+	UpstreamModel string `json:"upstream_model"`
+	DisplayLabel  string `json:"display_label"`
 }
 
 func (s *Server) handleAdminAliases(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.st.PG.Query(r.Context(), `
 		SELECT a.alias, a.protocol, a.strategy, a.dlp_model_scan, a.expose_backend_headers, a.dlp_audio_scan,
 			COALESCE(t.priority, 0), COALESCE(t.provider_name, ''),
-			COALESCE(t.upstream_model, ''), COALESCE(t.upstream_protocol, ''),
-			COALESCE(t.display_label, '')
+			COALESCE(t.upstream_model, ''), COALESCE(t.display_label, '')
 		FROM model_aliases a
 		LEFT JOIN alias_targets t ON t.alias = a.alias
 		ORDER BY a.alias, t.priority`)
@@ -428,10 +430,10 @@ func (s *Server) handleAdminAliases(w http.ResponseWriter, r *http.Request) {
 	byAlias := map[string]*aliasView{}
 	var order []string
 	for rows.Next() {
-		var alias, protocol, strategy, provider, upModel, upProto, label string
+		var alias, protocol, strategy, provider, upModel, label string
 		var priority int
 		var dlpModelScan, exposeBackendHeaders, dlpAudioScan bool
-		if err := rows.Scan(&alias, &protocol, &strategy, &dlpModelScan, &exposeBackendHeaders, &dlpAudioScan, &priority, &provider, &upModel, &upProto, &label); err != nil {
+		if err := rows.Scan(&alias, &protocol, &strategy, &dlpModelScan, &exposeBackendHeaders, &dlpAudioScan, &priority, &provider, &upModel, &label); err != nil {
 			writeControlError(w, http.StatusInternalServerError, "failed to read aliases")
 			return
 		}
@@ -442,7 +444,7 @@ func (s *Server) handleAdminAliases(w http.ResponseWriter, r *http.Request) {
 			order = append(order, alias)
 		}
 		if provider != "" {
-			av.Targets = append(av.Targets, aliasTarget{priority, provider, upModel, upProto, label})
+			av.Targets = append(av.Targets, aliasTarget{priority, provider, upModel, label})
 		}
 	}
 	out := make([]aliasView, 0, len(order))
@@ -463,7 +465,13 @@ func (s *Server) handleAdminPutAlias(w http.ResponseWriter, r *http.Request) {
 		DLPAudioScan         *bool         `json:"dlp_audio_scan"`
 		Targets              []aliasTarget `json:"targets"`
 	}
-	if err := decodeJSON(r, &body); err != nil {
+	// Plain decoding, NOT the strict decodeJSON helper: that helper sets
+	// DisallowUnknownFields, which would hard-reject a browser tab that had
+	// the alias editor open from before upstream_protocol was removed from
+	// this shape — its cached JS still sends that field per target. Ignoring
+	// an unknown field here is strictly better than rejecting an otherwise-
+	// valid save from a stale tab (reloading the page fixes it either way).
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeControlError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
@@ -501,13 +509,13 @@ func (s *Server) handleAdminPutAlias(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, t := range body.Targets {
-		proto := t.UpstreamProtocol
-		if proto == "" {
-			proto = "openai"
-		}
+		// upstream_protocol has no operator-supplied value anymore (see the
+		// aliasTarget doc comment) — the column is NOT NULL with no default,
+		// so it still needs something; the literal value written here is
+		// never read back by anything.
 		if _, err := tx.Exec(r.Context(), `
 			INSERT INTO alias_targets (alias, priority, provider_name, upstream_model, upstream_protocol, display_label)
-			VALUES ($1, $2, $3, $4, $5, $6)`, alias, t.Priority, t.Provider, t.UpstreamModel, proto, t.DisplayLabel); err != nil {
+			VALUES ($1, $2, $3, $4, 'unused', $5)`, alias, t.Priority, t.Provider, t.UpstreamModel, t.DisplayLabel); err != nil {
 			writeControlError(w, http.StatusBadRequest, "invalid target (provider must exist): "+err.Error())
 			return
 		}
