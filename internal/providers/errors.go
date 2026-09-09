@@ -149,9 +149,14 @@ func classifyErrorBody(body []byte) string {
 		// calls with a client-supplied reasoning_effort via this endpoint
 		// (its own message points at /v1/responses instead, which this
 		// codebase doesn't speak) — a real, narrow model limitation, not a
-		// malformed request, so another tier is worth trying. `param` is a
-		// genuine structured signal here, unlike the Ollama case below.
-		if oa.Error.Param == "reasoning_effort" {
+		// malformed request, so another tier is worth trying. But `param`
+		// alone isn't precise enough: OpenAI also uses param:"reasoning_effort"
+		// for a genuine client mistake (an out-of-range value), which comes
+		// back with a non-null Code (e.g. "invalid_value") — that case must
+		// surface to the client, not get silently retried elsewhere and
+		// masked, so Code must be empty (the capability-limitation shape
+		// OpenAI sends here always has code:null) for this to match.
+		if oa.Error.Code == "" && oa.Error.Param == "reasoning_effort" {
 			return ErrCodeReasoningEffortUnsupported
 		}
 		if ollamaMultimodalRejectionPattern.MatchString(oa.Error.Message) {
