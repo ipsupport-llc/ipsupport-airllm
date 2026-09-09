@@ -147,7 +147,7 @@ func TestDisplayLabelFlag(t *testing.T) {
 
 	// Same query as the alias branch of Router.Resolve.
 	rows, err := tx.Query(ctx, `
-		SELECT t.priority, t.provider_name, t.upstream_model, t.upstream_protocol, t.display_label
+		SELECT t.priority, t.provider_name, t.upstream_model, p.kind, t.display_label
 		FROM alias_targets t
 		JOIN providers p ON p.name = t.provider_name AND p.enabled = true
 		WHERE t.alias = $1
@@ -160,8 +160,8 @@ func TestDisplayLabelFlag(t *testing.T) {
 		t.Fatalf("no target row returned for label-test-alias")
 	}
 	var priority int
-	var provider, upModel, upProto, label string
-	if err := rows.Scan(&priority, &provider, &upModel, &upProto, &label); err != nil {
+	var provider, upModel, kind, label string
+	if err := rows.Scan(&priority, &provider, &upModel, &kind, &label); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
 	if label != "Fast Tier" {
@@ -207,5 +207,63 @@ func TestDLPAudioScanFlag(t *testing.T) {
 	}
 	if dlpAudioScan {
 		t.Errorf("dlp_audio_scan = true, want false for audioflag-test-alias")
+	}
+}
+
+// TestUpstreamProtocolDerivedFromProviderKind exercises the alias branch of
+// Router.Resolve for real (not the duplicated-raw-query pattern the other
+// tests in this file use for the alias branch — this one specifically needs
+// to prove the SHIPPED derivation logic, not just the SQL shape), verifying
+// UpstreamProtocol comes from the provider's kind rather than any
+// operator-supplied value: alias_targets no longer has an upstream_protocol
+// an operator can set at all, so this is the only place the value comes
+// from now.
+func TestUpstreamProtocolDerivedFromProviderKind(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	r := NewRouter(&store.Store{PG: pool})
+
+	for _, kind := range []string{"openai", "anthropic"} {
+		kind := kind
+		t.Run(kind, func(t *testing.T) {
+			suffix := fmt.Sprintf("%s-%d", kind, time.Now().UnixNano())
+			provider := "proto-test-provider-" + suffix
+			alias := "proto-test-alias-" + suffix
+
+			if _, err := pool.Exec(ctx,
+				`INSERT INTO providers (name, kind, base_url, enabled) VALUES ($1, $2, $3, $4)`,
+				provider, kind, "http://example.invalid", true); err != nil {
+				t.Fatalf("insert provider: %v", err)
+			}
+			t.Cleanup(func() {
+				if _, err := pool.Exec(context.Background(), `DELETE FROM providers WHERE name = $1`, provider); err != nil {
+					t.Errorf("cleanup provider: %v", err)
+				}
+			})
+			if _, err := pool.Exec(ctx,
+				`INSERT INTO model_aliases (alias, protocol, strategy) VALUES ($1, $2, $3)`,
+				alias, "openai", "round_robin"); err != nil {
+				t.Fatalf("insert alias: %v", err)
+			}
+			t.Cleanup(func() {
+				if _, err := pool.Exec(context.Background(), `DELETE FROM model_aliases WHERE alias = $1`, alias); err != nil {
+					t.Errorf("cleanup alias: %v", err)
+				}
+			})
+			if _, err := pool.Exec(ctx,
+				`INSERT INTO alias_targets (alias, priority, provider_name, upstream_model, upstream_protocol) VALUES ($1, $2, $3, $4, $5)`,
+				alias, 0, provider, "upstream-model", "should-be-ignored"); err != nil {
+				t.Fatalf("insert alias target: %v", err)
+			}
+
+			plan, err := r.Resolve(ctx, alias, false)
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			got := plan.Tiers[0][0].UpstreamProtocol
+			if got != kind {
+				t.Errorf("UpstreamProtocol = %q, want %q (derived from provider kind, not the stored column, which was seeded with a deliberately wrong value)", got, kind)
+			}
+		})
 	}
 }

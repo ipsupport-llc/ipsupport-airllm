@@ -1023,7 +1023,7 @@ async function editAlias(c, a) {
 
   const targets = (a.targets && a.targets.length)
     ? a.targets
-    : [{ provider: providers[0], upstream_model: "", upstream_protocol: "openai" }];
+    : [{ provider: providers[0], upstream_model: "" }];
 
   const bg = document.createElement("div");
   bg.className = "modal-bg";
@@ -1080,8 +1080,11 @@ async function editAlias(c, a) {
   // but its suggestion dropdown is unreliable on mobile Safari, effectively
   // making model selection impossible on a phone. Reading .t-model's .value
   // works identically for either element, so the save path below never
-  // needs to know which one is present.
-  async function renderModelControl(slot, provSel, current) {
+  // needs to know which one is present. onModelChange fires once right
+  // after the control is (re)built (covering a <select>'s auto-picked
+  // first option, and a free-text input's starting value) and again on
+  // every later change — used to keep the label field's default in sync.
+  async function renderModelControl(slot, provSel, current, onModelChange) {
     const prov = provSel.value;
     const models = await fetchModels(prov);
     // Stale guard: the user may have switched provider again while this
@@ -1089,13 +1092,16 @@ async function editAlias(c, a) {
     if (provSel.value !== prov) return;
     if (models.length === 0) {
       slot.innerHTML = `<input class="t-model" placeholder="upstream model" value="${esc(current)}" style="width:100%" />`;
-      return;
+    } else {
+      // Keep `current` selectable even if the catalog doesn't list it — an
+      // existing alias may point at a model since removed from the catalog.
+      const opts = current && !models.includes(current) ? [current, ...models] : models;
+      slot.innerHTML = `<select class="t-model" style="width:100%">${opts.map((m) =>
+        `<option value="${esc(m)}" ${m === current ? "selected" : ""}>${esc(m)}</option>`).join("")}</select>`;
     }
-    // Keep `current` selectable even if the catalog doesn't list it — an
-    // existing alias may point at a model since removed from the catalog.
-    const opts = current && !models.includes(current) ? [current, ...models] : models;
-    slot.innerHTML = `<select class="t-model" style="width:100%">${opts.map((m) =>
-      `<option value="${esc(m)}" ${m === current ? "selected" : ""}>${esc(m)}</option>`).join("")}</select>`;
+    const modelEl = slot.querySelector(".t-model");
+    modelEl.addEventListener(modelEl.tagName === "SELECT" ? "change" : "input", onModelChange);
+    onModelChange();
   }
   function addRow(t) {
     const row = document.createElement("div");
@@ -1105,27 +1111,38 @@ async function editAlias(c, a) {
       <input class="t-prio" type="number" min="0" value="${Number(t.priority) || 0}" title="priority / tier (same number = load-balanced)" style="width:64px" />
       <select class="t-prov" style="width:auto">${provOpts(t.provider)}</select>
       <span class="t-model-slot" style="flex:1;min-width:120px;display:inline-flex"></span>
-      <select class="t-proto" style="width:auto">
-        <option ${t.upstream_protocol !== "anthropic" ? "selected" : ""}>openai</option>
-        <option ${t.upstream_protocol === "anthropic" ? "selected" : ""}>anthropic</option>
-      </select>
       <input class="t-label" placeholder="label (X-Backend-Model)" value="${esc(t.display_label || "")}" style="width:150px" />
       <button type="button" class="btn danger sm t-del" title="remove">×</button>`;
     row.querySelector(".t-del").addEventListener("click", () => row.remove());
     const slot = row.querySelector(".t-model-slot");
     const provSel = row.querySelector(".t-prov");
-    renderModelControl(slot, provSel, t.upstream_model || "");
+    const labelInput = row.querySelector(".t-label");
+
+    // Default the label to "provider:model" (matching the convention already
+    // used across existing aliases, e.g. "groq:qwen3.6-27b") so an operator
+    // adding a target doesn't have to type one — but stop touching it the
+    // moment they type their own, so a later provider/model change never
+    // clobbers a deliberate custom label.
+    let autoLabel = !labelInput.value;
+    labelInput.addEventListener("input", () => { autoLabel = false; });
+    function maybeUpdateLabel() {
+      if (!autoLabel) return;
+      const model = row.querySelector(".t-model").value;
+      if (model) labelInput.value = `${provSel.value}:${model}`;
+    }
+
+    renderModelControl(slot, provSel, t.upstream_model || "", maybeUpdateLabel);
     provSel.addEventListener("change", () => {
       // Switching provider invalidates the previous model selection —
       // models are provider-specific — so the new control always starts
       // with no prior value.
-      renderModelControl(slot, provSel, "");
+      renderModelControl(slot, provSel, "", maybeUpdateLabel);
     });
     tdiv.appendChild(row);
   }
   targets.forEach(addRow);
   $("#al-add", bg).addEventListener("click", () =>
-    addRow({ provider: providers[0], upstream_model: "", upstream_protocol: "openai" }));
+    addRow({ provider: providers[0], upstream_model: "" }));
   $("#al-cancel", bg).addEventListener("click", close);
   bg.addEventListener("click", (e) => { if (e.target === bg) close(); });
   $("#al-save", bg).addEventListener("click", async () => {
@@ -1140,7 +1157,6 @@ async function editAlias(c, a) {
       priority: Number(r.querySelector(".t-prio").value) || 0,
       provider: r.querySelector(".t-prov").value,
       upstream_model: r.querySelector(".t-model").value.trim(),
-      upstream_protocol: r.querySelector(".t-proto").value,
       display_label: r.querySelector(".t-label").value.trim(),
     })).filter((t) => t.upstream_model);
     if (tlist.length === 0) { toast("Add at least one target with a model", "err"); return; }

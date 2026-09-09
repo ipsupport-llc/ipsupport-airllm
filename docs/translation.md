@@ -52,7 +52,10 @@ equivalent. When a request crosses protocols, these may degrade:
 - **Tool result shaping** — Anthropic `tool_result` blocks become IR `tool`
   messages; rich block content is flattened to text.
 
-To avoid these losses, the router prefers a target whose `upstream_protocol`
-matches the ingress protocol when the alias offers more than one. Operators
-should keep same-protocol targets first in an alias's priority order when
-fidelity matters.
+There's no way to avoid this today: every real provider kind
+(openai/openrouter/xai/groq/ollama/vertex) speaks the OpenAI wire format
+upstream regardless of which protocol the client used, so a request that
+enters via Anthropic ingress always gets translated before it reaches any
+of them. `alias_targets` records an `upstream_protocol` for audit purposes,
+but it's derived from the provider's own kind — operators can't configure
+it, and there is no protocol-aware target ordering to prefer.
