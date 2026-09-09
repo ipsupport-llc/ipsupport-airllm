@@ -186,6 +186,14 @@ func TestClassifyUpstreamErrMultimodalNotSupported(t *testing.T) {
 	}
 }
 
+func TestClassifyUpstreamErrReasoningEffortUnsupported(t *testing.T) {
+	err := &providers.Error{Status: 400, Retryable: false, Code: providers.ErrCodeReasoningEffortUnsupported, Message: "no reasoning_effort with tools"}
+	code, typ := classifyUpstreamErr(err)
+	if code != http.StatusBadRequest || typ != "invalid_request_error" {
+		t.Errorf("got (%d, %q), want (400, invalid_request_error)", code, typ)
+	}
+}
+
 func TestClassifyUpstreamErrUnrecognizedStaysUpstreamError(t *testing.T) {
 	err := &providers.Error{Status: 400, Retryable: false, Message: "malformed"}
 	code, typ := classifyUpstreamErr(err)

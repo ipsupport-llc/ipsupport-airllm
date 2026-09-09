@@ -13,7 +13,7 @@ func TestIsFallbackWorthyRetryable(t *testing.T) {
 }
 
 func TestIsFallbackWorthyKnownCode(t *testing.T) {
-	for _, code := range []string{ErrCodeContextLengthExceeded, ErrCodeModelNotFound, ErrCodeMultimodalNotSupported} {
+	for _, code := range []string{ErrCodeContextLengthExceeded, ErrCodeModelNotFound, ErrCodeMultimodalNotSupported, ErrCodeReasoningEffortUnsupported} {
 		err := &Error{Status: 400, Retryable: false, Code: code}
 		if !IsFallbackWorthy(err) {
 			t.Errorf("code %q must be fallback-worthy even though Retryable=false", code)
@@ -54,6 +54,9 @@ func TestClassifyErrorBody(t *testing.T) {
 		{"openai model not found", `{"error":{"type":"invalid_request_error","code":"model_not_found"}}`, ErrCodeModelNotFound},
 		{"openai code we don't track", `{"error":{"type":"invalid_request_error","code":"invalid_api_key"}}`, ""},
 		{"openai null code", `{"error":{"type":"invalid_request_error","code":null}}`, ""},
+		{"openai reasoning_effort rejected", `{"error":{"type":"invalid_request_error","code":null,"param":"reasoning_effort","message":"Function tools with reasoning_effort are not supported for gpt-6-astra in /v1/chat/completions."}}`, ErrCodeReasoningEffortUnsupported},
+		{"openai unrelated param rejected", `{"error":{"type":"invalid_request_error","code":null,"param":"top_p","message":"Unknown parameter"}}`, ""},
+		{"openai reasoning_effort itself invalid (client's own mistake, not a model limitation)", `{"error":{"type":"invalid_request_error","code":"invalid_value","param":"reasoning_effort","message":"Invalid value: 'extreme'. Supported values are: 'low', 'medium', 'high'."}}`, ""},
 
 		// llama.cpp / Ollama: the reason is in error.type, and code is numeric.
 		{"llama.cpp context size", `{"error":{"code":500,"message":"context size exceeded","type":"exceed_context_size_error"}}`, ErrCodeContextLengthExceeded},

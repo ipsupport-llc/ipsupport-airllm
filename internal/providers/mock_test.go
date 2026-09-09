@@ -173,6 +173,37 @@ func TestMockNovisionFallbackWorthy(t *testing.T) {
 	}
 }
 
+func TestMockNoreasoningFallbackWorthy(t *testing.T) {
+	m := NewMock("mock")
+
+	noreasoningReq := llm.ChatRequest{Model: "mock-noreasoning", Messages: []llm.Message{{Role: "user", Content: "x"}}}
+	_, err := m.Chat(context.Background(), noreasoningReq)
+	if err == nil {
+		t.Fatal("noreasoning model must return an error")
+	}
+	pe, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("want *Error, got %T", err)
+	}
+	if pe.Code != ErrCodeReasoningEffortUnsupported {
+		t.Errorf("Code = %q, want %q", pe.Code, ErrCodeReasoningEffortUnsupported)
+	}
+	if IsRetryable(err) {
+		t.Error("noreasoning error must NOT be Retryable (it's a target-specific failure, not transient)")
+	}
+	if !IsFallbackWorthy(err) {
+		t.Error("noreasoning error must be fallback-worthy via its Code")
+	}
+
+	err = m.ChatStream(context.Background(), noreasoningReq, func(llm.StreamChunk) error {
+		t.Fatal("noreasoning model must not yield any chunk")
+		return nil
+	})
+	if !IsFallbackWorthy(err) {
+		t.Error("ChatStream noreasoning error must be fallback-worthy via its Code")
+	}
+}
+
 func TestMockChatStreamYieldError(t *testing.T) {
 	m := NewMock("mock")
 	sentinel := context.Canceled

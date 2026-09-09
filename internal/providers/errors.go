@@ -12,9 +12,10 @@ import (
 // Known error codes that make a failure fallback-worthy even though it is
 // not retryable against the same target — see IsFallbackWorthy.
 const (
-	ErrCodeContextLengthExceeded  = "context_length_exceeded"
-	ErrCodeModelNotFound          = "model_not_found"
-	ErrCodeMultimodalNotSupported = "multimodal_not_supported"
+	ErrCodeContextLengthExceeded      = "context_length_exceeded"
+	ErrCodeModelNotFound              = "model_not_found"
+	ErrCodeMultimodalNotSupported     = "multimodal_not_supported"
+	ErrCodeReasoningEffortUnsupported = "reasoning_effort_unsupported"
 )
 
 // Error is a provider call failure. Retryable failures (e.g. upstream 429 or
@@ -53,7 +54,7 @@ func IsFallbackWorthy(err error) bool {
 	var pe *Error
 	if errors.As(err, &pe) {
 		switch pe.Code {
-		case ErrCodeContextLengthExceeded, ErrCodeModelNotFound, ErrCodeMultimodalNotSupported:
+		case ErrCodeContextLengthExceeded, ErrCodeModelNotFound, ErrCodeMultimodalNotSupported, ErrCodeReasoningEffortUnsupported:
 			return true
 		}
 	}
@@ -67,6 +68,7 @@ type openAIErrorBody struct {
 		Type    string `json:"type"`
 		Code    string `json:"code"`
 		Message string `json:"message"`
+		Param   string `json:"param"`
 	} `json:"error"`
 }
 
@@ -142,6 +144,20 @@ func classifyErrorBody(body []byte) string {
 		switch oa.Error.Code {
 		case ErrCodeContextLengthExceeded, ErrCodeModelNotFound:
 			return oa.Error.Code
+		}
+		// OpenAI rejects some newer reasoning models' combination of tool
+		// calls with a client-supplied reasoning_effort via this endpoint
+		// (its own message points at /v1/responses instead, which this
+		// codebase doesn't speak) — a real, narrow model limitation, not a
+		// malformed request, so another tier is worth trying. But `param`
+		// alone isn't precise enough: OpenAI also uses param:"reasoning_effort"
+		// for a genuine client mistake (an out-of-range value), which comes
+		// back with a non-null Code (e.g. "invalid_value") — that case must
+		// surface to the client, not get silently retried elsewhere and
+		// masked, so Code must be empty (the capability-limitation shape
+		// OpenAI sends here always has code:null) for this to match.
+		if oa.Error.Code == "" && oa.Error.Param == "reasoning_effort" {
+			return ErrCodeReasoningEffortUnsupported
 		}
 		if ollamaMultimodalRejectionPattern.MatchString(oa.Error.Message) {
 			return ErrCodeMultimodalNotSupported
