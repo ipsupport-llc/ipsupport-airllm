@@ -465,7 +465,13 @@ func (s *Server) handleAdminPutAlias(w http.ResponseWriter, r *http.Request) {
 		DLPAudioScan         *bool         `json:"dlp_audio_scan"`
 		Targets              []aliasTarget `json:"targets"`
 	}
-	if err := decodeJSON(r, &body); err != nil {
+	// Plain decoding, NOT the strict decodeJSON helper: that helper sets
+	// DisallowUnknownFields, which would hard-reject a browser tab that had
+	// the alias editor open from before upstream_protocol was removed from
+	// this shape — its cached JS still sends that field per target. Ignoring
+	// an unknown field here is strictly better than rejecting an otherwise-
+	// valid save from a stale tab (reloading the page fixes it either way).
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeControlError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
