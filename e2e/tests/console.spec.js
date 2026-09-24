@@ -107,6 +107,35 @@ test("AirLLM console: full click-through", async ({ page }) => {
     await page.click("#mf-cancel");
   });
 
+  await test.step("a vertex credential can be set, kept by an unrelated save, and cleared", async () => {
+    const row = page.locator("tr", { hasText: "playwright-vertex" }).first();
+    const badge = row.locator(".badge");
+
+    // Nothing is stored yet, so there is nothing to remove.
+    await row.locator("button:has-text('Edit')").click();
+    await expect(page.locator('input[name="clear_credential"]')).toBeHidden();
+    await page.fill('textarea[name="credential_json"]', '{"type":"service_account"}');
+    await page.click('#mf button[type="submit"]');
+    await expect(badge).toHaveText("set");
+
+    // A save that says nothing about the credential keeps it. The badge
+    // already reads "set", so wait for the list to be re-fetched before
+    // trusting it.
+    await row.locator("button:has-text('Edit')").click();
+    const relisted = page.waitForResponse((r) =>
+      r.url().endsWith("/api/admin/providers") && r.request().method() === "GET");
+    await page.click('#mf button[type="submit"]');
+    await relisted;
+    await expect(badge).toHaveText("set");
+
+    // Clearing is its own explicit act, and it hides the credential input.
+    await row.locator("button:has-text('Edit')").click();
+    await page.check('input[name="clear_credential"]');
+    await expect(page.locator('textarea[name="credential_json"]')).toBeHidden();
+    await page.click('#mf button[type="submit"]');
+    await expect(badge).toHaveText("federated");
+  });
+
   await test.step("alias editor picks provider from a dropdown", async () => {
     await page.click('.tabs button:has-text("aliases")');
     await page.click("#new-alias");

@@ -889,8 +889,14 @@ function editProvider(c, p) {
     // being repurposed for a credential it cannot carry.
     { name: "project", label: "Cloud project", value: cfg.project || "", showWhen: isVertex },
     { name: "location", label: "Location (blank = global)", value: cfg.location || "", showWhen: isVertex },
-    { name: "api_key", label: p.has_credential ? "API key (set — blank keeps current)" : "API key", type: "password", value: "", placeholder: p.has_credential ? "•••••• stored" : "", showWhen: (v) => !isVertex(v) },
-    { name: "credential_json", type: "textarea", value: "", showWhen: isVertex,
+    // A blank credential keeps the stored one, so removing it is a separate,
+    // explicit checkbox — offered only when there is something to remove, and
+    // hiding the credential inputs while ticked, since the admin API rejects a
+    // save that both sets and clears.
+    { name: "clear_credential", type: "checkbox", value: false, showWhen: () => !!p.has_credential,
+      label: "Remove the stored credential — vertex then authenticates as the pod's own identity; other kinds are left without a key" },
+    { name: "api_key", label: p.has_credential ? "API key (set — blank keeps current)" : "API key", type: "password", value: "", placeholder: p.has_credential ? "•••••• stored" : "", showWhen: (v) => !isVertex(v) && !v.clear_credential },
+    { name: "credential_json", type: "textarea", value: "", showWhen: (v) => isVertex(v) && !v.clear_credential,
       label: p.has_credential
         ? "Service-account JSON (stored — blank keeps it)"
         : "Service-account JSON — leave blank to authenticate as the pod's own identity" },
@@ -903,10 +909,10 @@ function editProvider(c, p) {
       // API keeps the stored configuration when a save omits it, so an empty
       // object from another kind would erase a project as a side effect.
       body.config = { project: v.project.trim(), location: v.location.trim() };
-      body.credential_json = v.credential_json.trim();
-    } else {
-      body.api_key = v.api_key;
     }
+    if (v.clear_credential) body.clear_credential = true;
+    else if (isVertex(v)) body.credential_json = v.credential_json.trim();
+    else body.api_key = v.api_key;
     const x = await api("PUT", `/api/admin/providers/${encodeURIComponent(v.name)}`, body);
     if (x.ok) { toast("Provider saved"); adminProviders(c); return true; }
     toast((x.data && x.data.error) || "Failed", "err"); return false;

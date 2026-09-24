@@ -255,10 +255,15 @@ missing from the dropdown can still be typed in by hand.
   plain VM, say. It is sealed at rest like any other credential. The console
   gives it a field of its own; the API-key field is not used by this kind.
 
-One direction only, today: a blank credential on a save *keeps* whatever is
-stored, so a provider that has been given an explicit key cannot be returned to
-federated identity from the console. Recreate it under a new name, or clear
-`cred_enc` in the database.
+A blank credential on a save *keeps* whatever is stored, so an unrelated edit
+never removes a key. To return a provider that has been given an explicit key to
+federated identity, open it in the console, tick **Remove the stored
+credential** — offered only while one is stored — and save. The provider list
+then reads `federated` again, and the next request authenticates as the pod's
+own identity; the registry rebuilt by that save resolves a fresh ambient token
+source rather than reusing the one minted from the removed key. Over the admin
+API, the same is a `PUT` with `"clear_credential": true` (see
+[API → Provider fields](api.md#provider-fields)).
 
 Credential bytes that do not resolve **disable that provider**, loudly, with an
 error in the log — never a silent fall back to the ambient identity, which
