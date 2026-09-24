@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -283,13 +284,14 @@ func (s *Server) handleAdminPutProvider(w http.ResponseWriter, r *http.Request) 
 	sess, _ := sessionFrom(r.Context())
 	name := r.PathValue("name")
 	var body struct {
-		Kind           string          `json:"kind"`
-		BaseURL        string          `json:"base_url"`
-		Enabled        bool            `json:"enabled"`
-		MaxConcurrency int             `json:"max_concurrency"`
-		Config         json.RawMessage `json:"config"`          // kind-specific structured configuration
-		APIKey         string          `json:"api_key"`         // blank = keep existing
-		CredentialJSON string          `json:"credential_json"` // a service-account key; blank = keep existing
+		Kind            string          `json:"kind"`
+		BaseURL         string          `json:"base_url"`
+		Enabled         bool            `json:"enabled"`
+		MaxConcurrency  int             `json:"max_concurrency"`
+		Config          json.RawMessage `json:"config"`           // kind-specific structured configuration
+		APIKey          string          `json:"api_key"`          // blank = keep existing
+		CredentialJSON  string          `json:"credential_json"`  // a service-account key; blank = keep existing
+		ClearCredential bool            `json:"clear_credential"` // remove the stored credential
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeControlError(w, http.StatusBadRequest, "invalid body")
@@ -302,20 +304,23 @@ func (s *Server) handleAdminPutProvider(w http.ResponseWriter, r *http.Request) 
 	if body.MaxConcurrency < 0 {
 		body.MaxConcurrency = 0
 	}
-	// Both fields seal into the same column, so a request setting both leaves
-	// it ambiguous which identity was meant. Say so rather than pick one.
-	if body.APIKey != "" && body.CredentialJSON != "" {
-		writeControlError(w, http.StatusBadRequest, "set api_key or credential_json, not both")
+	secret, change, err := credentialToStore(body.APIKey, body.CredentialJSON, body.ClearCredential)
+	if err != nil {
+		writeControlError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	// A save that omits the configuration keeps the one already stored, so
 	// reading it is what "keep" means. A provider that does not exist yet has
-	// none, which the COALESCE renders as the empty string.
+	// none, which the COALESCE renders as the empty string. Whether a
+	// credential is stored is read alongside, so a clear with nothing to
+	// remove is audited as what it was.
 	var stored string
+	var hadCredential bool
 	if err := s.st.PG.QueryRow(r.Context(),
-		`SELECT COALESCE((SELECT config::text FROM providers WHERE name = $1), '')`, name,
-	).Scan(&stored); err != nil {
+		`SELECT COALESCE((SELECT config::text FROM providers WHERE name = $1), ''),
+			EXISTS (SELECT 1 FROM providers WHERE name = $1 AND cred_enc IS NOT NULL)`, name,
+	).Scan(&stored, &hadCredential); err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to read provider")
 		return
 	}
@@ -326,14 +331,10 @@ func (s *Server) handleAdminPutProvider(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// nil leaves whatever credential is already stored in place (see the
-	// COALESCE below); a non-nil value replaces it.
+	// COALESCE below) unless the save clears it; a non-nil value replaces it.
 	var sealed []byte
-	cred := body.APIKey
-	if body.CredentialJSON != "" {
-		cred = body.CredentialJSON
-	}
-	if cred != "" {
-		sealed, err = s.sealer.Seal([]byte(cred))
+	if change == credentialSet {
+		sealed, err = s.sealer.Seal([]byte(secret))
 		if err != nil {
 			writeControlError(w, http.StatusInternalServerError, "failed to seal credential")
 			return
@@ -345,8 +346,10 @@ func (s *Server) handleAdminPutProvider(w http.ResponseWriter, r *http.Request) 
 		ON CONFLICT (name) DO UPDATE SET
 			kind = EXCLUDED.kind, base_url = EXCLUDED.base_url, enabled = EXCLUDED.enabled,
 			max_concurrency = EXCLUDED.max_concurrency, config = EXCLUDED.config,
-			cred_enc = COALESCE(EXCLUDED.cred_enc, providers.cred_enc), updated_at = now()`,
+			cred_enc = CASE WHEN $8 THEN NULL ELSE COALESCE(EXCLUDED.cred_enc, providers.cred_enc) END,
+			updated_at = now()`,
 		name, body.Kind, body.BaseURL, body.Enabled, body.MaxConcurrency, config, sealed,
+		change == credentialCleared,
 	); err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to save provider")
 		return
@@ -357,14 +360,67 @@ func (s *Server) handleAdminPutProvider(w http.ResponseWriter, r *http.Request) 
 		slog.Error("provider reload failed", "err", err)
 	}
 
-	// Audit without the secret. The configuration is not one — it holds a
+	if change == credentialCleared && !hadCredential {
+		change = credentialKept
+	}
+
+	// Audit without the secret. has_key predates credential and stays for the
+	// readers of existing entries. The configuration is not one — it holds a
 	// cloud project and location, both of which the operator just typed.
 	s.audit(r.Context(), sess.principal.Subject, "provider.put", name, map[string]any{
 		"kind": body.Kind, "base_url": body.BaseURL, "enabled": body.Enabled,
 		"max_concurrency": body.MaxConcurrency, "config": json.RawMessage(config),
-		"has_key": sealed != nil,
+		"has_key": sealed != nil, "credential": change,
 	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
+}
+
+// credentialChange is what a provider save did to the stored credential. The
+// audit trail records it, because has_key alone — whether this save supplied
+// one — cannot tell a clear from a save that left the credential alone.
+type credentialChange string
+
+const (
+	credentialKept    credentialChange = "kept"
+	credentialSet     credentialChange = "set"
+	credentialCleared credentialChange = "cleared"
+)
+
+// credentialToStore decides what a provider save does to the stored
+// credential, and returns the secret to seal when it sets one.
+//
+// A blank credential keeps the stored one, deliberately: a client that knows
+// nothing about credentials — a script toggling "enabled", a console that
+// predates a field — must not wipe a secret as a side effect of an unrelated
+// edit. Removing one therefore takes its own explicit flag, which no such
+// client sends.
+//
+// Clearing is offered for every kind, not only Vertex. Vertex is the kind with
+// the obvious working state on the far side — the pod's federated identity —
+// but ollama and an openai-compatible endpoint behind a custom base_url can run
+// keyless too, and for the rest, taking a leaked or revoked key out of storage
+// is a legitimate act in itself: the operator asked for a provider that can
+// only fail, and the provider list shows it has no credential.
+func credentialToStore(apiKey, credentialJSON string, clear bool) (string, credentialChange, error) {
+	// Both fields seal into the same column, so a request setting both leaves
+	// it ambiguous which identity was meant. Say so rather than pick one.
+	if apiKey != "" && credentialJSON != "" {
+		return "", "", errors.New("set api_key or credential_json, not both")
+	}
+	secret := apiKey
+	if credentialJSON != "" {
+		secret = credentialJSON
+	}
+	switch {
+	case clear && secret != "":
+		return "", "", errors.New("set a credential or clear_credential, not both")
+	case clear:
+		return "", credentialCleared, nil
+	case secret != "":
+		return secret, credentialSet, nil
+	default:
+		return "", credentialKept, nil
+	}
 }
 
 // providerConfigToStore decides which structured configuration a save should

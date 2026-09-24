@@ -135,16 +135,23 @@ to it — adding the two double-counts. Operators see the same split as
 ### Provider fields
 
 `PUT /api/admin/providers/{name}` takes `kind`, `base_url`, `enabled`,
-`max_concurrency`, and three fields worth spelling out:
+`max_concurrency`, and four fields worth spelling out:
 
 | Field | Meaning |
 |-------|---------|
 | `config` | Kind-specific structured configuration, stored as JSON. Today only `vertex` uses it, for `{"project": "...", "location": "..."}`. **A save that omits it keeps what is stored** — unlike `base_url` or `enabled`, which are replaced wholesale — so a client that knows nothing about a kind's configuration cannot erase it as a side effect of an unrelated edit. A configuration that could never serve a request is rejected on save. |
 | `api_key` | Static key for the OpenAI-compatible kinds. Blank keeps the stored credential. |
 | `credential_json` | A Google service-account JSON key for `vertex`. Blank keeps the stored credential — and, when nothing is stored, means the gateway authenticates as its own federated identity. |
+| `clear_credential` | `true` removes the stored credential. Blank credential fields never do, so a client that knows nothing about credentials cannot wipe one by accident; removal takes this explicit flag. A cleared `vertex` provider authenticates as the pod's own federated identity from the next request. Offered for every kind: `ollama` and a keyless endpoint behind `base_url` work without a key, and for the rest, taking a leaked or revoked key out of storage is worth doing even though the provider then cannot authenticate. |
 
 `api_key` and `credential_json` seal into the same column, so a request setting
-both is rejected rather than resolved by picking one.
+both is rejected rather than resolved by picking one. For the same reason, a
+request that sets a credential and sets `clear_credential` is rejected too.
+
+The `provider.put` audit entry records `credential` as `set`, `cleared` or
+`kept`, alongside `has_key` (whether this save supplied one), so a clear is
+distinguishable from a save that left the credential alone. A clear with
+nothing stored to remove is recorded as `kept`.
 
 `GET /api/admin/providers` returns `config` verbatim (it holds a cloud project
 and location, not secrets) and reports the credential only as

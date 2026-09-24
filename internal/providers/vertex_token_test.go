@@ -148,6 +148,51 @@ func TestGoogleTokenSourceDistinguishesCredentials(t *testing.T) {
 	}
 }
 
+// TestNewVertexFromRowAfterAClearUsesTheAmbientIdentity is the failure a
+// credential clear exists to prevent: a provider rebuilt without its stored
+// credential must mint from the pod's own identity, not keep serving a token
+// from the cached source of the credential that was just removed.
+func TestNewVertexFromRowAfterAClearUsesTheAmbientIdentity(t *testing.T) {
+	var explicitHits, ambientHits atomic.Int32
+	explicit := tokenEndpoint(t, &explicitHits)
+	ambient := tokenEndpoint(t, &ambientHits)
+
+	// The ambient source is cached process-wide like any other; start and end
+	// without one, so this test sees its own environment and no other test
+	// inherits it. The explicit credential is unique to this test, so its
+	// cache entry cannot collide with anyone's.
+	forget := func() {
+		googleTokenMu.Lock()
+		delete(googleTokenSources, googleTokenFingerprint(nil))
+		googleTokenMu.Unlock()
+	}
+	forget()
+	t.Cleanup(forget)
+
+	path := filepath.Join(t.TempDir(), "ambient.json")
+	if err := os.WriteFile(path, serviceAccountJSON(t, "after-clear-ambient", ambient.URL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", path)
+
+	row := store.ProviderRow{Name: "vx", Kind: "vertex", Config: json.RawMessage(`{"project":"acme"}`)}
+	for _, cred := range [][]byte{serviceAccountJSON(t, "after-clear-explicit", explicit.URL), nil} {
+		v, err := newVertexFromRow(context.Background(), row, cred, nil)
+		if err != nil {
+			t.Fatalf("newVertexFromRow: %v", err)
+		}
+		if _, err := v.bearer(context.Background()); err != nil {
+			t.Fatalf("bearer: %v", err)
+		}
+	}
+	if got := explicitHits.Load(); got != 1 {
+		t.Errorf("explicit credential exchanged %d times, want 1 — only before the clear", got)
+	}
+	if got := ambientHits.Load(); got != 1 {
+		t.Errorf("ambient identity exchanged %d times, want 1 — the cleared provider did not switch to it", got)
+	}
+}
+
 // TestGoogleTokenSourceRejectsUnusableCredentials is the security-relevant
 // half: unusable bytes must be an error, never a quiet fall back to the
 // ambient identity. Falling back would run the gateway as a different

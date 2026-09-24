@@ -47,3 +47,44 @@ func TestProviderConfigToStore(t *testing.T) {
 		})
 	}
 }
+
+// TestCredentialToStore covers what a provider save does to the stored
+// credential. The asymmetry is the point: a save that says nothing keeps the
+// stored credential, so only an explicit clear can remove one, and a request
+// cannot both set and clear.
+func TestCredentialToStore(t *testing.T) {
+	cases := []struct {
+		name       string
+		apiKey     string
+		credJSON   string
+		clear      bool
+		wantSecret string
+		wantChange credentialChange
+		wantErr    bool
+	}{
+		{"a save that says nothing keeps the stored credential", "", "", false, "", credentialKept, false},
+		{"an api key replaces it", "sk-1", "", false, "sk-1", credentialSet, false},
+		{"a service-account key replaces it", "", `{"type":"service_account"}`, false, `{"type":"service_account"}`, credentialSet, false},
+		{"an explicit clear removes it", "", "", true, "", credentialCleared, false},
+		{"both credential fields are rejected", "sk-1", "{}", false, "", "", true},
+		{"clearing while setting an api key is rejected", "sk-1", "", true, "", "", true},
+		{"clearing while setting a service-account key is rejected", "", "{}", true, "", "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			secret, change, err := credentialToStore(c.apiKey, c.credJSON, c.clear)
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("want an error, got %q (%s)", secret, change)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("credentialToStore: %v", err)
+			}
+			if secret != c.wantSecret || change != c.wantChange {
+				t.Errorf("got (%q, %s), want (%q, %s)", secret, change, c.wantSecret, c.wantChange)
+			}
+		})
+	}
+}
