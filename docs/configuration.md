@@ -286,8 +286,8 @@ the publisher prefix is normalised for the wire. A target spelled
 `gemini-2.5-pro` and priced as `google/gemini-2.5-pro` therefore costs nothing.
 Spelling both with the prefix is the convention. Pro charges more above 200 000
 prompt tokens, which the row expresses as a
-[long-prompt tier](#long-prompt-price-tiers). The rows in use, and the gap left
-in them, are listed under
+[long-prompt tier](#long-prompt-price-tiers). The rates for every id the curated
+list offers, and why each is or is not offered, are listed under
 [Operations → Vertex AI prices](operations.md#vertex-ai-prices).
 
 **Thinking tokens are billed and are now counted.** Gemini 2.5 models think by

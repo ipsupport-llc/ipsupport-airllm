@@ -368,30 +368,67 @@ Two consequences worth knowing:
 ### Vertex AI prices
 
 Google publishes no machine-readable price list for these models, so the
-`pricing` rows are entered by hand. Re-checked 2026-09-05 against Google's
-published rates, per 1M tokens:
+`pricing` rows are entered by hand, one per id the curated model list offers.
+Rates are Google's published standard text rates for the **Global endpoint**,
+per 1M tokens, which is what a provider left at the default `location: global`
+pays; the same page lists regional endpoints at 10% more for the Gemini 3
+family. The 2.5 rates were re-checked 2026-09-05, the Gemini 3 rates read
+2026-09-24:
 
 | Model | Input | Output (thinking included) | Above 200 000 prompt tokens |
 |-------|-------|----------------------------|-----------------------------|
 | `google/gemini-2.5-flash` | $0.30 | $2.50 | no tier |
 | `google/gemini-2.5-flash-lite` | $0.10 | $0.40 | no tier |
 | `google/gemini-2.5-pro` | $1.25 | $10.00 | $2.50 / $15.00 |
+| `google/gemini-3.1-flash-lite` | $0.25 | $1.50 | no tier |
+| `google/gemini-3.1-pro-preview` | $2.00 | $12.00 | $4.00 / $18.00 |
+| `google/gemini-3.5-flash` | $1.50 | $9.00 | no tier |
+| `google/gemini-3.5-flash-lite` | $0.30 | $2.50 | no tier |
+| `google/gemini-3.8-flash` | $0.75 | $3.75 | no tier — **introductory, see below** |
 
-Pro's second pair of rates is entered on the row itself as a
+The Pro rows' second pair of rates is entered on the row itself as a
 [long-prompt tier](configuration.md#long-prompt-price-tiers) — the whole call
-reprices, output included, once the prompt passes 200 000 tokens. Flash and
-Flash-Lite have no such tier and are flat at any prompt size.
+reprices, output included, once the prompt passes 200 000 tokens. The Flash and
+Flash-Lite rows have no such tier and are flat at any prompt size. Audio input
+is dearer than text on 3.1 Flash-Lite ($0.50); the table holds one input rate
+per row, so audio prompts there are under-priced.
 
-**Known gap:** the curated model list also offers `google/gemini-3-flash` and
-`google/gemini-3-pro`, which have **no price rows at all** — an alias pointed
-at either meters tokens but costs $0 — and neither id is verified against what
-Vertex actually serves, so pricing them as they are spelled today would be
-worse than leaving them unpriced. Which Gemini 3 models this instance should
-offer is an open decision. What is settled is that the family is tiered the
-same way 2.5 Pro is, so whichever ids that list lands on want tiered rows
-rather than flat ones: Gemini **3.1** Pro — a distinct model from the
-`gemini-3-pro` in the list — publishes $2.00 / $12.00 up to 200 000 prompt
-tokens and $4.00 / $18.00 above it (read 2026-09-08).
+**Gemini 3.8 Flash is on introductory pricing that ends 2026-12-31.** From
+**2027-01-01** Google charges $1.50 / $7.50, and the row has to be re-entered
+by hand on that date — nothing in the gateway expires it, so left alone it
+under-prices every 3.8 Flash call by half from then on. (3.6 and 3.7 Flash carry
+the same offer; they are not offered here, see below.)
+
+**The Gemini 2.5 family retires on 2026-10-20.** Google names
+`gemini-3.5-flash` as the replacement for 2.5 Pro, and 3.5 Flash-Lite or 3.1
+Flash-Lite for 2.5 Flash and Flash-Lite. Any alias tier still targeting a 2.5 id
+on that date stops being served; move it before then, and drop
+the 2.5 ids from the curated list once nothing points at them.
+
+**What the curated model list offers, and why.** The alias editor's Vertex
+dropdown is a hand-maintained list (`vertexCuratedModels` in
+`internal/providers/vertex.go`), not a catalogue — a fake upstream answers to
+any id, so no test can check it. On 2026-09-24 each candidate was called once
+through passthrough (`vertex/google/<id>`) against Vertex's Global endpoint:
+
+- **Offered:** exactly the ids in the table above. Every one answered `200`.
+- **Removed:** `gemini-3-flash` and `gemini-3-pro`, which the list used to
+  offer. Vertex answers both with `404 Publisher model … was not found`, and
+  `gemini-3-pro-preview` likewise — there is no Gemini 3 Pro on Vertex, only
+  3.1 Pro, and only as a preview.
+- **Answered, but deliberately not offered:** `gemini-3-flash-preview`
+  (deprecated in favour of `gemini-3.5-flash`), and `gemini-3.6-flash` /
+  `gemini-3.7-flash`, both short-term models for which Google already names
+  `gemini-3.8-flash` as the replacement. `gemini-3.8-flash-cyber`, a
+  specialised model, was not called and is not offered. Any of them can
+  still be typed in by hand — but price it first, or the alias meters tokens
+  at $0.
+
+`gemini-3.1-pro-preview` is the only Pro-class Gemini 3 model and is offered
+despite being a preview; a preview can be withdrawn on shorter notice than the
+models Google commits to for at least 12 months (3.5 Flash, 3.5 Flash-Lite,
+3.1 Flash-Lite, per its model-versions page read 2026-09-24), so re-check it
+when touching this list.
 
 ## Scaling the DLP BERT sidecar
 
