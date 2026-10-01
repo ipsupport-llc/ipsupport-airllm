@@ -73,7 +73,7 @@ var callModes = map[string]struct {
 func TestOpenAICompatDoesNotSendToolCallExtras(t *testing.T) {
 	for mode, m := range callModes {
 		t.Run(mode, func(t *testing.T) {
-			up := newVertexUpstream(t, http.StatusOK, m.contentType, m.resp)
+			up := newRecordingUpstream(t, http.StatusOK, m.contentType, m.resp)
 			p := NewOpenAICompat("up", "openai", up.URL, "sk-test")
 			req := parallelToolHistory(json.RawMessage(geminiSignature))
 			if err := m.call(p, req); err != nil {
@@ -103,7 +103,7 @@ func TestVertexSendsTheThoughtSignatureBack(t *testing.T) {
 	} {
 		for mode, m := range callModes {
 			t.Run(name+"/"+mode, func(t *testing.T) {
-				up := newVertexUpstream(t, http.StatusOK, m.contentType, m.resp)
+				up := newRecordingUpstream(t, http.StatusOK, m.contentType, m.resp)
 				p := NewVertex("vx", up.URL, stubTokenSource{token: "ya29.stub"})
 				req := parallelToolHistory(tc.extra)
 				if err := m.call(p, req); err != nil {
@@ -118,5 +118,32 @@ func TestVertexSendsTheThoughtSignatureBack(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestVertexKeepsOtherExtraContentWhenAddingTheStandIn(t *testing.T) {
+	up := newRecordingUpstream(t, http.StatusOK, "application/json", okChat)
+	p := NewVertex("vx", up.URL, stubTokenSource{token: "ya29.stub"})
+	if err := viaChat(p, parallelToolHistory(json.RawMessage(`{"google":{"other":1},"acme":true}`))); err != nil {
+		t.Fatal(err)
+	}
+	want := `{"acme":true,"google":{"other":1,"thought_signature":"skip_thought_signature_validator"}}`
+	if got := sentExtras(t, up.body); got[0] != want {
+		t.Errorf("extra_content sent = %q, want %q", got[0], want)
+	}
+}
+
+func TestVertexLeavesOtherPublishersUnsigned(t *testing.T) {
+	// Vertex's OpenAI surface also serves other publishers' models; the
+	// signature rule is Gemini's, so they get the request as the client sent it.
+	up := newRecordingUpstream(t, http.StatusOK, "application/json", okChat)
+	p := NewVertex("vx", up.URL, stubTokenSource{token: "ya29.stub"})
+	req := parallelToolHistory(nil)
+	req.Model = "meta/llama-4-maverick-17b-128e-instruct-maas"
+	if err := viaChat(p, req); err != nil {
+		t.Fatal(err)
+	}
+	if got := sentExtras(t, up.body); got[0] != "" || got[1] != "" {
+		t.Errorf("extra_content sent to a non-Gemini model: %q", got)
 	}
 }

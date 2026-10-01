@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -108,24 +109,23 @@ func (p *Vertex) bearer(ctx context.Context) (string, error) {
 }
 
 // vertexRequest qualifies the model id for the wire, leaving the caller's
-// request — and so the ledger's spelling of the model — untouched. It also
-// makes sure every assistant step's first function call carries a thought
-// signature, which Gemini 3 refuses the request without.
+// request — and so the ledger's spelling of the model — untouched. For a
+// Gemini model it also makes sure every assistant step's first function call
+// carries a thought signature, which Gemini 3 refuses the request without.
 func vertexRequest(in llm.ChatRequest) llm.ChatRequest {
 	out := in
 	out.Model = normalizeVertexModel(in.Model)
-	for i, m := range in.Messages {
-		if len(m.ToolCalls) == 0 || hasThoughtSignature(m.ToolCalls[0]) {
-			continue
-		}
-		if &out.Messages[0] == &in.Messages[0] {
-			out.Messages = append([]llm.Message(nil), in.Messages...)
-		}
-		calls := append([]llm.ToolCall(nil), m.ToolCalls...)
-		calls[0].ExtraContent = skipThoughtSignature
-		out.Messages[i].ToolCalls = calls
+	if !strings.HasPrefix(out.Model, "google/") {
+		return out
 	}
-	return out
+	return rewriteToolCalls(out, func(calls []llm.ToolCall) []llm.ToolCall {
+		if len(calls) == 0 || hasThoughtSignature(calls[0]) {
+			return nil
+		}
+		signed := slices.Clone(calls)
+		signed[0].ExtraContent = withThoughtSignature(calls[0].ExtraContent, skipThoughtSignature)
+		return signed
+	})
 }
 
 // skipThoughtSignature is Google's documented stand-in for function calls
@@ -134,18 +134,39 @@ func vertexRequest(in llm.ChatRequest) llm.ChatRequest {
 // nowhere to carry it. Google calls it a last resort that costs reasoning
 // quality, so a real signature always wins. Without it, each of those
 // requests would be a 400 that aborts rather than falls back.
-var skipThoughtSignature = json.RawMessage(`{"google":{"thought_signature":"skip_thought_signature_validator"}}`)
+const skipThoughtSignature = "skip_thought_signature_validator"
+
+// geminiExtraContent is the part of a tool call's extra_content that Gemini
+// reads.
+type geminiExtraContent struct {
+	Google struct {
+		ThoughtSignature string `json:"thought_signature"`
+	} `json:"google"`
+}
 
 // hasThoughtSignature reports whether a tool call carries Gemini's thought
 // signature. Gemini signs only the first call of a parallel step, so this is
 // asked of that call alone.
 func hasThoughtSignature(tc llm.ToolCall) bool {
-	var extra struct {
-		Google struct {
-			ThoughtSignature string `json:"thought_signature"`
-		} `json:"google"`
-	}
+	var extra geminiExtraContent
 	return json.Unmarshal(tc.ExtraContent, &extra) == nil && extra.Google.ThoughtSignature != ""
+}
+
+// withThoughtSignature returns extra with google.thought_signature set to
+// sig, keeping every other key. Anything that is not a JSON object is
+// replaced, since Vertex could not have read it anyway.
+func withThoughtSignature(extra json.RawMessage, sig string) json.RawMessage {
+	var top, google map[string]json.RawMessage
+	if json.Unmarshal(extra, &top) != nil || top == nil {
+		top = map[string]json.RawMessage{}
+	}
+	if json.Unmarshal(top["google"], &google) != nil || google == nil {
+		google = map[string]json.RawMessage{}
+	}
+	google["thought_signature"], _ = json.Marshal(sig)
+	top["google"], _ = json.Marshal(google)
+	b, _ := json.Marshal(top)
+	return b
 }
 
 // Chat performs a non-streaming upstream call. The two-minute ceiling is

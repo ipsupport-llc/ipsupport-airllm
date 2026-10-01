@@ -28,11 +28,12 @@ to every other protocol.
 
 ## What the IR carries
 
-Messages (role, content, name), tool definitions, tool calls and tool
-results, tool_choice (OpenAI-shaped in the IR — Anthropic's own
-`{"type":"auto"|"any"|"tool","name":...}` shape is translated to it at
-decode time, since every real upstream speaks OpenAI's shape regardless of
-ingress protocol), temperature, max_tokens,
+Messages (role, content, name), tool definitions, tool calls (including a
+vendor's opaque per-call `extra_content`, which is where Gemini's thought
+signature travels) and tool results, tool_choice (OpenAI-shaped in the IR —
+Anthropic's own `{"type":"auto"|"any"|"tool","name":...}` shape is translated
+to it at decode time, since every real upstream speaks OpenAI's shape
+regardless of ingress protocol), temperature, max_tokens,
 stream flag, usage (prompt/completion tokens, and the reasoning share of the
 completion count — see
 [API reference → Reasoning tokens](api.md#reasoning-tokens)), finish/stop
@@ -61,6 +62,11 @@ equivalent. When a request crosses protocols, these may degrade:
   there if an upstream never reports prompt tokens at all). A client that
   trusts `message_start`'s number without reading the stream to completion
   will see the estimate, not the real count.
+- **Gemini thought signatures** — a `tool_use` block has nowhere to carry
+  `extra_content`, so an Anthropic client cannot echo the signature back.
+  Vertex then sends Google's stand-in instead, which Google says costs some
+  reasoning quality. See
+  [Operations → Gemini thought signatures](operations.md#gemini-thought-signatures).
 
 There's no way to avoid this today: every real provider kind
 (openai/openrouter/xai/groq/ollama/muse/vertex) speaks the OpenAI wire format

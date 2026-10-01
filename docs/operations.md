@@ -465,12 +465,14 @@ upstream, upstream response to client, and streamed deltas. A client therefore
 only has to echo the tool calls it received, as the OpenAI tool-calling loop
 already does. Two rules sit on top of that:
 
-- **Vertex.** If an assistant message's first tool call has no signature, the
-  gateway sets Google's documented stand-in, `skip_thought_signature_validator`,
-  on that call. This covers a step served by a fallback tier, a client that
-  drops `extra_content`, and Anthropic ingress, which has no place for it.
-  Google calls the stand-in a last resort that costs reasoning quality, so a
-  real signature is always sent as is.
+- **Vertex, Gemini models (`google/…`).** If an assistant message's first tool
+  call has no signature, the gateway adds Google's documented stand-in,
+  `skip_thought_signature_validator`, to that call's `extra_content`, keeping
+  any other keys already there. This covers a step served by a fallback tier,
+  a client that drops `extra_content`, and Anthropic ingress, which has no
+  place for it. Google calls the stand-in a last resort that costs reasoning
+  quality, so a real signature is always sent as is. Other publishers' models
+  on Vertex get the request as the client sent it.
 - **Every other provider.** `extra_content` is removed before the request goes
   upstream. A turn that falls back from a Vertex tier still carries it, and
   the other vendors should get the request they got before the field existed.

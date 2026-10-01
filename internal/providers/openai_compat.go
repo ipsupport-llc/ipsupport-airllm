@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"mime/multipart"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -102,30 +103,16 @@ func (p *OpenAICompat) ChatStream(ctx context.Context, in llm.ChatRequest, yield
 // got before the field existed. The caller's request is shared across tiers,
 // so it is copied, never edited.
 func withoutToolCallExtras(in llm.ChatRequest) llm.ChatRequest {
-	out := in
-	for i, m := range in.Messages {
-		if !hasToolCallExtras(m) {
-			continue
+	return rewriteToolCalls(in, func(calls []llm.ToolCall) []llm.ToolCall {
+		if !slices.ContainsFunc(calls, func(tc llm.ToolCall) bool { return len(tc.ExtraContent) > 0 }) {
+			return nil
 		}
-		if &out.Messages[0] == &in.Messages[0] {
-			out.Messages = append([]llm.Message(nil), in.Messages...)
+		stripped := slices.Clone(calls)
+		for j := range stripped {
+			stripped[j].ExtraContent = nil
 		}
-		calls := append([]llm.ToolCall(nil), m.ToolCalls...)
-		for j := range calls {
-			calls[j].ExtraContent = nil
-		}
-		out.Messages[i].ToolCalls = calls
-	}
-	return out
-}
-
-func hasToolCallExtras(m llm.Message) bool {
-	for _, tc := range m.ToolCalls {
-		if tc.ExtraContent != nil {
-			return true
-		}
-	}
-	return false
+		return stripped
+	})
 }
 
 // ListModels fetches GET {base}/models and returns the sorted, de-duplicated
