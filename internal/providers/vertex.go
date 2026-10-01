@@ -2,6 +2,7 @@ package providers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -107,11 +108,44 @@ func (p *Vertex) bearer(ctx context.Context) (string, error) {
 }
 
 // vertexRequest qualifies the model id for the wire, leaving the caller's
-// request — and so the ledger's spelling of the model — untouched.
+// request — and so the ledger's spelling of the model — untouched. It also
+// makes sure every assistant step's first function call carries a thought
+// signature, which Gemini 3 refuses the request without.
 func vertexRequest(in llm.ChatRequest) llm.ChatRequest {
 	out := in
 	out.Model = normalizeVertexModel(in.Model)
+	for i, m := range in.Messages {
+		if len(m.ToolCalls) == 0 || hasThoughtSignature(m.ToolCalls[0]) {
+			continue
+		}
+		if &out.Messages[0] == &in.Messages[0] {
+			out.Messages = append([]llm.Message(nil), in.Messages...)
+		}
+		calls := append([]llm.ToolCall(nil), m.ToolCalls...)
+		calls[0].ExtraContent = skipThoughtSignature
+		out.Messages[i].ToolCalls = calls
+	}
 	return out
+}
+
+// skipThoughtSignature is Google's documented stand-in for function calls
+// that a model without signatures produced: a step served by a fallback tier,
+// a client that does not echo extra_content, or Anthropic ingress, which has
+// nowhere to carry it. Google calls it a last resort that costs reasoning
+// quality, so a real signature always wins. Without it, each of those
+// requests would be a 400 that aborts rather than falls back.
+var skipThoughtSignature = json.RawMessage(`{"google":{"thought_signature":"skip_thought_signature_validator"}}`)
+
+// hasThoughtSignature reports whether a tool call carries Gemini's thought
+// signature. Gemini signs only the first call of a parallel step, so this is
+// asked of that call alone.
+func hasThoughtSignature(tc llm.ToolCall) bool {
+	var extra struct {
+		Google struct {
+			ThoughtSignature string `json:"thought_signature"`
+		} `json:"google"`
+	}
+	return json.Unmarshal(tc.ExtraContent, &extra) == nil && extra.Google.ThoughtSignature != ""
 }
 
 // Chat performs a non-streaming upstream call. The two-minute ceiling is
