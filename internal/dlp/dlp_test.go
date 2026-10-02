@@ -69,3 +69,33 @@ func TestRedactNoFindings(t *testing.T) {
 		t.Errorf("Redact altered clean text: %q", got)
 	}
 }
+
+// TestMergePrefersHigherPriorityPatternOverPosition is the DLP-I1 fix:
+// bearer_token's match starts earlier in the text and overlaps openai_key's
+// match, but openai_key is listed earlier in patterns (more specific) and
+// must win regardless of which span starts first.
+func TestMergePrefersHigherPriorityPatternOverPosition(t *testing.T) {
+	in := []Finding{
+		{Label: "bearer_token", Start: 0, End: 30},
+		{Label: "openai_key", Start: 7, End: 30},
+	}
+	got := Merge(in)
+	if len(got) != 1 || got[0].Label != "openai_key" {
+		t.Fatalf("Merge(%v) = %v, want only openai_key to survive", in, got)
+	}
+}
+
+// TestScanPrefersSpecificKeyLabelOverBearerToken proves the same fix against
+// real regexes: "Bearer sk-..." matches BOTH bearer_token (starting at
+// "Bearer") and openai_key (starting a few bytes later, at "sk-"), and the
+// two spans genuinely overlap.
+func TestScanPrefersSpecificKeyLabelOverBearerToken(t *testing.T) {
+	text := "Authorization: Bearer sk-abcDEFghij0123456789klmnopQRSTUVWXYZ"
+	got := Scan(text)
+	if !hasLabel(got, "openai_key") {
+		t.Errorf("expected the more specific openai_key label to survive, got %+v", got)
+	}
+	if hasLabel(got, "bearer_token") {
+		t.Errorf("bearer_token must not survive once it overlaps the more specific openai_key match, got %+v", got)
+	}
+}
