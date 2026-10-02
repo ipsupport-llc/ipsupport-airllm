@@ -166,6 +166,11 @@ pending captures with a stronger engine. For each capture it:
 3. Emits `dlp.false_negative` / `dlp.alert_cleared` webhooks and surfaces the
    capture in the review queue.
 
+A response the engine can't parse as JSON is treated as a scan error, not a
+confident "found nothing" — the capture is left pending for retry on the
+next run, rather than risk clearing a genuinely confirmed secret because an
+LLM ignored the "no prose, no markdown fences" instruction.
+
 ### The raw training window
 
 Accurate confirm/clear and training-data export need text whose byte offsets
