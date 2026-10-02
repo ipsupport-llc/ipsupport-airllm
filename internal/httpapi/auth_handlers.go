@@ -17,7 +17,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeControlError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
-	s.login.SetSession(w, p)
+	s.login.SetSession(w, r, p)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"subject":  p.Subject,
 		"roles":    p.Roles,

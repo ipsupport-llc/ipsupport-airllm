@@ -43,7 +43,7 @@ func TestRequireSessionRejectsStaleCookie(t *testing.T) {
 	// rest of the test, so any change in behavior below comes from the
 	// server re-checking the DB, not from a fresh login.
 	rec := httptest.NewRecorder()
-	sess.SetSession(rec, auth.Principal{Subject: subject, Roles: []string{auth.AdminRole}})
+	sess.SetSession(rec, httptest.NewRequest(http.MethodGet, "/", nil), auth.Principal{Subject: subject, Roles: []string{auth.AdminRole}})
 	var cookie *http.Cookie
 	for _, c := range rec.Result().Cookies() {
 		if c.Name == "air_session" {
