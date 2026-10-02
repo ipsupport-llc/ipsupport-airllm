@@ -42,10 +42,15 @@ func (s *Server) requireAPIKey(next http.HandlerFunc) http.HandlerFunc {
 func (s *Server) lookupKey(ctx context.Context, token string) (authedKey, error) {
 	var ak authedKey
 	var raw []byte
+	// Joined against users so a disabled owner's key stops authenticating
+	// immediately, not just when its policy_snapshot next gets rebuilt
+	// (RebuildKeySnapshotsUser only touches active keys' snapshots — it
+	// was never the mechanism that was supposed to revoke access here).
 	err := s.st.PG.QueryRow(ctx, `
-		SELECT id::text, user_id::text, policy_snapshot
-		FROM api_keys
-		WHERE hash = $1 AND status = 'active'`,
+		SELECT k.id::text, k.user_id::text, k.policy_snapshot
+		FROM api_keys k
+		JOIN users u ON u.id = k.user_id
+		WHERE k.hash = $1 AND k.status = 'active' AND NOT u.disabled`,
 		apikey.Hash(token),
 	).Scan(&ak.KeyID, &ak.UserID, &raw)
 	if err != nil {
