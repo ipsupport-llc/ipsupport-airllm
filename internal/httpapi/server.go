@@ -71,7 +71,7 @@ type Server struct {
 
 	// Test hooks: non-nil values replace the real implementations in tests.
 	auditHook    func(ctx context.Context, actor, action, target string, detail any)
-	ensureUserFn func(ctx context.Context, p auth.Principal) (string, error)
+	ensureUserFn func(ctx context.Context, p auth.Principal) (ensuredUser, error)
 }
 
 // NewServer builds the routed handler.

@@ -171,8 +171,8 @@ func newAuditTestServer(
 		auditHook: func(_ context.Context, _, action, target string, _ any) {
 			auditLog = append(auditLog, action+":"+target)
 		},
-		ensureUserFn: func(_ context.Context, p auth.Principal) (string, error) {
-			return "test-uid-" + p.Subject, nil
+		ensureUserFn: func(_ context.Context, p auth.Principal) (ensuredUser, error) {
+			return ensuredUser{id: "test-uid-" + p.Subject, roles: p.Roles}, nil
 		},
 	}
 	s.auditRoutes()

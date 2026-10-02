@@ -38,8 +38,8 @@ func newModelsTestServer(t *testing.T, reg *providers.Registry) *Server {
 	s := &Server{
 		mux:  http.NewServeMux(),
 		auth: &fakeAuth{principal: auth.Principal{Subject: "a", Roles: []string{auth.AdminRole}}},
-		ensureUserFn: func(_ context.Context, p auth.Principal) (string, error) {
-			return "uid-" + p.Subject, nil
+		ensureUserFn: func(_ context.Context, p auth.Principal) (ensuredUser, error) {
+			return ensuredUser{id: "uid-" + p.Subject, roles: p.Roles}, nil
 		},
 	}
 	s.regPtr.Store(reg)

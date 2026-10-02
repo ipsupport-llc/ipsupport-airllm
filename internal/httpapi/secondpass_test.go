@@ -50,8 +50,8 @@ func newSecondpassTestServer(t *testing.T, principal auth.Principal) *Server {
 		mux:       http.NewServeMux(),
 		auth:      &fakeAuth{principal: principal},
 		auditHook: func(_ context.Context, _, _, _ string, _ any) {},
-		ensureUserFn: func(_ context.Context, p auth.Principal) (string, error) {
-			return "uid-" + p.Subject, nil
+		ensureUserFn: func(_ context.Context, p auth.Principal) (ensuredUser, error) {
+			return ensuredUser{id: "uid-" + p.Subject, roles: p.Roles}, nil
 		},
 	}
 	s.adminRoutes()
