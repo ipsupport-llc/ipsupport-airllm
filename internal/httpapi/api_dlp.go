@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/dlp"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/webhook"
 )
 
 func (s *Server) handleAdminGetDLP(w http.ResponseWriter, _ *http.Request) {
@@ -140,6 +141,10 @@ func (s *Server) handleAdminCreateWebhook(w http.ResponseWriter, r *http.Request
 	}
 	if body.URL == "" {
 		writeControlError(w, http.StatusBadRequest, "url is required")
+		return
+	}
+	if err := webhook.ValidateURL(r.Context(), body.URL); err != nil {
+		writeControlError(w, http.StatusBadRequest, "invalid webhook url: "+err.Error())
 		return
 	}
 	if len(body.Events) == 0 {

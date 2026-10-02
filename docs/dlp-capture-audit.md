@@ -129,6 +129,13 @@ the secret value. A webhook's own signing secret is sealed with the same
 AES-GCM master key as provider credentials (`secret_enc`, never returned by the
 API) — a webhook with no secret still delivers, just unsigned.
 
+A webhook URL is rejected at creation time (and re-checked on every actual
+delivery attempt, including each hop of a redirect) if its host resolves to
+a loopback, private, link-local (including the 169.254.169.254 cloud
+metadata service), multicast, or unspecified address — this gateway's own
+process must never be usable to reach internal-only network targets via a
+webhook config.
+
 ## Capture store
 
 When capture is enabled, the gateway records request/response traffic
