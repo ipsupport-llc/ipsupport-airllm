@@ -27,8 +27,8 @@ func TestAdminPricingImport(t *testing.T) {
 		mux:  http.NewServeMux(),
 		st:   &store.Store{PG: pool},
 		auth: &fakeAuth{principal: auth.Principal{Subject: "admin", Roles: []string{auth.AdminRole}}},
-		ensureUserFn: func(_ context.Context, p auth.Principal) (string, error) {
-			return "uid-" + p.Subject, nil
+		ensureUserFn: func(_ context.Context, p auth.Principal) (ensuredUser, error) {
+			return ensuredUser{id: "uid-" + p.Subject, roles: p.Roles}, nil
 		},
 		pricing: pricing.New(),
 	}
@@ -78,8 +78,8 @@ func TestAdminPricingImportUnknownProvider(t *testing.T) {
 		mux:  http.NewServeMux(),
 		st:   &store.Store{PG: pool},
 		auth: &fakeAuth{principal: auth.Principal{Subject: "admin", Roles: []string{auth.AdminRole}}},
-		ensureUserFn: func(_ context.Context, p auth.Principal) (string, error) {
-			return "uid-" + p.Subject, nil
+		ensureUserFn: func(_ context.Context, p auth.Principal) (ensuredUser, error) {
+			return ensuredUser{id: "uid-" + p.Subject, roles: p.Roles}, nil
 		},
 		pricing: pricing.New(),
 	}
@@ -104,8 +104,8 @@ func TestAdminPricingImportUnsupportedProvider(t *testing.T) {
 		mux:  http.NewServeMux(),
 		st:   &store.Store{PG: pool},
 		auth: &fakeAuth{principal: auth.Principal{Subject: "admin", Roles: []string{auth.AdminRole}}},
-		ensureUserFn: func(_ context.Context, p auth.Principal) (string, error) {
-			return "uid-" + p.Subject, nil
+		ensureUserFn: func(_ context.Context, p auth.Principal) (ensuredUser, error) {
+			return ensuredUser{id: "uid-" + p.Subject, roles: p.Roles}, nil
 		},
 		pricing: pricing.New(),
 	}

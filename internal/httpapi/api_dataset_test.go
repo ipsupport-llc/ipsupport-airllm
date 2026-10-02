@@ -33,8 +33,8 @@ func newDatasetTestServer(
 		auditHook: func(_ context.Context, _, action, target string, _ any) {
 			auditLog = append(auditLog, action+":"+target)
 		},
-		ensureUserFn: func(_ context.Context, p auth.Principal) (string, error) {
-			return "test-uid-" + p.Subject, nil
+		ensureUserFn: func(_ context.Context, p auth.Principal) (ensuredUser, error) {
+			return ensuredUser{id: "test-uid-" + p.Subject, roles: p.Roles}, nil
 		},
 	}
 	// Register only the dataset export route to avoid needing s.st.
@@ -137,8 +137,8 @@ func TestDatasetExportNoBlobStore(t *testing.T) {
 		auditHook: func(_ context.Context, _, action, target string, _ any) {
 			auditLog = append(auditLog, action+":"+target)
 		},
-		ensureUserFn: func(_ context.Context, p auth.Principal) (string, error) {
-			return "uid-" + p.Subject, nil
+		ensureUserFn: func(_ context.Context, p auth.Principal) (ensuredUser, error) {
+			return ensuredUser{id: "uid-" + p.Subject, roles: p.Roles}, nil
 		},
 	}
 	s.mux.HandleFunc("POST /api/admin/dataset/export",
