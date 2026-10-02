@@ -1,10 +1,13 @@
 package config
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"log/slog"
+	"strings"
 	"testing"
 )
 
@@ -305,5 +308,26 @@ func TestOIDCRoleMap(t *testing.T) {
 	}
 	if c.OIDC.RoleMap["devs"] != "airllm_user" {
 		t.Errorf("RoleMap[devs] = %q", c.OIDC.RoleMap["devs"])
+	}
+}
+
+// TestParseRoleMapLogsDuplicateKey is the Store/config Minor fix: a repeated
+// idp_role key in OIDC_ROLE_MAP (an operator typo, e.g. "admin:x,admin:y")
+// resolved last-wins via plain map assignment with zero validation or log
+// line. Proves the last value still wins (unchanged behavior) AND that the
+// collision is now logged, naming both the ignored and applied value.
+func TestParseRoleMapLogsDuplicateKey(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(prev)
+
+	got := parseRoleMap("admin:airllm_admin,admin:airllm_user")
+	if got["admin"] != "airllm_user" {
+		t.Errorf("RoleMap[admin] = %q, want airllm_user (last one wins)", got["admin"])
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "admin") || !strings.Contains(logged, "airllm_admin") || !strings.Contains(logged, "airllm_user") {
+		t.Errorf("expected a warning naming the idp_role and both values, got log output: %s", logged)
 	}
 }
