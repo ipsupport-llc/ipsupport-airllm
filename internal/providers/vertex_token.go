@@ -8,6 +8,7 @@ import (
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
+	"golang.org/x/sync/singleflight"
 )
 
 // TokenSource mints the bearer token for an upstream whose credential is
@@ -23,12 +24,32 @@ const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform"
 // googleTokenSources caches resolved sources by a fingerprint of scope and
 // credential, so rebuilding the registry — which an ordinary provider edit
 // does — reuses the live access token instead of forcing a fresh exchange
-// against the token endpoint on every save. Bounded in practice by the number
-// of distinct credentials configured, which is the number of providers.
+// against the token endpoint on every save. PruneGoogleTokenSources keeps it
+// bounded by the number of currently-configured credentials rather than
+// every one ever configured (a rotated-away credential would otherwise
+// accumulate forever).
+//
+// googleTokenGroup deduplicates concurrent resolutions of the SAME
+// fingerprint without serializing resolutions of a DIFFERENT one:
+// googleTokenMu itself is only ever held for quick map access, never across
+// the slow ambient-credential resolution below, so an unrelated provider's
+// token lookup is never stalled by this one's.
 var (
 	googleTokenMu      sync.Mutex
 	googleTokenSources = map[string]TokenSource{}
+	googleTokenGroup   singleflight.Group
 )
+
+// resolveGoogleCredentials is the actual ambient/explicit credential
+// resolution call, indirected through a package variable so a test can
+// substitute a slow, controllable stand-in without making a real network
+// call or depending on this machine's ambient identity.
+var resolveGoogleCredentials = func(ctx context.Context, credJSON []byte) (*google.Credentials, error) {
+	if len(credJSON) > 0 {
+		return google.CredentialsFromJSON(ctx, credJSON, cloudPlatformScope)
+	}
+	return google.FindDefaultCredentials(ctx, cloudPlatformScope)
+}
 
 // GoogleTokenSource resolves a Google OAuth2 token source with the
 // cloud-platform scope: from credJSON when it is non-empty, and otherwise
@@ -55,28 +76,50 @@ func GoogleTokenSource(ctx context.Context, credJSON []byte) (TokenSource, error
 	fp := googleTokenFingerprint(credJSON)
 
 	googleTokenMu.Lock()
-	defer googleTokenMu.Unlock()
-	if ts, ok := googleTokenSources[fp]; ok {
+	ts, ok := googleTokenSources[fp]
+	googleTokenMu.Unlock()
+	if ok {
 		return ts, nil
 	}
 
-	ctx = context.WithoutCancel(ctx)
-	var (
-		creds *google.Credentials
-		err   error
-	)
-	if len(credJSON) > 0 {
-		creds, err = google.CredentialsFromJSON(ctx, credJSON, cloudPlatformScope)
-	} else {
-		creds, err = google.FindDefaultCredentials(ctx, cloudPlatformScope)
-	}
+	// singleflight.Do, not googleTokenMu, guards the actual resolution:
+	// concurrent calls for THIS fingerprint share one resolution, but a
+	// call for a DIFFERENT fingerprint runs immediately rather than
+	// waiting on this one's ambient-credential round trip.
+	v, err, _ := googleTokenGroup.Do(fp, func() (any, error) {
+		rctx := context.WithoutCancel(ctx)
+		creds, err := resolveGoogleCredentials(rctx, credJSON)
+		if err != nil {
+			return nil, err
+		}
+		ts := oauth2TokenSource{ts: creds.TokenSource}
+		googleTokenMu.Lock()
+		googleTokenSources[fp] = ts
+		googleTokenMu.Unlock()
+		return ts, nil
+	})
 	if err != nil {
 		return nil, err
 	}
+	return v.(TokenSource), nil
+}
 
-	ts := oauth2TokenSource{ts: creds.TokenSource}
-	googleTokenSources[fp] = ts
-	return ts, nil
+// PruneGoogleTokenSources removes every cached token source whose
+// fingerprint is not in keep. Called once per registry rebuild with the
+// fingerprints of every vertex credential currently configured (see
+// LoadFromStore), so a credential that was rotated away — whose fingerprint
+// changes the moment the stored ciphertext changes — doesn't sit in the
+// cache forever; without this, the cache is bounded by the number of
+// distinct credential VALUES ever configured across the process's whole
+// lifetime, not the number of providers configured right now.
+func PruneGoogleTokenSources(keep map[string]bool) {
+	googleTokenMu.Lock()
+	defer googleTokenMu.Unlock()
+	for fp := range googleTokenSources {
+		if !keep[fp] {
+			delete(googleTokenSources, fp)
+		}
+	}
 }
 
 // googleTokenFingerprint identifies a token source by what it authenticates
