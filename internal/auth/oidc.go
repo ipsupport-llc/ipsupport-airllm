@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -103,6 +104,10 @@ func (o *OIDCAuth) Callback(w http.ResponseWriter, r *http.Request) {
 	email, _ := claims["email"].(string)
 	p := Principal{Subject: idt.Subject, Email: email, Roles: roles}
 	if _, err := o.store.UpsertOIDC(r.Context(), p); err != nil {
+		if errors.Is(err, ErrLocalUserSubjectConflict) {
+			http.Error(w, "this account is managed locally; SSO login is not available for it", http.StatusConflict)
+			return
+		}
 		http.Error(w, "user upsert failed", http.StatusInternalServerError)
 		return
 	}

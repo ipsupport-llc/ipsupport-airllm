@@ -67,7 +67,10 @@ migrations. A clean re-bootstrap is `make compose-down && make compose-up`.
   URL configured in `OIDC_REDIRECT_URL`. PKCE, `state`, and `nonce` are all
   enforced; ID-token signature, `iss`, `aud`, `exp`, and `nonce` are all
   verified. Set `OIDC_ROLE_MAP` to map IdP role names to AirLLM roles if they
-  differ.
+  differ. If an IdP-asserted subject matches an existing **local** (password)
+  user's subject, the SSO login is refused with `409 Conflict` instead of
+  silently taking over that account's email/roles — a local user's subject
+  can never be claimed by a federated login.
 - **Disabling a user.** Setting `disabled=true` on a user blocks new logins
   immediately. However, an existing session cookie remains valid until its 12-hour
   TTL expires (stateless HMAC; no per-request DB lookup). The user's API keys
