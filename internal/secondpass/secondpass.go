@@ -7,6 +7,7 @@ package secondpass
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -48,23 +49,28 @@ TEXT:
 `
 
 // Scan calls the LLM and parses its JSON output into DLP findings.
-// Malformed output results in no findings (fail-safe, no crash).
+// Malformed output is a scan error (processOne leaves the row pending for
+// retry), never a confident "zero findings" — conflating the two would let
+// an LLM that merely failed to format its output clear a genuinely
+// confirmed secret as a false positive.
 func (e *LLMEngine) Scan(ctx context.Context, text string) ([]dlp.Finding, error) {
 	raw, err := e.Chat(ctx, scanInstruction+text)
 	if err != nil {
 		return nil, err
 	}
-	return parseFindings(raw, e.MinScore()), nil
+	findings, err := parseFindings(raw, e.MinScore())
+	if err != nil {
+		return nil, fmt.Errorf("secondpass: malformed LLM output: %w", err)
+	}
+	return findings, nil
 }
 
 // parseFindings extracts dlp.Finding values from an LLM JSON array, filtering
-// by minScore and dropping degenerate spans (end <= start). Any parse error
-// returns nil (no crash).
-func parseFindings(raw string, minScore float64) []dlp.Finding {
+// by minScore and dropping degenerate spans (end <= start).
+func parseFindings(raw string, minScore float64) ([]dlp.Finding, error) {
 	var items []llmFinding
 	if err := json.Unmarshal([]byte(raw), &items); err != nil {
-		slog.Debug("secondpass: malformed LLM output", "err", err)
-		return nil
+		return nil, err
 	}
 	var out []dlp.Finding
 	for _, f := range items {
@@ -76,7 +82,7 @@ func parseFindings(raw string, minScore float64) []dlp.Finding {
 		}
 		out = append(out, dlp.Finding{Label: f.Label, Start: f.Start, End: f.End})
 	}
-	return out
+	return out, nil
 }
 
 // PendingRow is the subset of capture_index the Job needs.

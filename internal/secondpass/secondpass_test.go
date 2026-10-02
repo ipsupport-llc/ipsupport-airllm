@@ -2,6 +2,7 @@ package secondpass
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -51,7 +52,10 @@ func (f *fakeStore) UpdateSecondPass(_ context.Context, id, status string, label
 
 func TestParseFindings_Valid(t *testing.T) {
 	raw := `[{"label":"openai_key","start":0,"end":10,"score":0.9}]`
-	got := parseFindings(raw, 0.5)
+	got, err := parseFindings(raw, 0.5)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(got) != 1 || got[0].Label != "openai_key" || got[0].Start != 0 || got[0].End != 10 {
 		t.Fatalf("unexpected findings: %v", got)
 	}
@@ -59,7 +63,10 @@ func TestParseFindings_Valid(t *testing.T) {
 
 func TestParseFindings_BelowMinScore(t *testing.T) {
 	raw := `[{"label":"key","start":0,"end":5,"score":0.3}]`
-	got := parseFindings(raw, 0.5)
+	got, err := parseFindings(raw, 0.5)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(got) != 0 {
 		t.Fatalf("expected 0 findings below min score, got %v", got)
 	}
@@ -70,21 +77,36 @@ func TestParseFindings_MultipleScores(t *testing.T) {
 		{"label":"a","start":0,"end":5,"score":0.9},
 		{"label":"b","start":10,"end":15,"score":0.1}
 	]`
-	got := parseFindings(raw, 0.5)
+	got, err := parseFindings(raw, 0.5)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(got) != 1 || got[0].Label != "a" {
 		t.Fatalf("expected only high-score finding, got %v", got)
 	}
 }
 
+// TestParseFindings_Malformed is the DLP/secondpass Minor fix: malformed
+// LLM output must be a real error, not a silent "zero findings" — the
+// caller (LLMEngine.Scan, then processOne) needs to tell "the engine
+// scanned and confirmed nothing" apart from "the engine's output couldn't
+// even be parsed", since the two lead to very different, safe-vs-unsafe
+// outcomes for an already-detected secret.
 func TestParseFindings_Malformed(t *testing.T) {
-	got := parseFindings("not-json{{{", 0.5)
+	got, err := parseFindings("not-json{{{", 0.5)
+	if err == nil {
+		t.Fatal("expected an error for malformed JSON, got nil")
+	}
 	if got != nil {
-		t.Fatalf("expected nil for malformed JSON, got %v", got)
+		t.Fatalf("expected nil findings alongside the error, got %v", got)
 	}
 }
 
 func TestParseFindings_EmptyArray(t *testing.T) {
-	got := parseFindings("[]", 0.5)
+	got, err := parseFindings("[]", 0.5)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(got) != 0 {
 		t.Fatalf("expected empty slice, got %v", got)
 	}
@@ -93,7 +115,10 @@ func TestParseFindings_EmptyArray(t *testing.T) {
 func TestParseFindings_DegenerateSpan(t *testing.T) {
 	// end <= start must be dropped.
 	raw := `[{"label":"key","start":5,"end":5,"score":0.9}]`
-	got := parseFindings(raw, 0.0)
+	got, err := parseFindings(raw, 0.0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(got) != 0 {
 		t.Fatalf("expected 0 for degenerate span, got %v", got)
 	}
@@ -117,7 +142,13 @@ func TestLLMEngine_Scan_Valid(t *testing.T) {
 	}
 }
 
-func TestLLMEngine_Scan_MalformedOutputNoError(t *testing.T) {
+// TestLLMEngine_Scan_MalformedOutputReturnsError is the DLP/secondpass
+// Minor fix: a real-world LLM response that ignores "no prose, no markdown
+// fences" must surface as a scan error, not succeed with zero findings. A
+// zero-findings success on an already-detected secret gets treated by
+// processOne as "the stronger engine looked and found nothing" — which (for
+// an unredacted or raw-window body) clears the alert as a false positive.
+func TestLLMEngine_Scan_MalformedOutputReturnsError(t *testing.T) {
 	e := &LLMEngine{
 		Chat: func(_ context.Context, _ string) (string, error) {
 			return "Sorry, I found a key at position 5.", nil
@@ -125,12 +156,11 @@ func TestLLMEngine_Scan_MalformedOutputNoError(t *testing.T) {
 		MinScore: func() float64 { return 0.5 },
 	}
 	got, err := e.Scan(context.Background(), "text")
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("expected an error for malformed LLM output, got nil")
 	}
-	// Malformed output -> no findings, no crash.
 	if got != nil {
-		t.Fatalf("expected nil findings for malformed LLM output, got %v", got)
+		t.Fatalf("expected nil findings alongside the error, got %v", got)
 	}
 }
 
@@ -229,6 +259,28 @@ func TestJob_FalsePositivePath(t *testing.T) {
 	}
 	if u.status != "false_positive" {
 		t.Fatalf("expected false_positive, got %s", u.status)
+	}
+}
+
+// TestJob_EngineScanErrorLeavesRowPending is the DLP/secondpass Minor fix,
+// proven end to end through the real Job.RunOnce/processOne path: when the
+// engine returns an error (standing in for LLMEngine.Scan's malformed-output
+// case), the row must be left untouched for retry, never updated — in
+// particular never marked false_positive, which is what happened before the
+// fix when a parse failure was silently treated as "zero findings".
+func TestJob_EngineScanErrorLeavesRowPending(t *testing.T) {
+	store := newFakeStore(PendingRow{
+		ID:       "id-scan-err",
+		BlobKey:  "k-scan-err",
+		Redacted: false, // unredacted: the false-positive downgrade safety net does NOT apply here
+		Detected: []dlp.Finding{{Label: "openai_key", Start: 0, End: 5}},
+	})
+	engine := &fakeEngine{err: errors.New("secondpass: malformed LLM output: unexpected end of JSON input")}
+	job := NewJob(store, fakeReadBody([]byte("hello")), engine, nil, 10, func() bool { return false })
+	job.RunOnce(context.Background())
+
+	if _, ok := store.updates["id-scan-err"]; ok {
+		t.Fatalf("row was updated despite a scan error; want it left pending for retry: %+v", store.updates["id-scan-err"])
 	}
 }
 
@@ -425,12 +477,16 @@ func TestJob_RawDisallowedByDefault_FallsBackToRedactedBody(t *testing.T) {
 	}
 }
 
-func TestJob_MalformedEngineOutput_NoCrash(t *testing.T) {
+// TestJob_MalformedEngineOutput_LeavesRowPending is the DLP/secondpass
+// Minor fix, through the real LLMEngine (not a fake): malformed LLM output
+// must not crash, but it also must not be treated as a successful
+// zero-findings scan — it's a scan error, so the row is left pending for
+// retry rather than updated at all.
+func TestJob_MalformedEngineOutput_LeavesRowPending(t *testing.T) {
 	store := newFakeStore(PendingRow{
 		ID:      "id5",
 		BlobKey: "k5",
 	})
-	// LLMEngine returning malformed JSON: no crash, no findings.
 	engine := &LLMEngine{
 		Chat:     func(_ context.Context, _ string) (string, error) { return "not-json!", nil },
 		MinScore: func() float64 { return 0.5 },
@@ -438,13 +494,8 @@ func TestJob_MalformedEngineOutput_NoCrash(t *testing.T) {
 	job := NewJob(store, fakeReadBody([]byte("hello")), engine, nil, 10, func() bool { return false })
 	job.RunOnce(context.Background()) // must not panic
 
-	// Malformed LLM output -> no findings -> clean (no detected either)
-	u, ok := store.updates["id5"]
-	if !ok {
-		t.Fatal("expected update for id5")
-	}
-	if u.status != "clean" {
-		t.Fatalf("expected clean for malformed LLM output with no detected, got %s", u.status)
+	if u, ok := store.updates["id5"]; ok {
+		t.Fatalf("row was updated despite malformed LLM output; want it left pending for retry: %+v", u)
 	}
 }
 
