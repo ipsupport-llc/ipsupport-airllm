@@ -53,7 +53,7 @@ equivalent. When a request crosses protocols, these may degrade:
   messages; rich block content is flattened to text.
 
 There's no way to avoid this today: every real provider kind
-(openai/openrouter/xai/groq/ollama/vertex) speaks the OpenAI wire format
+(openai/openrouter/xai/groq/ollama/muse/vertex) speaks the OpenAI wire format
 upstream regardless of which protocol the client used, so a request that
 enters via Anthropic ingress always gets translated before it reaches any
 of them. `alias_targets` records an `upstream_protocol` for audit purposes,
