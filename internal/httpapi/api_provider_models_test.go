@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/auth"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
@@ -78,6 +81,57 @@ func TestProviderModelsSuccessAndCache(t *testing.T) {
 	getModels(t, s, "up")
 	if cl.calls != 1 {
 		t.Errorf("upstream calls = %d, want 1 (second call cached)", cl.calls)
+	}
+}
+
+// blockingLister blocks every ListModels call on release, so a test can
+// hold several concurrent requests in flight at once before letting any of
+// them complete.
+type blockingLister struct {
+	providers.Provider
+	calls   int32
+	release chan struct{}
+	models  []string
+}
+
+func (b *blockingLister) ListModels(_ context.Context) ([]string, error) {
+	atomic.AddInt32(&b.calls, 1)
+	<-b.release
+	return b.models, nil
+}
+
+// TestProviderModelsConcurrentRequestsDedupe is the Admin API Minor fix: the
+// catalog cache had no single-flight lock, so N concurrent requests racing
+// an empty (or just-expired) cache each independently called the upstream.
+// Holds 5 concurrent requests in flight against a lister that blocks until
+// released, then asserts the upstream was called exactly once.
+func TestProviderModelsConcurrentRequestsDedupe(t *testing.T) {
+	bl := &blockingLister{Provider: providers.NewMock("up"), release: make(chan struct{}), models: []string{"m-a"}}
+	reg := providers.NewRegistry()
+	reg.Register(bl, 0)
+	s := newModelsTestServer(t, reg)
+
+	const n = 5
+	var wg sync.WaitGroup
+	codes := make([]int, n)
+	wg.Add(n)
+	for i := range n {
+		go func(i int) {
+			defer wg.Done()
+			codes[i], _ = getModels(t, s, "up")
+		}(i)
+	}
+	time.Sleep(100 * time.Millisecond) // let every goroutine reach ListModels (or block waiting on the leader)
+	close(bl.release)
+	wg.Wait()
+
+	for i, c := range codes {
+		if c != http.StatusOK {
+			t.Errorf("request %d: code = %d, want 200", i, c)
+		}
+	}
+	if got := atomic.LoadInt32(&bl.calls); got != 1 {
+		t.Errorf("upstream calls = %d, want 1 (concurrent requests must dedupe)", got)
 	}
 }
 

@@ -305,7 +305,12 @@ func (s *Server) handleAdminPutProvider(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if body.MaxConcurrency < 0 {
-		body.MaxConcurrency = 0
+		// 0 means unlimited (internal/providers.Registry.Register — nil
+		// semaphore, Acquire always succeeds): silently clamping a negative
+		// value to 0 would turn a fat-fingered or buggy request into the
+		// MOST permissive possible outcome instead of rejecting it.
+		writeControlError(w, http.StatusBadRequest, "max_concurrency must be >= 0")
+		return
 	}
 	secret, change, err := credentialToStore(body.APIKey, body.CredentialJSON, body.ClearCredential)
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
+	"golang.org/x/sync/singleflight"
 )
 
 // modelCatalogTTL bounds staleness of the upstream model list micro-cache.
@@ -21,10 +22,13 @@ type catalogEntry struct {
 }
 
 // catalogCache is a tiny TTL cache keyed by provider name. The zero value is
-// ready to use.
+// ready to use. group deduplicates concurrent upstream fetches of the SAME
+// uncached (or just-expired) provider — without it, two requests racing an
+// empty cache both call the upstream independently.
 type catalogCache struct {
 	mu      sync.Mutex
 	entries map[string]catalogEntry
+	group   singleflight.Group
 }
 
 func (c *catalogCache) get(name string, now time.Time) ([]string, bool) {
@@ -68,14 +72,29 @@ func (s *Server) handleAdminProviderModels(w http.ResponseWriter, r *http.Reques
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), modelCatalogTimeout)
 	defer cancel()
-	models, err := lister.ListModels(ctx)
+	// singleflight.Do runs the fetch under whichever caller's context wins
+	// the race to be the leader; a leader whose own request context is
+	// canceled mid-fetch also fails every other request waiting on the same
+	// key, even one with a perfectly healthy context. Accepted here: the
+	// alias editor is the only caller (an admin clicking a dropdown), never
+	// an automated client, so a rare spurious retry costs nothing real.
+	v, err, _ := s.catalog.group.Do(name, func() (any, error) {
+		if models, ok := s.catalog.get(name, time.Now()); ok {
+			return models, nil
+		}
+		models, err := lister.ListModels(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if models == nil {
+			models = []string{}
+		}
+		s.catalog.put(name, models, time.Now())
+		return models, nil
+	})
 	if err != nil {
 		writeControlError(w, http.StatusBadGateway, "upstream list models: "+err.Error())
 		return
 	}
-	if models == nil {
-		models = []string{}
-	}
-	s.catalog.put(name, models, time.Now())
-	writeJSON(w, http.StatusOK, map[string]any{"models": models})
+	writeJSON(w, http.StatusOK, map[string]any{"models": v.([]string)})
 }

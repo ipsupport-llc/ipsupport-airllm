@@ -52,6 +52,9 @@ func (s *Server) auditRoutes() {
 	s.mux.HandleFunc("POST /api/audit/captures/{id}/review", a(s.handleAuditPostReview))
 }
 
+// maxCaptureListLimit caps the ?limit param on the captures list endpoint.
+const maxCaptureListLimit = 500
+
 // handleAuditListCaptures lists capture_index rows (metadata + DLP labels, NO body).
 // Query params: from (RFC3339), to (RFC3339), review_status, limit.
 func (s *Server) handleAuditListCaptures(w http.ResponseWriter, r *http.Request) {
@@ -61,6 +64,12 @@ func (s *Server) handleAuditListCaptures(w http.ResponseWriter, r *http.Request)
 	}
 	if v := q.Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			// Capped the same way clampHours caps ?hours (api_self.go): an
+			// unbounded limit forces an unbounded ORDER BY ts DESC LIMIT n
+			// scan over capture_index.
+			if n > maxCaptureListLimit {
+				n = maxCaptureListLimit
+			}
 			f.Limit = n
 		}
 	}
