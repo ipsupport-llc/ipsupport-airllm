@@ -2,8 +2,8 @@ apiVersion: v2
 name: airllm
 description: AirLLM — self-hosted, OIDC-governed LLM gateway with DLP, on Kubernetes
 type: application
-version: 0.1.52
-appVersion: "0.1.52"
+version: 0.1.53
+appVersion: "0.1.53"
 home: https://github.com/ipsupport-llc/ipsupport-airllm
 sources:
   - https://github.com/ipsupport-llc/ipsupport-airllm
