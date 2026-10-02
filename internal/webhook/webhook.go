@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -187,13 +188,30 @@ func deliver(e Endpoint, body []byte) {
 		req.Header.Set("X-AirLLM-Signature", "sha256="+hex.EncodeToString(mac.Sum(nil)))
 	}
 
-	resp, err := guardedClient.Do(req)
+	resp, err := doDeliver(guardedClient, req)
 	if err != nil {
 		slog.Error("webhook delivery failed", "url", e.URL, "err", err)
 		return
 	}
-	_ = resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		slog.Warn("webhook non-2xx", "url", e.URL, "status", resp.StatusCode)
 	}
+}
+
+// doDeliver performs req via hc, draining and closing the response body
+// before returning so the transport can reuse the connection for the next
+// delivery — an unread body (this endpoint's response is never otherwise
+// read, success or failure) forces a fresh connection per delivery instead
+// of pooling it. Takes hc as a parameter (production always passes
+// guardedClient) so this logic is testable against a plain client, since a
+// test webhook target would otherwise have to be a real external host to
+// clear the SSRF guard.
+func doDeliver(hc *http.Client, req *http.Request) (*http.Response, error) {
+	resp, err := hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	return resp, nil
 }

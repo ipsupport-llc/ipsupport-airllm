@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 )
@@ -48,6 +49,11 @@ func ModelScan(ctx context.Context, hc *http.Client, baseURL string, minScore fl
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
+		// Drain so the transport can reuse this connection for the next scan —
+		// left unread, a non-2xx body forces a fresh connection (and, over
+		// TLS, a fresh handshake) per failed scan instead of pooling it, and
+		// ModelScan runs on every message the BERT layer is enabled for.
+		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil, fmt.Errorf("dlp model sidecar returned %d", resp.StatusCode)
 	}
 
