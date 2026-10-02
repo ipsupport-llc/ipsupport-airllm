@@ -296,6 +296,11 @@ func (p *Pipeline) sweepRaw(ctx context.Context, now time.Time) {
 		if row.RawBlobKey != "" {
 			if err := p.bs.Delete(ctx, row.RawBlobKey); err != nil {
 				slog.Warn("capture raw-sweep: blob delete failed", "key", row.RawBlobKey, "err", err)
+				// raw_blob_key is the only pointer to this blob — clearing it
+				// now would make a failed-to-delete blob permanently
+				// unreachable. Leave it in place so the next sweep retries,
+				// same guard sweep() already has for the main blob delete.
+				continue
 			}
 		}
 		if err := p.idx.ClearRaw(ctx, row.ID); err != nil {

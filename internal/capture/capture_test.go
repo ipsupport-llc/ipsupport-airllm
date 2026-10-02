@@ -247,6 +247,32 @@ func TestPipeline_MainSweepDeletesRawBlob(t *testing.T) {
 	}
 }
 
+// TestSweepRawKeepsPointerWhenBlobDeleteFails is the DLP/capture Minor fix
+// (sibling to DLP-C3, which fixed the identical pattern in sweep() but
+// missed sweepRaw): a failed raw-blob delete must not clear raw_blob_key,
+// or the blob becomes permanently unreachable — the column is its only
+// pointer.
+func TestSweepRawKeepsPointerWhenBlobDeleteFails(t *testing.T) {
+	bs := newMemBlob()
+	idx := &fakeInserter{}
+	p := NewPipeline(bs, idx, testSealer(t), func() Config { return Config{} })
+
+	rawKey := "captures-raw/fail"
+	_ = bs.Put(context.Background(), rawKey, []byte("sealed-secret"))
+	bs.deleteErrs = map[string]error{rawKey: fmt.Errorf("storage unavailable")}
+	past := time.Now().Add(-time.Hour).UTC()
+	idx.rows = append(idx.rows, IndexRow{ID: "fail", BlobKey: "captures/fail", RawBlobKey: rawKey, RawExpiresAt: &past})
+
+	p.sweepRaw(context.Background(), time.Now())
+
+	if idx.rows[0].RawBlobKey != rawKey {
+		t.Fatalf("raw_blob_key cleared despite a failed blob delete, want it kept for retry: %+v", idx.rows[0])
+	}
+	if _, err := bs.Get(context.Background(), rawKey); err != nil {
+		t.Error("blob itself must still exist (delete failed, nothing actually removed)")
+	}
+}
+
 func testSealer(t *testing.T) *secrets.Sealer {
 	t.Helper()
 	key := make([]byte, 32)
