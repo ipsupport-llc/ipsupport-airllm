@@ -675,7 +675,18 @@ async function createKey() {
       </div>
     </div>`;
   $("#copy-tok").addEventListener("click", () => {
-    navigator.clipboard.writeText(r.data.token).then(() => toast("Copied to clipboard"));
+    // navigator.clipboard is undefined on an insecure (plain-HTTP) origin —
+    // a real deployment mode here, TLS is an opt-in Caddy profile, not the
+    // default — and writeText can also reject on permission denial. Either
+    // way the token stays visible above for a manual copy, so this is a
+    // clear message, not a stuck UI.
+    if (!navigator.clipboard) {
+      toast("Clipboard unavailable here (needs HTTPS) — copy the token above by hand", "err");
+      return;
+    }
+    navigator.clipboard.writeText(r.data.token)
+      .then(() => toast("Copied to clipboard"))
+      .catch(() => toast("Couldn't copy — copy the token above by hand", "err"));
   });
   toast("Key created");
   loadKeys();
@@ -924,7 +935,7 @@ function editProvider(c, p) {
       label: p.has_credential
         ? "Service-account JSON (stored — blank keeps it)"
         : "Service-account JSON — leave blank to authenticate as the pod's own identity" },
-    { name: "max_concurrency", label: "Max concurrency (0 = unlimited)", value: p.max_concurrency ?? 0 },
+    { name: "max_concurrency", label: "Max concurrency (0 = unlimited)", type: "number", min: 0, value: p.max_concurrency ?? 0 },
     { name: "enabled", label: "Enabled", type: "checkbox", value: p.enabled !== false },
   ], async (v) => {
     const body = { kind: v.kind, base_url: v.base_url, enabled: v.enabled, max_concurrency: Number(v.max_concurrency) || 0 };
@@ -963,7 +974,10 @@ async function adminPricing(c) {
     b.addEventListener("click", () => editPrice(c, JSON.parse(b.getAttribute("data-edit")))));
   $("#import-prices").addEventListener("click", async () => {
     const name = $("#import-provider").value;
-    if (!name) return;
+    // Empty on a fresh install before any provider is added — the <select>
+    // has no <option>s at all, so a silent return here looked like the
+    // button did nothing.
+    if (!name) { toast("No providers configured yet", "err"); return; }
     const x = await api("POST", `/api/admin/pricing/import/${encodeURIComponent(name)}`);
     if (x.ok) {
       const n = (x.data && x.data.imported) || 0;
@@ -996,14 +1010,14 @@ async function editPrice(c, p) {
     { name: "provider", label: "Provider", type: "select", options: providerOptions, value: p.provider || "", disabled: !!p.model },
     { name: "unit", label: "Unit ($ / 1M of this)", type: "select",
       options: ["tokens", "audio_second", "text_char"], value: p.unit || "tokens" },
-    { name: "input_per_1m", label: "Input $ / 1M", value: p.input_per_1m ?? 0 },
-    { name: "output_per_1m", label: "Output $ / 1M", value: p.output_per_1m ?? 0 },
+    { name: "input_per_1m", label: "Input $ / 1M", type: "number", min: 0, step: "any", value: p.input_per_1m ?? 0 },
+    { name: "output_per_1m", label: "Output $ / 1M", type: "number", min: 0, step: "any", value: p.output_per_1m ?? 0 },
     { name: "context_threshold", label: "Long-prompt threshold (prompt tokens, 0 = none)",
-      value: p.context_threshold ?? 0, showWhen: (v) => v.unit === "tokens" },
+      type: "number", min: 0, value: p.context_threshold ?? 0, showWhen: (v) => v.unit === "tokens" },
     { name: "input_per_1m_above", label: "Input $ / 1M above the threshold",
-      value: p.input_per_1m_above ?? 0, showWhen: tiered },
+      type: "number", min: 0, step: "any", value: p.input_per_1m_above ?? 0, showWhen: tiered },
     { name: "output_per_1m_above", label: "Output $ / 1M above the threshold",
-      value: p.output_per_1m_above ?? 0, showWhen: tiered },
+      type: "number", min: 0, step: "any", value: p.output_per_1m_above ?? 0, showWhen: tiered },
   ], async (v) => {
     // Sent only for the row shape that reads them, so clearing the threshold
     // (or switching to an audio unit) does not leave behind rates nothing will
@@ -1442,36 +1456,54 @@ function panelTable(title, cols, rowsHtml) {
 // like a provider kind that is addressed and authenticated differently from
 // every other one. Hidden fields stay in the DOM and are still submitted,
 // so the caller decides what a hidden value means.
+// renderFormField renders one modalForm field spec to its HTML string.
+// Pulled out as its own top-level function (same reason staleGuard is one —
+// see web/staleguard.test.mjs) so the field-type branches, including the
+// type:"number" min/max/step path, are independently testable without a DOM.
+function renderFormField(f) {
+  const open = `<label class="field" data-field="${f.name}"><span class="lab">${esc(f.label)}</span>`;
+  if (f.type === "checkbox") {
+    return `${open}
+      <input type="checkbox" name="${f.name}" ${f.value ? "checked" : ""} style="width:auto" /></label>`;
+  }
+  if (f.type === "textarea") {
+    return `${open}
+      <textarea name="${f.name}">${esc(f.value)}</textarea></label>`;
+  }
+  if (f.type === "select") {
+    return `${open}
+      <select name="${f.name}" ${f.disabled ? "disabled" : ""}>${(f.options || []).map((o) => {
+        const val = typeof o === "object" ? o.value : o;
+        const label = typeof o === "object" ? o.label : o;
+        return `<option value="${esc(val)}" ${val === f.value ? "selected" : ""}>${esc(label)}</option>`;
+      }).join("")}</select></label>`;
+  }
+  if (f.type === "password") {
+    return `${open}
+      <input type="password" name="${f.name}" value="${esc(f.value)}" autocomplete="new-password"
+        placeholder="${esc(f.placeholder || "")}" /></label>`;
+  }
+  if (f.type === "number") {
+    // min/max/step give the browser's own constraint validation a shot
+    // at a bad value (e.g. a negative max_concurrency) BEFORE Save ever
+    // round-trips to the backend to find out the hard way.
+    const attrs = [
+      f.min !== undefined ? `min="${esc(f.min)}"` : "",
+      f.max !== undefined ? `max="${esc(f.max)}"` : "",
+      f.step !== undefined ? `step="${esc(f.step)}"` : "",
+    ].filter(Boolean).join(" ");
+    return `${open}
+      <input type="number" name="${f.name}" value="${esc(f.value)}" ${attrs} ${f.disabled ? "disabled" : ""} /></label>`;
+  }
+  return `${open}
+    <input name="${f.name}" value="${esc(f.value)}" ${f.disabled ? "disabled" : ""} /></label>`;
+}
+
 function modalForm(title, fields, onSubmit) {
   const bg = document.createElement("div");
   bg.className = "modal-bg";
   bg.innerHTML = `<div class="modal"><h3>${esc(title)}</h3><form id="mf">
-    ${fields.map((f) => {
-      const open = `<label class="field" data-field="${f.name}"><span class="lab">${esc(f.label)}</span>`;
-      if (f.type === "checkbox") {
-        return `${open}
-          <input type="checkbox" name="${f.name}" ${f.value ? "checked" : ""} style="width:auto" /></label>`;
-      }
-      if (f.type === "textarea") {
-        return `${open}
-          <textarea name="${f.name}">${esc(f.value)}</textarea></label>`;
-      }
-      if (f.type === "select") {
-        return `${open}
-          <select name="${f.name}" ${f.disabled ? "disabled" : ""}>${(f.options || []).map((o) => {
-            const val = typeof o === "object" ? o.value : o;
-            const label = typeof o === "object" ? o.label : o;
-            return `<option value="${esc(val)}" ${val === f.value ? "selected" : ""}>${esc(label)}</option>`;
-          }).join("")}</select></label>`;
-      }
-      if (f.type === "password") {
-        return `${open}
-          <input type="password" name="${f.name}" value="${esc(f.value)}" autocomplete="new-password"
-            placeholder="${esc(f.placeholder || "")}" /></label>`;
-      }
-      return `${open}
-        <input name="${f.name}" value="${esc(f.value)}" ${f.disabled ? "disabled" : ""} /></label>`;
-    }).join("")}
+    ${fields.map(renderFormField).join("")}
     <div class="row" style="justify-content:flex-end;margin-top:.5rem">
       <button type="button" class="btn ghost" id="mf-cancel">Cancel</button>
       <button type="submit" class="btn">Save</button>
