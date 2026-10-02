@@ -3,6 +3,7 @@ package openai
 import (
 	"encoding/json"
 	"io"
+	"log/slog"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
 )
@@ -45,7 +46,16 @@ type outImagePart struct {
 
 func toOpenAIOutMessage(m llm.Message) openaiOutMessage {
 	out := openaiOutMessage{Role: m.Role, Name: m.Name, ToolCalls: m.ToolCalls, ToolCallID: m.ToolCallID}
-	if len(m.Images) == 0 {
+	images := m.Images
+	if m.Role == "tool" && len(images) > 0 {
+		// OpenAI's tool-message content schema only accepts text parts
+		// (ChatCompletionToolMessageParam), unlike user/assistant messages —
+		// an image_url part here would be rejected by a real upstream.
+		// Dropped here, with a warning, rather than sent and rejected.
+		slog.Warn("tool_result image dropped: OpenAI-shaped tool messages cannot carry images", "tool_call_id", m.ToolCallID)
+		images = nil
+	}
+	if len(images) == 0 {
 		// IMPORTANT: only assign when non-empty. `Content any` with
 		// `omitempty` only omits a truly-nil interface — assigning the
 		// empty string "" (even though it IS the empty string) would
@@ -65,7 +75,7 @@ func toOpenAIOutMessage(m llm.Message) openaiOutMessage {
 	if m.Content != "" {
 		parts = append(parts, outTextPart{Type: "text", Text: m.Content})
 	}
-	for _, img := range m.Images {
+	for _, img := range images {
 		parts = append(parts, outImagePart{Type: "image_url", ImageURL: outImageURL{URL: img.URL, Detail: img.Detail}})
 	}
 	out.Content = parts

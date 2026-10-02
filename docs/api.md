@@ -53,12 +53,17 @@ calls are translated; same-protocol calls pass through. See
 
 **Vision / image content**: both ingress protocols accept images in their
 respective native multi-part content formats and forward them to the real
-upstream unchanged. Two things to know: (1) this gateway does not verify
+upstream unchanged. Three things to know: (1) this gateway does not verify
 that an alias's target model is actually vision-capable before making the
 call — a text-only model gets a live error from the real upstream, not a
 clean local one; (2) the practical image size ceiling is the existing
 16 MiB request body cap (`internal/httpapi/server.go`'s `maxRequestBody`) —
-there's no separate, larger limit for vision requests.
+there's no separate, larger limit for vision requests; (3) an image inside
+an Anthropic `tool_result` block is captured (not dropped) on ingress, but
+every real upstream is reached through the OpenAI-shaped client regardless
+of protocol, and OpenAI's own tool-message schema only accepts text — so
+that image is dropped (with a warning logged) at the egress encoding step,
+never reaching the model. A top-level user-turn image is unaffected.
 
 Errors use the caller's protocol shape (OpenAI error object vs Anthropic error
 object). When every routing target is busy the gateway returns `429` rather

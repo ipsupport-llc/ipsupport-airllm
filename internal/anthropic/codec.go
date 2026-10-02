@@ -189,21 +189,8 @@ func convertMessage(mw messageWire) []llm.Message {
 		case "text":
 			texts = append(texts, blk.Text)
 		case "image":
-			switch {
-			case blk.Source == nil:
-				slog.Warn("anthropic image block missing source; dropping", "role", mw.Role)
-			case blk.Source.Type == "base64" && blk.Source.MediaType != "" && blk.Source.Data != "":
-				images = append(images, llm.Image{
-					URL: "data:" + blk.Source.MediaType + ";base64," + blk.Source.Data,
-				})
-			case blk.Source.Type == "base64":
-				slog.Warn("anthropic base64 image block missing media_type or data; dropping", "role", mw.Role)
-			case blk.Source.Type == "url" && blk.Source.URL != "":
-				images = append(images, llm.Image{URL: blk.Source.URL})
-			case blk.Source.Type == "url":
-				slog.Warn("anthropic url image block missing url; dropping", "role", mw.Role)
-			default:
-				slog.Warn("anthropic image block has unsupported source type; dropping", "role", mw.Role, "source_type", blk.Source.Type)
+			if img, ok := imageFromBlock(blk, mw.Role); ok {
+				images = append(images, img)
 			}
 		case "tool_use":
 			args := string(blk.Input)
@@ -217,10 +204,12 @@ func convertMessage(mw messageWire) []llm.Message {
 			})
 		case "tool_result":
 			flush()
+			text, toolImages := blocksTextAndImages(blk.Content, "tool")
 			out = append(out, llm.Message{
 				Role:       "tool",
 				ToolCallID: blk.ToolUseID,
-				Content:    blocksText(blk.Content),
+				Content:    text,
+				Images:     toolImages,
 			})
 		}
 	}
@@ -228,27 +217,64 @@ func convertMessage(mw messageWire) []llm.Message {
 	return out
 }
 
+// imageFromBlock converts a content block's image source into an llm.Image,
+// or reports false — having already logged why — when it isn't a usable
+// image block.
+func imageFromBlock(blk contentBlockWire, role string) (llm.Image, bool) {
+	switch {
+	case blk.Source == nil:
+		slog.Warn("anthropic image block missing source; dropping", "role", role)
+	case blk.Source.Type == "base64" && blk.Source.MediaType != "" && blk.Source.Data != "":
+		return llm.Image{URL: "data:" + blk.Source.MediaType + ";base64," + blk.Source.Data}, true
+	case blk.Source.Type == "base64":
+		slog.Warn("anthropic base64 image block missing media_type or data; dropping", "role", role)
+	case blk.Source.Type == "url" && blk.Source.URL != "":
+		return llm.Image{URL: blk.Source.URL}, true
+	case blk.Source.Type == "url":
+		slog.Warn("anthropic url image block missing url; dropping", "role", role)
+	default:
+		slog.Warn("anthropic image block has unsupported source type; dropping", "role", role, "source_type", blk.Source.Type)
+	}
+	return llm.Image{}, false
+}
+
 // blocksText extracts plain text from a raw value that may be a JSON string
-// or an array of content blocks.
+// or an array of content blocks (used for the system prompt, which Anthropic
+// never allows to carry images).
 func blocksText(raw json.RawMessage) string {
+	text, _ := blocksTextAndImages(raw, "")
+	return text
+}
+
+// blocksTextAndImages extracts text and images from a raw value that may be
+// a JSON string (no images possible) or an array of content blocks — used
+// for tool_result content, which Anthropic allows to carry both text and
+// image blocks, same as a top-level user turn.
+func blocksTextAndImages(raw json.RawMessage, role string) (string, []llm.Image) {
 	if len(raw) == 0 {
-		return ""
+		return "", nil
 	}
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
-		return s
+		return s, nil
 	}
 	var blocks []contentBlockWire
 	if json.Unmarshal(raw, &blocks) == nil {
 		var b strings.Builder
+		var images []llm.Image
 		for _, blk := range blocks {
-			if blk.Type == "text" {
+			switch blk.Type {
+			case "text":
 				b.WriteString(blk.Text)
+			case "image":
+				if img, ok := imageFromBlock(blk, role); ok {
+					images = append(images, img)
+				}
 			}
 		}
-		return b.String()
+		return b.String(), images
 	}
-	return ""
+	return "", nil
 }
 
 type contentBlockOut struct {
