@@ -61,6 +61,42 @@ func TestDecodeBlockContentAndToolResult(t *testing.T) {
 	}
 }
 
+// TestDecodeInterleavedToolResultsPreserveOrder proves that tool_result
+// blocks interleaved with text within one user turn keep their original
+// relative order (Protocol translation C2 fix) — the prior code grouped ALL
+// text into one message placed before ALL tool_results, losing the actual
+// sequence: tool_result(t1), text, tool_result(t2) must decode to exactly
+// that order, not tool_result(t1), tool_result(t2), text.
+func TestDecodeInterleavedToolResultsPreserveOrder(t *testing.T) {
+	body := `{
+		"model": "claude-x",
+		"max_tokens": 50,
+		"messages": [
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"t1","content":"result one"},
+				{"type":"text","text":"also check this"},
+				{"type":"tool_result","tool_use_id":"t2","content":"result two"}
+			]}
+		]
+	}`
+	req, err := DecodeMessagesRequest(strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Messages) != 3 {
+		t.Fatalf("want 3 IR messages, got %d: %+v", len(req.Messages), req.Messages)
+	}
+	if req.Messages[0].Role != "tool" || req.Messages[0].ToolCallID != "t1" || req.Messages[0].Content != "result one" {
+		t.Errorf("message 0 wrong: %+v", req.Messages[0])
+	}
+	if req.Messages[1].Role != "user" || req.Messages[1].Content != "also check this" {
+		t.Errorf("message 1 wrong: %+v", req.Messages[1])
+	}
+	if req.Messages[2].Role != "tool" || req.Messages[2].ToolCallID != "t2" || req.Messages[2].Content != "result two" {
+		t.Errorf("message 2 wrong: %+v", req.Messages[2])
+	}
+}
+
 func TestMarshalResponseText(t *testing.T) {
 	resp := llm.ChatResponse{
 		Model: "claude-x",

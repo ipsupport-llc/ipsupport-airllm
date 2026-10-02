@@ -105,7 +105,11 @@ func DecodeMessagesRequest(r io.Reader) (llm.ChatRequest, error) {
 }
 
 // convertMessage maps one Anthropic message to one or more IR messages. A
-// message bearing tool_result blocks splits those into IR "tool" messages.
+// message bearing tool_result blocks splits those into IR "tool" messages,
+// emitted in their original position relative to any surrounding text/image/
+// tool_use blocks — a user turn can legitimately interleave tool_result
+// blocks with new text (e.g. two tool results plus added commentary), and
+// that relative order matters to the upstream model.
 func convertMessage(mw messageWire) []llm.Message {
 	var s string
 	if json.Unmarshal(mw.Content, &s) == nil {
@@ -117,9 +121,28 @@ func convertMessage(mw messageWire) []llm.Message {
 		return []llm.Message{{Role: mw.Role}}
 	}
 
-	base := llm.Message{Role: mw.Role}
+	var out []llm.Message
 	var texts []string
-	var toolResults []llm.Message
+	var images []llm.Image
+	var toolCalls []llm.ToolCall
+
+	// flush emits the accumulated text/image/tool_use blocks as one message,
+	// in place, before a tool_result forces a split (or at the end of the
+	// loop). A no-op when nothing has accumulated, so adjacent tool_results
+	// don't produce empty messages between them.
+	flush := func() {
+		if len(texts) == 0 && len(images) == 0 && len(toolCalls) == 0 {
+			return
+		}
+		out = append(out, llm.Message{
+			Role:      mw.Role,
+			Content:   strings.Join(texts, ""),
+			Images:    images,
+			ToolCalls: toolCalls,
+		})
+		texts, images, toolCalls = nil, nil, nil
+	}
+
 	for _, blk := range blocks {
 		switch blk.Type {
 		case "text":
@@ -129,13 +152,13 @@ func convertMessage(mw messageWire) []llm.Message {
 			case blk.Source == nil:
 				slog.Warn("anthropic image block missing source; dropping", "role", mw.Role)
 			case blk.Source.Type == "base64" && blk.Source.MediaType != "" && blk.Source.Data != "":
-				base.Images = append(base.Images, llm.Image{
+				images = append(images, llm.Image{
 					URL: "data:" + blk.Source.MediaType + ";base64," + blk.Source.Data,
 				})
 			case blk.Source.Type == "base64":
 				slog.Warn("anthropic base64 image block missing media_type or data; dropping", "role", mw.Role)
 			case blk.Source.Type == "url" && blk.Source.URL != "":
-				base.Images = append(base.Images, llm.Image{URL: blk.Source.URL})
+				images = append(images, llm.Image{URL: blk.Source.URL})
 			case blk.Source.Type == "url":
 				slog.Warn("anthropic url image block missing url; dropping", "role", mw.Role)
 			default:
@@ -146,26 +169,22 @@ func convertMessage(mw messageWire) []llm.Message {
 			if args == "" {
 				args = "{}"
 			}
-			base.ToolCalls = append(base.ToolCalls, llm.ToolCall{
+			toolCalls = append(toolCalls, llm.ToolCall{
 				ID:       blk.ID,
 				Type:     "function",
 				Function: llm.FunctionCall{Name: blk.Name, Arguments: args},
 			})
 		case "tool_result":
-			toolResults = append(toolResults, llm.Message{
+			flush()
+			out = append(out, llm.Message{
 				Role:       "tool",
 				ToolCallID: blk.ToolUseID,
 				Content:    blocksText(blk.Content),
 			})
 		}
 	}
-	base.Content = strings.Join(texts, "")
-
-	var out []llm.Message
-	if base.Content != "" || len(base.ToolCalls) > 0 || len(base.Images) > 0 {
-		out = append(out, base)
-	}
-	return append(out, toolResults...)
+	flush()
+	return out
 }
 
 // blocksText extracts plain text from a raw value that may be a JSON string
