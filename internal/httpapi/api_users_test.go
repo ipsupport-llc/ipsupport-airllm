@@ -2,7 +2,11 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -108,5 +112,103 @@ func TestGuardLastAdminSerializesConcurrentGuards(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("concurrent guard never completed after the lock was released")
+	}
+}
+
+// TestUpdateUserOmittedFieldsKeepStoredValue proves a PUT that only means to
+// touch one field does not silently wipe roles or re-enable a disabled
+// account just because the request left them out (Admin API I3 fix): the
+// admin console's own form always sends every field, but this is a general
+// admin API, and any other caller omitting roles/disabled must get
+// "keep what's stored", not "reset to the zero value".
+func TestUpdateUserOmittedFieldsKeepStoredValue(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	s := &Server{st: &store.Store{PG: pool}}
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+
+	var id string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO users (subject, email, roles, disabled) VALUES ($1, $2, $3, true) RETURNING id::text`,
+		"i3-test-"+suffix, "old@example.com", []string{auth.UserRole},
+	).Scan(&id); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id = $1`, id)
+	})
+
+	// Only email is set; roles and disabled are omitted entirely. roles is
+	// included unchanged here specifically to isolate the "disabled" half
+	// of the bug from the unrelated NOT-NULL crash a nil roles slice would
+	// otherwise hit on the pre-fix code (a real, separate rough edge, not
+	// this finding's "silently re-enables" symptom).
+	body := `{"email":"new@example.com","roles":["` + auth.UserRole + `"]}`
+	req := httptest.NewRequest(http.MethodPut, "/api/admin/users/"+id, strings.NewReader(body))
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	s.handleUpdateUser(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update failed: %d %s", rec.Code, rec.Body.String())
+	}
+
+	var gotEmail string
+	var gotRoles []string
+	var gotDisabled bool
+	if err := pool.QueryRow(ctx, `SELECT email, roles, disabled FROM users WHERE id = $1`, id).
+		Scan(&gotEmail, &gotRoles, &gotDisabled); err != nil {
+		t.Fatalf("read back user: %v", err)
+	}
+	if gotEmail != "new@example.com" {
+		t.Errorf("email = %q, want new@example.com", gotEmail)
+	}
+	if len(gotRoles) != 1 || gotRoles[0] != auth.UserRole {
+		t.Errorf("roles = %v, want unchanged [%s] — omitted roles must not be wiped", gotRoles, auth.UserRole)
+	}
+	if !gotDisabled {
+		t.Error("disabled = false, want unchanged true — omitting disabled must not silently re-enable a disabled account")
+	}
+}
+
+// TestUpdateUserExplicitFieldsStillApply proves the fix doesn't just ignore
+// roles/disabled — an explicitly supplied value (including the zero value,
+// false) still applies.
+func TestUpdateUserExplicitFieldsStillApply(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	s := &Server{st: &store.Store{PG: pool}}
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+
+	var id string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO users (subject, roles, disabled) VALUES ($1, $2, false) RETURNING id::text`,
+		"i3-explicit-test-"+suffix, []string{auth.UserRole},
+	).Scan(&id); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id = $1`, id)
+	})
+
+	reqBody, _ := json.Marshal(map[string]any{"roles": []string{}, "disabled": true})
+	req := httptest.NewRequest(http.MethodPut, "/api/admin/users/"+id, strings.NewReader(string(reqBody)))
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	s.handleUpdateUser(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update failed: %d %s", rec.Code, rec.Body.String())
+	}
+
+	var gotRoles []string
+	var gotDisabled bool
+	if err := pool.QueryRow(ctx, `SELECT roles, disabled FROM users WHERE id = $1`, id).
+		Scan(&gotRoles, &gotDisabled); err != nil {
+		t.Fatalf("read back user: %v", err)
+	}
+	if len(gotRoles) != 0 {
+		t.Errorf("roles = %v, want explicitly cleared to empty", gotRoles)
+	}
+	if !gotDisabled {
+		t.Error("disabled = false, want explicitly set to true")
 	}
 }

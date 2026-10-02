@@ -110,7 +110,7 @@ to it — adding the two double-counts. Operators see the same split as
 |--------|------|---------|
 | `GET` | `/api/admin/users` | List users. Each entry now includes `disabled`, `auth_source` (`local` or `oidc`), and `display`. |
 | `POST` | `/api/admin/users` | Create a local user. Body: `{"username","email","display","roles","password"}`. Password must be ≥ 8 characters; roles must be known keys. |
-| `PUT` | `/api/admin/users/{id}` | Update `email`, `display`, `roles`, or `disabled`. Cannot set a password via this route; use the `/password` sub-resource. |
+| `PUT` | `/api/admin/users/{id}` | Partial update of `email`, `display`, `roles`, `disabled` — a field left out of the body keeps its current stored value (an explicit `[]`/`false`/`true` still applies). Cannot set a password via this route; use the `/password` sub-resource. |
 | `POST` | `/api/admin/users/{id}/password` | Admin-reset a user's password (no current-password required). Body: `{"password":"..."}`. Blocked for OIDC-provisioned users. |
 | `DELETE` | `/api/admin/users/{id}` | Delete a user. Blocked if the user still owns active API keys (revoke them first). Blocked if deleting would remove the last admin. Prefer setting `disabled=true` as a non-destructive alternative. |
 | `GET` | `/api/admin/keys` | List all keys |
