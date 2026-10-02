@@ -326,6 +326,7 @@ type openaiSink struct {
 	meta          openai.StreamMeta
 	content       strings.Builder
 	exposeBackend bool
+	includeUsage  bool // client's own stream_options.include_usage preference
 }
 
 func (o *openaiSink) begin(t routing.Target) {
@@ -335,6 +336,14 @@ func (o *openaiSink) begin(t routing.Target) {
 func (o *openaiSink) chunk(c llm.StreamChunk) error {
 	if c.Content != "" {
 		o.content.WriteString(c.Content)
+	}
+	if c.Usage != nil && !o.includeUsage {
+		// This gateway's own billing already captured usage straight from
+		// the upstream call (runStream), independent of what reaches the
+		// client here — so skipping this chunk only affects what the
+		// client sees, matching OpenAI's own default of omitting it unless
+		// stream_options.include_usage was set.
+		return nil
 	}
 	b, err := openai.MarshalStreamChunk(o.meta, c)
 	if err != nil {

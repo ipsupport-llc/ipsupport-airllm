@@ -109,6 +109,7 @@ func (s *Server) streamChatCompletions(w http.ResponseWriter, r *http.Request, r
 		flush:         flusher.Flush,
 		meta:          openai.StreamMeta{ID: "chatcmpl-" + newID(), Model: req.Model, Created: time.Now().Unix()},
 		exposeBackend: plan.ExposeBackendHeaders,
+		includeUsage:  req.IncludeStreamUsage,
 	}
 
 	tp := time.Now()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
@@ -11,6 +12,47 @@ import (
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
 )
+
+// TestOpenaiSinkSuppressesUsageChunkByDefault is the Protocol-translation
+// Minor fix: a client that never set stream_options.include_usage must not
+// receive the terminal usage-only chunk at all, matching OpenAI's own
+// default. This gateway's own billing is unaffected either way — it reads
+// usage from the upstream call directly in runStream, not from what the
+// sink forwards to the client.
+func TestOpenaiSinkSuppressesUsageChunkByDefault(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sink := &openaiSink{w: rec, flush: rec.Flush, includeUsage: false}
+
+	if err := sink.chunk(llm.StreamChunk{Content: "hi"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.chunk(llm.StreamChunk{Usage: &llm.Usage{PromptTokens: 1, CompletionTokens: 2}}); err != nil {
+		t.Fatal(err)
+	}
+
+	body := rec.Body.String()
+	if strings.Count(body, "data: ") != 1 {
+		t.Errorf("want exactly 1 chunk written (the content one, usage suppressed), got body: %s", body)
+	}
+	if strings.Contains(body, `"usage"`) {
+		t.Errorf("usage chunk must not reach the client by default, got body: %s", body)
+	}
+}
+
+// TestOpenaiSinkForwardsUsageChunkWhenRequested proves the opt-in half:
+// once the client's own stream_options.include_usage is threaded through as
+// true, the usage chunk is forwarded.
+func TestOpenaiSinkForwardsUsageChunkWhenRequested(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sink := &openaiSink{w: rec, flush: rec.Flush, includeUsage: true}
+
+	if err := sink.chunk(llm.StreamChunk{Usage: &llm.Usage{PromptTokens: 1, CompletionTokens: 2}}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rec.Body.String(), `"usage"`) {
+		t.Errorf("usage chunk must reach the client when requested, got body: %s", rec.Body.String())
+	}
+}
 
 func TestWriteSSEHeadersBackendModel(t *testing.T) {
 	cases := []struct {
