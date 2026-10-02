@@ -34,7 +34,7 @@ one listener.
 | `providers` | Provider registry; OpenAI-compatible HTTP/SSE client; the Vertex AI client and its OAuth2 token source; concurrency semaphores |
 | `openai` / `anthropic` | Protocol codecs (parse, marshal, SSE) |
 | `llm` | Protocol-neutral intermediate representation |
-| `limits` | Redis rolling-window counters (check-before / increment-after) |
+| `limits` | Redis rolling-window counters (check-before / increment-after, with an atomic token reservation closing the race between the two) |
 | `pricing` / `ledger` | Per-model pricing and the durable usage ledger |
 | `secrets` | AES-256-GCM sealing of provider credentials and capture bodies |
 | `dlp` | Deterministic detector (regex + entropy) and the BERT sidecar client |
@@ -52,6 +52,12 @@ one listener.
 2. **Policy gate** — reject models the key's role does not allow.
 3. **DLP** — scan the prompt; `flag`/`redact`/`block` per policy (prompts only).
 4. **Limits** — check the rolling windows (5h / 24h / 7d) before dispatch.
+   The token dimension also reserves a conservative headroom estimate
+   (the request's `max_tokens`, or a default ceiling) atomically at check
+   time, corrected to the real count at step 7 — closing the race where
+   two concurrent requests on the same key could both pass a check before
+   either's usage was recorded (completion length isn't known until the
+   response finishes).
 5. **Route** — resolve the alias to ordered targets; apply the balancing
    strategy and fall back across priority tiers; return `429` if all are busy.
 6. **Translate** if the client protocol differs from the upstream's; otherwise
