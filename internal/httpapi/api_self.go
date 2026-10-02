@@ -98,6 +98,7 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.audit(r.Context(), sess.principal.Subject, "key.create", id, map[string]any{"name": body.Name})
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id":     id,
 		"name":   body.Name,
@@ -121,6 +122,7 @@ func (s *Server) handleRevokeKey(w http.ResponseWriter, r *http.Request) {
 		writeControlError(w, http.StatusNotFound, "key not found")
 		return
 	}
+	s.audit(r.Context(), sess.principal.Subject, "key.revoke", id, nil)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
 }
 
