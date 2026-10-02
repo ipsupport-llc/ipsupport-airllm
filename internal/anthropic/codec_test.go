@@ -97,6 +97,49 @@ func TestDecodeInterleavedToolResultsPreserveOrder(t *testing.T) {
 	}
 }
 
+// TestDecodeToolChoiceTranslation proves Anthropic's tool_choice shapes are
+// translated into OpenAI's shape at decode time (Protocol translation C3
+// fix) — every real upstream in this codebase is OpenAI-shaped regardless
+// of ingress protocol, so forwarding Anthropic's own tool_choice syntax
+// unmodified would send an upstream a field it can't parse.
+func TestDecodeToolChoiceTranslation(t *testing.T) {
+	cases := []struct {
+		name     string
+		input    string
+		wantJSON string
+	}{
+		{"auto", `{"type":"auto"}`, `"auto"`},
+		{"any", `{"type":"any"}`, `"required"`},
+		{"tool", `{"type":"tool","name":"search"}`, `{"function":{"name":"search"},"type":"function"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"model":"claude-x","max_tokens":10,"tool_choice":` + tc.input + `,"messages":[{"role":"user","content":"hi"}]}`
+			req, err := DecodeMessagesRequest(strings.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(req.ToolChoice) != tc.wantJSON {
+				t.Errorf("got %s, want %s", req.ToolChoice, tc.wantJSON)
+			}
+		})
+	}
+}
+
+// TestDecodeToolChoiceUnrecognizedIsDropped proves an unrecognized
+// tool_choice shape is dropped rather than forwarded raw to an upstream
+// that can't parse it.
+func TestDecodeToolChoiceUnrecognizedIsDropped(t *testing.T) {
+	body := `{"model":"claude-x","max_tokens":10,"tool_choice":{"type":"future-type"},"messages":[{"role":"user","content":"hi"}]}`
+	req, err := DecodeMessagesRequest(strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.ToolChoice != nil {
+		t.Errorf("expected tool_choice dropped, got %s", req.ToolChoice)
+	}
+}
+
 func TestMarshalResponseText(t *testing.T) {
 	resp := llm.ChatResponse{
 		Model: "claude-x",
