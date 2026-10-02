@@ -29,7 +29,10 @@ to every other protocol.
 ## What the IR carries
 
 Messages (role, content, name), tool definitions, tool calls and tool
-results, tool_choice (passed through as raw JSON), temperature, max_tokens,
+results, tool_choice (OpenAI-shaped in the IR — Anthropic's own
+`{"type":"auto"|"any"|"tool","name":...}` shape is translated to it at
+decode time, since every real upstream speaks OpenAI's shape regardless of
+ingress protocol), temperature, max_tokens,
 stream flag, usage (prompt/completion tokens, and the reasoning share of the
 completion count — see
 [API reference → Reasoning tokens](api.md#reasoning-tokens)), finish/stop

@@ -93,7 +93,7 @@ func DecodeMessagesRequest(r io.Reader) (llm.ChatRequest, error) {
 		Model:       w.Model,
 		Messages:    msgs,
 		Tools:       tools,
-		ToolChoice:  w.ToolChoice,
+		ToolChoice:  translateToolChoice(w.ToolChoice),
 		Temperature: w.Temperature,
 		Stream:      w.Stream,
 	}
@@ -102,6 +102,47 @@ func DecodeMessagesRequest(r io.Reader) (llm.ChatRequest, error) {
 		req.MaxTokens = &mt
 	}
 	return req, nil
+}
+
+// translateToolChoice converts an Anthropic-shaped tool_choice into the IR's
+// OpenAI-shaped form. Every real upstream in this codebase is reached
+// through the OpenAI-shaped client regardless of which protocol the client
+// used (see package doc) — forwarding Anthropic's tool_choice syntax
+// (`{"type":"any"}`, `{"type":"tool","name":"x"}`) to an OpenAI-shaped API
+// unmodified would send it a field shape it doesn't understand. Shapes this
+// function doesn't recognize are dropped (not forwarded raw), the same
+// fail-safe choice this file already makes for unsupported image sources.
+func translateToolChoice(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var tc struct {
+		Type string `json:"type"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(raw, &tc); err != nil {
+		slog.Warn("anthropic tool_choice malformed; dropping", "err", err)
+		return nil
+	}
+	switch tc.Type {
+	case "auto":
+		return json.RawMessage(`"auto"`)
+	case "any":
+		return json.RawMessage(`"required"`)
+	case "tool":
+		if tc.Name == "" {
+			slog.Warn("anthropic tool_choice type=tool missing name; dropping")
+			return nil
+		}
+		b, _ := json.Marshal(map[string]any{
+			"type":     "function",
+			"function": map[string]string{"name": tc.Name},
+		})
+		return b
+	default:
+		slog.Warn("anthropic tool_choice has unrecognized type; dropping", "type", tc.Type)
+		return nil
+	}
 }
 
 // convertMessage maps one Anthropic message to one or more IR messages. A
