@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -106,6 +107,45 @@ func TestMarshalResponseToolUse(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Errorf("tool-use response missing %s in %s", want, s)
 		}
+	}
+}
+
+// TestMarshalResponseTextAndToolUse proves that assistant commentary text
+// is NOT dropped when the same turn also carries a tool call (Protocol
+// translation C1 fix) — e.g. a model emitting "Let me check that." followed
+// by a tool_use. The text block must come first, matching how real
+// Anthropic models order their own content blocks.
+func TestMarshalResponseTextAndToolUse(t *testing.T) {
+	resp := llm.ChatResponse{
+		Model: "claude-x",
+		Choices: []llm.Choice{{
+			Message: llm.Message{
+				Role:    "assistant",
+				Content: "Let me check that.",
+				ToolCalls: []llm.ToolCall{{
+					ID: "tc1", Type: "function",
+					Function: llm.FunctionCall{Name: "search", Arguments: `{"q":"x"}`},
+				}},
+			},
+			FinishReason: "tool_calls",
+		}},
+	}
+	b, err := MarshalMessagesResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out messageResponseWire
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if len(out.Content) != 2 {
+		t.Fatalf("expected 2 content blocks (text + tool_use), got %d: %s", len(out.Content), b)
+	}
+	if out.Content[0].Type != "text" || out.Content[0].Text != "Let me check that." {
+		t.Errorf("expected text block first, got %+v", out.Content[0])
+	}
+	if out.Content[1].Type != "tool_use" || out.Content[1].Name != "search" {
+		t.Errorf("expected tool_use block second, got %+v", out.Content[1])
 	}
 }
 
