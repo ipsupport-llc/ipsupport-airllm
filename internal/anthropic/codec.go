@@ -329,7 +329,9 @@ func StopReason(finish string) string {
 }
 
 // EstimateInputTokens is a crude rune/4 estimate used for the message_start
-// usage in streamed responses (mock fidelity only).
+// usage in streamed responses, sent before any upstream — real or mock —
+// has reported real prompt-token usage. StreamWriter corrects it once the
+// real count arrives, in the final message_delta's usage.input_tokens.
 func EstimateInputTokens(req llm.ChatRequest) int {
 	n := 0
 	for _, m := range req.Messages {

@@ -54,6 +54,13 @@ equivalent. When a request crosses protocols, these may degrade:
   message; structured system blocks are flattened to text.
 - **Tool result shaping** — Anthropic `tool_result` blocks become IR `tool`
   messages; rich block content is flattened to text.
+- **Streaming `input_tokens`** — Anthropic egress has no real prompt-token
+  count before the upstream responds, so `message_start`'s `usage.input_tokens`
+  is a crude rune/4 estimate. It's corrected to the real count in the final
+  `message_delta`'s `usage.input_tokens` once the upstream reports it (omitted
+  there if an upstream never reports prompt tokens at all). A client that
+  trusts `message_start`'s number without reading the stream to completion
+  will see the estimate, not the real count.
 
 There's no way to avoid this today: every real provider kind
 (openai/openrouter/xai/groq/ollama/muse/vertex) speaks the OpenAI wire format
