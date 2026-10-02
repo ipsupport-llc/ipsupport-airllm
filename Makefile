@@ -1,4 +1,4 @@
-.PHONY: build test test-race vet tidy run compose-up compose-down fmt helm-lint gen-secrets compose-prod-up compose-prod-down check-links
+.PHONY: build test test-race test-js vet tidy run compose-up compose-down fmt helm-lint gen-secrets compose-prod-up compose-prod-down check-links
 
 build:
 	go build -o bin/ipsupport-airllm ./cmd/ipsupport-airllm
@@ -8,6 +8,11 @@ test:
 
 test-race:
 	go test -race ./...
+
+# Admin console SPA unit tests (plain Node, no dependencies). Lives outside
+# web/static/ so it is never //go:embed'd into the served SPA.
+test-js:
+	node --test web/*.test.mjs
 
 vet:
 	go vet ./...

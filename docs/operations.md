@@ -6,6 +6,7 @@
 make build        # build ./bin/ipsupport-airllm
 make test         # unit tests (go test ./...)
 make test-race    # unit tests under the race detector
+make test-js      # admin console SPA unit tests (plain Node, no dependencies)
 make vet          # go vet ./...
 make fmt          # gofmt -w .
 make tidy         # go mod tidy
@@ -15,9 +16,13 @@ make compose-up   # build + run postgres, redis, and the gateway (loopback)
 make compose-down # stop and delete the compose volumes
 ```
 
-CI should run `go build ./...`, `go vet ./...`, `gofmt -l` (must be empty), and
-`go test -race ./...`. The web console is plain HTML/CSS/JS embedded with
-`go:embed`; there is no separate front-end build step.
+CI should run `go build ./...`, `go vet ./...`, `gofmt -l` (must be empty),
+`go test -race ./...`, and `node --test web/*.test.mjs`. The web console is
+plain HTML/CSS/JS embedded with `go:embed`; there is no separate front-end
+build step. SPA unit tests (`web/*.test.mjs`) live one level above
+`web/static/`, deliberately outside the `//go:embed all:static` tree in
+`web/embed.go` — a test file under `static/` would ship inside the binary
+and become a publicly fetchable static asset.
 
 ## Migrations
 
