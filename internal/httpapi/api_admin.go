@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/pricing"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
@@ -312,16 +314,28 @@ func (s *Server) handleAdminPutProvider(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// A save that omits the configuration keeps the one already stored, so
-	// reading it is what "keep" means. A provider that does not exist yet has
-	// none, which the COALESCE renders as the empty string. Whether a
-	// credential is stored is read alongside, so a clear with nothing to
-	// remove is audited as what it was.
+	// reading it is what "keep" means. Read and write happen in the SAME
+	// transaction, with the row locked FOR UPDATE for its duration: without
+	// that, two concurrent saves of the same provider (e.g. one flipping
+	// `enabled` with config omitted, another genuinely changing config) can
+	// both read the same pre-write state, and whichever COMMITs last
+	// silently discards the other's change — a lost update, not just a
+	// theoretical race (config is Go-merged from a prior read, not a SQL
+	// JSONB merge, so there's no way for the database to reconcile it
+	// after the fact). A provider that does not exist yet has no row to
+	// lock (pgx.ErrNoRows), which keeps the prior create-time defaults.
+	tx, err := s.st.PG.Begin(r.Context())
+	if err != nil {
+		writeControlError(w, http.StatusInternalServerError, "failed to save provider")
+		return
+	}
+	defer tx.Rollback(r.Context())
+
 	var stored string
 	var hadCredential bool
-	if err := s.st.PG.QueryRow(r.Context(),
-		`SELECT COALESCE((SELECT config::text FROM providers WHERE name = $1), ''),
-			EXISTS (SELECT 1 FROM providers WHERE name = $1 AND cred_enc IS NOT NULL)`, name,
-	).Scan(&stored, &hadCredential); err != nil {
+	if err := tx.QueryRow(r.Context(),
+		`SELECT config::text, cred_enc IS NOT NULL FROM providers WHERE name = $1 FOR UPDATE`, name,
+	).Scan(&stored, &hadCredential); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		writeControlError(w, http.StatusInternalServerError, "failed to read provider")
 		return
 	}
@@ -341,7 +355,7 @@ func (s *Server) handleAdminPutProvider(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
-	if _, err := s.st.PG.Exec(r.Context(), `
+	if _, err := tx.Exec(r.Context(), `
 		INSERT INTO providers (name, kind, base_url, enabled, max_concurrency, config, cred_enc)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (name) DO UPDATE SET
@@ -352,6 +366,10 @@ func (s *Server) handleAdminPutProvider(w http.ResponseWriter, r *http.Request) 
 		name, body.Kind, body.BaseURL, body.Enabled, body.MaxConcurrency, config, sealed,
 		change == credentialCleared,
 	); err != nil {
+		writeControlError(w, http.StatusInternalServerError, "failed to save provider")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to save provider")
 		return
 	}
