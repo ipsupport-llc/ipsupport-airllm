@@ -68,7 +68,10 @@ func TestClassifyErrorBody(t *testing.T) {
 		{"google not found", `{"error":{"code":404,"message":"Publisher Model ` + "`" + `google/gemini-9` + "`" + ` was not found","status":"NOT_FOUND"}}`, ErrCodeModelNotFound},
 		{"google token count over the window", `{"error":{"code":400,"message":"The input token count (1200000) exceeds the maximum number of tokens allowed (1048576).","status":"INVALID_ARGUMENT"}}`, ErrCodeContextLengthExceeded},
 		{"google invalid argument about something else", `{"error":{"code":400,"message":"Unable to submit request because tool_config is invalid.","status":"INVALID_ARGUMENT"}}`, ""},
-		{"google permission denied", `{"error":{"code":403,"message":"Permission denied on resource project acme.","status":"PERMISSION_DENIED"}}`, ""},
+		{"google permission denied", `{"error":{"code":403,"message":"Permission denied on resource project acme.","status":"PERMISSION_DENIED"}}`, ErrCodeProviderAuth},
+		{"google unauthenticated", `{"error":{"code":401,"message":"Request had invalid authentication credentials.","status":"UNAUTHENTICATED"}}`, ErrCodeProviderAuth},
+		{"google failed precondition", `{"error":{"code":400,"message":"Project is not allowed to use this service.","status":"FAILED_PRECONDITION"}}`, ErrCodeProviderAuth},
+		{"google billing disabled", `{"error":{"code":403,"message":"This API method requires billing to be enabled.","status":"PERMISSION_DENIED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"BILLING_DISABLED"}]}}`, ErrCodeProviderAuth},
 
 		// Nothing recognizable.
 		{"empty body", ``, ""},
@@ -126,5 +129,38 @@ func TestHTTPErrorRetryability(t *testing.T) {
 	}
 	if !IsRetryable(httpError("vx", 503, nil)) {
 		t.Error("a 503 must stay retryable")
+	}
+}
+
+// TestHTTPErrorStatusOnlyCodes covers the codes httpError derives from the
+// status when the body names none: an auth refusal by any vendor, and
+// Ollama's English-only "model not found".
+func TestHTTPErrorStatusOnlyCodes(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{"openai invalid key", 401, `{"error":{"message":"Incorrect API key provided","type":"invalid_request_error","code":"invalid_api_key"}}`, ErrCodeProviderAuth},
+		{"bare 403", 403, `forbidden`, ErrCodeProviderAuth},
+		{"ollama openai-compat model not found", 404, `{"error":{"message":"model \"gemma3:27b\" not found, try pulling it first","type":"api_error","param":null,"code":null}}`, ErrCodeModelNotFound},
+		{"ollama native model not found", 404, `{"error":"model 'gemma3:27b' not found"}`, ErrCodeModelNotFound},
+		{"a 404 about something else", 404, `404 page not found`, ""},
+		{"a 400 mentioning a missing model is not a 404", 400, `{"error":{"message":"model x not found"}}`, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var pe *Error
+			if !errors.As(httpError("up", c.status, []byte(c.body)), &pe) || pe.Code != c.want {
+				t.Errorf("code = %q, want %q", pe.Code, c.want)
+			}
+		})
+	}
+	if IsFallbackWorthy(httpError("up", 401, nil)) {
+		t.Error("an auth refusal must not be fallback-worthy by itself; that is a per-target choice")
+	}
+	if !IsAuthFailure(httpError("up", 403, nil)) {
+		t.Error("a 403 must be recognised as an auth failure")
 	}
 }

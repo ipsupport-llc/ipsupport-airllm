@@ -1,11 +1,15 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -196,4 +200,203 @@ func TestAudioTiersOverBudgetFallThrough(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Errorf("took %v — the stuck tier outlived its 50ms budget", elapsed)
 	}
+}
+
+// replyingUpstream answers every request with one fixed status and body.
+func replyingUpstream(t *testing.T, status int, body string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		fmt.Fprint(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func boolp(b bool) *bool { return &b }
+
+// authRejections are upstream replies that mean "the gateway's own
+// credentials or account were refused", not "the request is bad".
+var authRejections = []struct {
+	name   string
+	status int
+	body   string
+}{
+	{"401 invalid key", 401, `{"error":{"message":"Incorrect API key provided","type":"invalid_request_error","code":"invalid_api_key"}}`},
+	{"403 forbidden", 403, `{"error":{"message":"forbidden"}}`},
+	{"google permission denied", 403, `{"error":{"code":403,"message":"Permission denied on resource","status":"PERMISSION_DENIED"}}`},
+	{"google billing disabled", 403, `{"error":{"code":403,"message":"This API method requires billing to be enabled","status":"PERMISSION_DENIED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"BILLING_DISABLED"}]}}`},
+	{"google failed precondition", 400, `{"error":{"code":400,"message":"Project is not allowed to use this service","status":"FAILED_PRECONDITION"}}`},
+}
+
+func TestAuthFailureFallsThroughWhenTheTargetSaysSo(t *testing.T) {
+	for _, c := range authRejections {
+		t.Run(c.name, func(t *testing.T) {
+			up := replyingUpstream(t, c.status, c.body)
+			s := newRunChatTestServer(t, providers.NewOpenAICompat("denied", "openai", up.URL, "sk"), providers.NewMock("mock-ok"))
+			plan := budgetPlan(routing.Target{Provider: "denied", UpstreamModel: "m", Options: routing.TargetOptions{FallbackOnAuth: boolp(true)}})
+			req := llm.ChatRequest{Messages: []llm.Message{{Role: "user", Content: "hi"}}}
+
+			_, res, err := s.runChat(context.Background(), plan, req)
+			if err != nil || res.Provider != "mock-ok" {
+				t.Fatalf("served=%q err=%v, want the next tier to answer", res.Provider, err)
+			}
+		})
+	}
+}
+
+func TestAuthFailureStopsTheRequestByDefault(t *testing.T) {
+	for _, c := range authRejections {
+		t.Run(c.name, func(t *testing.T) {
+			up := replyingUpstream(t, c.status, c.body)
+			s := newRunChatTestServer(t, providers.NewOpenAICompat("denied", "openai", up.URL, "sk"), providers.NewMock("mock-ok"))
+			plan := budgetPlan(routing.Target{Provider: "denied", UpstreamModel: "m"})
+			req := llm.ChatRequest{Messages: []llm.Message{{Role: "user", Content: "hi"}}}
+
+			_, res, err := s.runChat(context.Background(), plan, req)
+			if err == nil || res.Provider != "denied" || res.Attempts != 1 {
+				t.Fatalf("served=%q attempts=%d err=%v, want the request to fail at the first tier as before", res.Provider, res.Attempts, err)
+			}
+		})
+	}
+}
+
+func TestAuthFallbackDefaultComesFromSettings(t *testing.T) {
+	c := authRejections[0]
+	up := replyingUpstream(t, c.status, c.body)
+	s := newRunChatTestServer(t, providers.NewOpenAICompat("denied", "openai", up.URL, "sk"), providers.NewMock("mock-ok"))
+	s.failoverPtr.Store(&failoverConfig{FallbackOnAuth: true})
+	req := llm.ChatRequest{Messages: []llm.Message{{Role: "user", Content: "hi"}}}
+
+	_, res, err := s.runChat(context.Background(), budgetPlan(routing.Target{Provider: "denied", UpstreamModel: "m"}), req)
+	if err != nil || res.Provider != "mock-ok" {
+		t.Errorf("unset target option: served=%q err=%v, want the gateway default to fall through", res.Provider, err)
+	}
+
+	optOut := routing.Target{Provider: "denied", UpstreamModel: "m", Options: routing.TargetOptions{FallbackOnAuth: boolp(false)}}
+	_, res, err = s.runChat(context.Background(), budgetPlan(optOut), req)
+	if err == nil || res.Provider != "denied" {
+		t.Errorf("target opted out: served=%q err=%v, want the target's own false to win over the default", res.Provider, err)
+	}
+}
+
+func TestTimeoutDefaultComesFromSettings(t *testing.T) {
+	up, _ := hangingUpstream(t)
+	s := newRunChatTestServer(t, providers.NewOpenAICompat("stuck", "openai", up.URL, ""), providers.NewMock("mock-ok"))
+	s.failoverPtr.Store(&failoverConfig{TimeoutMS: 50})
+	req := llm.ChatRequest{Messages: []llm.Message{{Role: "user", Content: "hi"}}}
+
+	_, res, err := s.runChat(context.Background(), budgetPlan(routing.Target{Provider: "stuck", UpstreamModel: "m"}), req)
+	if err != nil || res.Provider != "mock-ok" {
+		t.Errorf("served=%q err=%v, want the gateway-wide budget to abandon the stuck tier", res.Provider, err)
+	}
+}
+
+func TestOllamaModelNotFoundFallsThrough(t *testing.T) {
+	up := replyingUpstream(t, 404, `{"error":{"message":"model \"gemma3:27b\" not found, try pulling it first","type":"api_error","param":null,"code":null}}`)
+	s := newRunChatTestServer(t, providers.NewOpenAICompat("ollama", "ollama", up.URL, ""), providers.NewMock("mock-ok"))
+	req := llm.ChatRequest{Messages: []llm.Message{{Role: "user", Content: "hi"}}}
+
+	_, res, err := s.runChat(context.Background(), budgetPlan(routing.Target{Provider: "ollama", UpstreamModel: "gemma3:27b"}), req)
+	if err != nil || res.Provider != "mock-ok" {
+		t.Fatalf("served=%q err=%v, want the next tier to answer", res.Provider, err)
+	}
+
+	only := &routing.Plan{Alias: "local", Tiers: [][]routing.Target{{{Provider: "ollama", UpstreamModel: "gemma3:27b"}}}}
+	_, _, err = s.runChat(context.Background(), only, req)
+	if code, typ := classifyUpstreamErr(err); code != http.StatusBadRequest || typ != "invalid_request_error" {
+		t.Errorf("exhausted on a missing model: got (%d, %q), want (400, invalid_request_error)", code, typ)
+	}
+}
+
+// countingUpstream answers every chat request with a minimal completion and
+// counts how often it was asked.
+func countingUpstream(t *testing.T) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"c","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &calls
+}
+
+func TestClientDisconnectIsNotATierFailure(t *testing.T) {
+	stuck, _ := hangingUpstream(t)
+	backup, backupCalls := countingUpstream(t)
+	s := newRunChatTestServer(t,
+		providers.NewOpenAICompat("stuck", "openai", stuck.URL, ""),
+		providers.NewOpenAICompat("backup", "openai", backup.URL, ""))
+	plan := &routing.Plan{Alias: "voice-reply", Tiers: [][]routing.Target{
+		{{Provider: "stuck", UpstreamModel: "m", Options: routing.TargetOptions{TimeoutMS: ms(5000)}}},
+		{{Provider: "backup", UpstreamModel: "m"}},
+	}}
+	logs := captureLogs(t)
+
+	for _, stream := range []bool{false, true} {
+		ctx, cancel := context.WithCancel(context.Background())
+		time.AfterFunc(30*time.Millisecond, cancel)
+		req := llm.ChatRequest{Stream: stream, Messages: []llm.Message{{Role: "user", Content: "hi"}}}
+		var err error
+		if stream {
+			_, _, _, err = s.runStream(ctx, plan, req, &recordingSink{})
+		} else {
+			_, _, err = s.runChat(ctx, plan, req)
+		}
+		if err == nil {
+			t.Errorf("stream=%v: want an error once the client went away", stream)
+		}
+	}
+	if backupCalls.Load() != 0 {
+		t.Errorf("backup tier called %d times for requests nobody was waiting for", backupCalls.Load())
+	}
+	if strings.Contains(logs.String(), "tier attempt failed") {
+		t.Errorf("a client disconnect was logged as a tier failure:\n%s", logs)
+	}
+}
+
+func TestFailedAttemptIsLoggedWithItsContext(t *testing.T) {
+	up := replyingUpstream(t, 503, `{"error":{"message":"overloaded"}}`)
+	s := newRunChatTestServer(t, providers.NewOpenAICompat("flaky", "openai", up.URL, ""), providers.NewMock("mock-ok"))
+	logs := captureLogs(t)
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	r.Header.Set("X-Session-Id", "call-42")
+	ctx := withClientSession(context.Background(), r)
+	req := llm.ChatRequest{Messages: []llm.Message{{Role: "user", Content: "hi"}}}
+
+	if _, _, err := s.runChat(ctx, budgetPlan(routing.Target{Provider: "flaky", UpstreamModel: "big-model"}), req); err != nil {
+		t.Fatalf("runChat: %v", err)
+	}
+	var line map[string]any
+	for _, l := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var rec map[string]any
+		if json.Unmarshal([]byte(l), &rec) == nil && rec["msg"] == "tier attempt failed" {
+			line = rec
+		}
+	}
+	if line == nil {
+		t.Fatalf("no failed-attempt line logged:\n%s", logs)
+	}
+	want := map[string]any{"alias": "voice-reply", "tier": float64(0), "provider": "flaky", "upstream_model": "big-model", "reason": "http_503", "session": "call-42"}
+	for k, v := range want {
+		if line[k] != v {
+			t.Errorf("%s = %v, want %v", k, line[k], v)
+		}
+	}
+	if _, ok := line["latency_ms"]; !ok {
+		t.Error("latency_ms missing")
+	}
+}
+
+// captureLogs routes the default logger into a JSON buffer for the test.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
 }
