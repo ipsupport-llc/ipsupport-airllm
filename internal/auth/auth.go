@@ -57,7 +57,7 @@ type Authenticator interface {
 // LoginProvider handles password login and session cookie lifecycle.
 type LoginProvider interface {
 	Login(username, password string) (Principal, bool)
-	SetSession(w http.ResponseWriter, p Principal)
+	SetSession(w http.ResponseWriter, r *http.Request, p Principal)
 	ClearSession(w http.ResponseWriter)
 }
 

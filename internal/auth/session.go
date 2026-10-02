@@ -19,16 +19,32 @@ type Session struct {
 // NewSession returns a session codec keyed by key.
 func NewSession(key []byte) *Session { return &Session{key: key} }
 
-// SetSession writes a signed session cookie for the principal.
-func (s *Session) SetSession(w http.ResponseWriter, p Principal) {
+// SetSession writes a signed session cookie for the principal. Secure is set
+// whenever the ORIGINAL client request was HTTPS — not whether this process
+// itself sees TLS, which it never does in either of this project's real
+// deployment shapes (Caddy and Traefik both terminate TLS and forward
+// plain HTTP, setting X-Forwarded-Proto so the origin server can still tell
+// the difference). r.TLS covers a direct HTTPS connection with no proxy in
+// front (e.g. a bare non-containerized run); unconditionally requiring
+// Secure would silently break local HTTP-only development instead.
+func (s *Session) SetSession(w http.ResponseWriter, r *http.Request, p Principal) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieName,
 		Value:    s.sign(payload{Sub: p.Subject, Email: p.Email, Roles: p.Roles, Exp: time.Now().Add(sessionTTL).Unix()}),
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   isHTTPS(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(sessionTTL.Seconds()),
 	})
+}
+
+// isHTTPS reports whether the client's original request used HTTPS, either
+// directly (r.TLS) or as reported by a terminating reverse proxy via the
+// standard X-Forwarded-Proto header (set by both Caddy and Traefik, this
+// project's two deployment topologies, without any special configuration).
+func isHTTPS(r *http.Request) bool {
+	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
 // ClearSession expires the session cookie.

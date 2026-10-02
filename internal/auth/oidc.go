@@ -106,7 +106,7 @@ func (o *OIDCAuth) Callback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "user upsert failed", http.StatusInternalServerError)
 		return
 	}
-	o.SetSession(w, p)
+	o.SetSession(w, r, p)
 	for _, name := range []string{"air_oidc_state", "air_oidc_nonce", "air_oidc_pkce"} {
 		http.SetCookie(w, &http.Cookie{Name: name, Path: "/", HttpOnly: true, MaxAge: -1})
 	}

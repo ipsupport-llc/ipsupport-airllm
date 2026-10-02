@@ -46,6 +46,11 @@ migrations. A clean re-bootstrap is `make compose-down && make compose-up`.
   master key via HKDF-SHA256 (`AIRLLM_SESSION_KEY` overrides it explicitly).
   Sessions survive restarts and work across replicas without any extra secret to
   manage. The key is never logged.
+- **Session cookie `Secure` flag.** Set automatically when the client's own
+  request was HTTPS — either a direct TLS connection, or `X-Forwarded-Proto:
+  https` from a terminating reverse proxy (Caddy and Traefik, this project's
+  two deployment topologies, both set it without extra config). Never set
+  over plain HTTP, so local dev keeps working without TLS.
 - **Bootstrap admin.** On first boot (`local` mode), the gateway creates one
   persistent admin user. If `AIRLLM_ADMIN_PASSWORD` is set, the password is
   stored silently and never logged. If unset, a random password is logged once
