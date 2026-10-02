@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -196,5 +197,47 @@ func TestSendDropsWhenQueueFullWithoutBlocking(t *testing.T) {
 	}
 	if Dropped() <= before {
 		t.Error("expected the dropped counter to increase once the queue filled up")
+	}
+}
+
+// TestDoDeliverDrainsBodyAllowingConnectionReuse is the Limits-M1 fix
+// (a second, independent occurrence of the same bug class already fixed in
+// internal/dlp.ModelScan): deliver never read the response body at all,
+// success or failure — left unread, it prevents Go's http.Transport from
+// reusing the connection, forcing a fresh TCP connection per delivery
+// instead of pooling it. doDeliver takes the client as a parameter
+// specifically so this is testable against a plain client; deliver itself
+// always uses the real (SSRF-guarded) client, which a loopback test target
+// could never clear.
+func TestDoDeliverDrainsBodyAllowingConnectionReuse(t *testing.T) {
+	var conns int32
+	// NewUnstartedServer + manual Start, not NewServer: NewServer starts
+	// serving immediately, which races against setting Config.ConnState
+	// afterward (caught by -race).
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(strings.Repeat("x", 10*1024*1024)))
+	}))
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			atomic.AddInt32(&conns, 1)
+		}
+	}
+	srv.Start()
+	defer srv.Close()
+
+	hc := srv.Client()
+	for i := 0; i < 3; i++ {
+		req, err := http.NewRequest(http.MethodPost, srv.URL, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := doDeliver(hc, req); err != nil {
+			t.Fatalf("doDeliver: %v", err)
+		}
+	}
+
+	if got := atomic.LoadInt32(&conns); got > 1 {
+		t.Errorf("accepted %d TCP connections for 3 sequential deliveries on a keep-alive client, want 1 — the response body must be drained to allow connection reuse", got)
 	}
 }
