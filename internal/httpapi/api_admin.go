@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/pricing"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 )
 
@@ -482,18 +484,23 @@ func providerConfigToStore(kind string, supplied json.RawMessage, stored, baseUR
 // provider's own kind (see routing.Router.Resolve), never operator-chosen —
 // alias_targets.upstream_protocol is legacy, unread schema kept only to
 // avoid a migration.
+//
+// Options is the target's free-form options object (see
+// routing.TargetOptions for the keys the gateway reads). It always reads
+// back as an object; a save may omit it or send null for an empty one.
 type aliasTarget struct {
-	Priority      int    `json:"priority"`
-	Provider      string `json:"provider"`
-	UpstreamModel string `json:"upstream_model"`
-	DisplayLabel  string `json:"display_label"`
+	Priority      int             `json:"priority"`
+	Provider      string          `json:"provider"`
+	UpstreamModel string          `json:"upstream_model"`
+	DisplayLabel  string          `json:"display_label"`
+	Options       json.RawMessage `json:"options"`
 }
 
 func (s *Server) handleAdminAliases(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.st.PG.Query(r.Context(), `
 		SELECT a.alias, a.protocol, a.strategy, a.dlp_model_scan, a.expose_backend_headers, a.dlp_audio_scan,
 			COALESCE(t.priority, 0), COALESCE(t.provider_name, ''),
-			COALESCE(t.upstream_model, ''), COALESCE(t.display_label, '')
+			COALESCE(t.upstream_model, ''), COALESCE(t.display_label, ''), COALESCE(t.options, '{}')
 		FROM model_aliases a
 		LEFT JOIN alias_targets t ON t.alias = a.alias
 		ORDER BY a.alias, t.priority`)
@@ -515,9 +522,10 @@ func (s *Server) handleAdminAliases(w http.ResponseWriter, r *http.Request) {
 	var order []string
 	for rows.Next() {
 		var alias, protocol, strategy, provider, upModel, label string
+		var options []byte
 		var priority int
 		var dlpModelScan, exposeBackendHeaders, dlpAudioScan bool
-		if err := rows.Scan(&alias, &protocol, &strategy, &dlpModelScan, &exposeBackendHeaders, &dlpAudioScan, &priority, &provider, &upModel, &label); err != nil {
+		if err := rows.Scan(&alias, &protocol, &strategy, &dlpModelScan, &exposeBackendHeaders, &dlpAudioScan, &priority, &provider, &upModel, &label, &options); err != nil {
 			writeControlError(w, http.StatusInternalServerError, "failed to read aliases")
 			return
 		}
@@ -528,7 +536,7 @@ func (s *Server) handleAdminAliases(w http.ResponseWriter, r *http.Request) {
 			order = append(order, alias)
 		}
 		if provider != "" {
-			av.Targets = append(av.Targets, aliasTarget{priority, provider, upModel, label})
+			av.Targets = append(av.Targets, aliasTarget{priority, provider, upModel, label, options})
 		}
 	}
 	out := make([]aliasView, 0, len(order))
@@ -573,6 +581,15 @@ func (s *Server) handleAdminPutAlias(w http.ResponseWriter, r *http.Request) {
 	if body.DLPAudioScan != nil {
 		audioScan = *body.DLPAudioScan
 	}
+	for i, t := range body.Targets {
+		if _, err := routing.ParseTargetOptions(t.Options); err != nil {
+			writeControlError(w, http.StatusBadRequest, fmt.Sprintf("target %d (%s/%s): %v", i, t.Provider, t.UpstreamModel, err))
+			return
+		}
+		if trimmed := strings.TrimSpace(string(t.Options)); trimmed == "" || trimmed == "null" {
+			body.Targets[i].Options = json.RawMessage(`{}`)
+		}
+	}
 
 	tx, err := s.st.PG.Begin(r.Context())
 	if err != nil {
@@ -598,8 +615,8 @@ func (s *Server) handleAdminPutAlias(w http.ResponseWriter, r *http.Request) {
 		// so it still needs something; the literal value written here is
 		// never read back by anything.
 		if _, err := tx.Exec(r.Context(), `
-			INSERT INTO alias_targets (alias, priority, provider_name, upstream_model, upstream_protocol, display_label)
-			VALUES ($1, $2, $3, $4, 'unused', $5)`, alias, t.Priority, t.Provider, t.UpstreamModel, t.DisplayLabel); err != nil {
+			INSERT INTO alias_targets (alias, priority, provider_name, upstream_model, upstream_protocol, display_label, options)
+			VALUES ($1, $2, $3, $4, 'unused', $5, $6::jsonb)`, alias, t.Priority, t.Provider, t.UpstreamModel, t.DisplayLabel, string(t.Options)); err != nil {
 			writeControlError(w, http.StatusBadRequest, "invalid target (provider must exist): "+err.Error())
 			return
 		}
