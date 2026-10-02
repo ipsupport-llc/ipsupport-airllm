@@ -128,6 +128,37 @@ request/job without a restart.
 | `min_score` | `0.7` | Minimum confidence to report a finding |
 | `allow_raw` | `false` | Send the un-redacted `raw_training` window to `model` for byte-aligned re-scanning. **`model` may be a third-party provider** — leave this off unless you've chosen a model you trust with real secrets; without it, second-pass always scans the (possibly redacted) main capture body |
 
+### Failover policy (`GET/PUT /api/admin/failover`)
+
+Gateway-wide defaults for the per-target failover options. A target's own
+`options` (set per alias target in **Admin → Aliases** or the aliases API)
+override them key by key; an unset key falls back to the value here. The
+defaults below reproduce the behaviour from before these options existed, so
+nothing changes until an operator opts in.
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `timeout_ms` | `0` | Time budget per target attempt; `0` means none. For a **streamed** chat it bounds the wait for the **first chunk** (a slow stream that has started is never cut); for a unary chat, a transcription or a speech request it bounds the **whole call**. A breach abandons the attempt and moves to the next target, exactly like a retryable error; the client sees one clean response from whichever target answers. |
+| `fallback_on_auth` | `false` | Also move on when the upstream refuses the gateway's own credentials or account: HTTP `401`/`403`, and Google `PERMISSION_DENIED`, `UNAUTHENTICATED`, `FAILED_PRECONDITION` or a `BILLING_DISABLED` reason. Off, such an error fails the request as before. |
+
+Per-target `options` is a free-form JSON object: the keys above are the ones
+the gateway reads today, and any other key is stored and returned untouched.
+A known key with the wrong type, a negative `timeout_ms` or a non-object is
+rejected on save with `400`. For example, a voice alias whose first tier must
+answer within two seconds and may fail over on an expired credential:
+
+```json
+{"priority": 0, "provider": "vertex", "upstream_model": "gemini-flash",
+ "options": {"timeout_ms": 2000, "fallback_on_auth": true}}
+```
+
+Every failed attempt logs a `tier attempt failed` line with `alias`, `tier`
+(0 = first), `provider`, `upstream_model`, `reason` (`timeout`,
+`provider_auth`, `model_not_found`, `rate_limited`, `http_<status>`, …),
+`latency_ms` and, when the client sent one, `session` (the `X-Session-Id`
+request header). The usage ledger records the serving `tier` and the number
+of upstream `attempts` per request.
+
 ## Provider kinds
 
 Providers live in the `providers` table and are edited from the admin console

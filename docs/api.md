@@ -69,6 +69,10 @@ Errors use the caller's protocol shape (OpenAI error object vs Anthropic error
 object). When every routing target is busy the gateway returns `429` rather
 than failing.
 
+A client may send an `X-Session-Id` header (up to 128 characters) to tie its
+requests together, e.g. every turn of one phone call. The gateway logs it on
+each failed target attempt so one session's failovers can be traced.
+
 ### Reasoning tokens
 
 `completion_tokens` (`output_tokens` on the Anthropic ingress) is **every token
@@ -123,7 +127,7 @@ to it — adding the two double-counts. Operators see the same split as
 | `GET` | `/api/admin/usage` | Usage across all keys |
 | `GET` | `/api/admin/usage/breakdown` | Usage across all keys grouped by provider and by model over the last `hours` (default 24, max 168). Returns `{"providers":[...],"models":[...]}`; each row carries `tokens_in`, `tokens_out` and `tokens_reasoning` — see [Reasoning tokens](#reasoning-tokens) |
 | `GET`/`PUT` | `/api/admin/roles` · `/api/admin/roles/{role}` | Role policies (allowed models, passthrough, limits) |
-| `GET`/`PUT`/`DELETE` | `/api/admin/aliases` · `/api/admin/aliases/{alias}` | Model alias catalog (targets, strategy, fallback tiers) |
+| `GET`/`PUT`/`DELETE` | `/api/admin/aliases` · `/api/admin/aliases/{alias}` | Model alias catalog (targets, strategy, fallback tiers). Each target carries a free-form `options` object (`timeout_ms`, `fallback_on_auth`, …) — see [Failover policy](configuration.md#failover-policy-getput-apiadminfailover) |
 | `GET`/`PUT` | `/api/admin/providers` · `/api/admin/providers/{name}` | Providers (kind, base URL, structured `config`, sealed credential, max concurrency, enabled). See [Provider fields](#provider-fields) below and [Provider kinds](configuration.md#provider-kinds). |
 | `GET` | `/api/admin/providers/{name}/models` | Upstream model ids for one provider, for the alias editor's dropdown (5-min cache; `unsupported: true` when the kind cannot list). Live from the vendor's catalogue for the OpenAI-compatible kinds; for `vertex` a short **curated** list, since its compatibility surface publishes none — a model missing from it can still be typed by hand. |
 | `GET`/`PUT` | `/api/admin/pricing` · `/api/admin/pricing/{model}` | Per-provider/model pricing (USD per 1M of the row's unit — `tokens`, `audio_second`, or `text_char`); provider `""` = any. A `tokens` row may carry a long-prompt tier: `context_threshold` prompt tokens above which `input_per_1m_above`/`output_per_1m_above` price the whole call instead — see [Long-prompt price tiers](configuration.md#long-prompt-price-tiers). A threshold with either above-rate left at zero is rejected with `400` |
@@ -133,6 +137,7 @@ to it — adding the two double-counts. Operators see the same split as
 | `GET` | `/api/admin/dlp/incidents` | Recent DLP incidents (secret-free samples) |
 | `GET`/`PUT` | `/api/admin/capture` | Capture policy |
 | `GET`/`PUT` | `/api/admin/secondpass` | Second-pass (flywheel) policy |
+| `GET`/`PUT` | `/api/admin/failover` | Gateway-wide failover defaults (`timeout_ms`, `fallback_on_auth`) — see [Failover policy](configuration.md#failover-policy-getput-apiadminfailover) |
 | `GET` | `/api/admin/webhooks` · `POST` · `DELETE /{id}` | Alert webhook endpoints (HMAC-signed delivery) |
 | `POST` | `/api/admin/dataset/export` | Export reviewed captures as a labeled JSONL training artifact (sealed at rest) |
 | `GET` | `/api/admin/dataset/download?key=` | Decrypt and download a `datasets/` export artifact |
