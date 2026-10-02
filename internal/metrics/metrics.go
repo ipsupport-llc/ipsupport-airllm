@@ -160,3 +160,16 @@ func (m *Metrics) RegisterCaptureDropped(fn func() float64) {
 		Name: "airllm_capture_dropped", Help: "Capture records dropped due to a full buffer.",
 	}, fn))
 }
+
+// RegisterLedgerDropped registers a gauge that reads the ledger's cumulative
+// dropped count from fn — a usage row dropped because its async queue was
+// full, which also means that request's cost/tokens never reached
+// usage_ledger.
+func (m *Metrics) RegisterLedgerDropped(fn func() float64) {
+	if m == nil {
+		return
+	}
+	m.reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "airllm_ledger_dropped", Help: "Usage ledger records dropped due to a full buffer.",
+	}, fn))
+}
