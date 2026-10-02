@@ -256,9 +256,11 @@ func (p *Pipeline) sweep(ctx context.Context, now time.Time, retentionDays int) 
 		return
 	}
 	for _, row := range rows {
+		blobsDeleted := true
 		if row.BlobKey != "" {
 			if err := p.bs.Delete(ctx, row.BlobKey); err != nil {
 				slog.Warn("capture sweep: blob delete failed", "key", row.BlobKey, "err", err)
+				blobsDeleted = false
 			}
 		}
 		// Delete any un-redacted raw copy too, so the row's removal never leaves
@@ -266,7 +268,15 @@ func (p *Pipeline) sweep(ctx context.Context, now time.Time, retentionDays int) 
 		if row.RawBlobKey != "" {
 			if err := p.bs.Delete(ctx, row.RawBlobKey); err != nil {
 				slog.Warn("capture sweep: raw blob delete failed", "key", row.RawBlobKey, "err", err)
+				blobsDeleted = false
 			}
+		}
+		if !blobsDeleted {
+			// The index row is the only pointer to whichever blob failed to
+			// delete — removing it now would make that blob permanently
+			// unreachable. Leave the row in place so the next sweep cycle
+			// retries the delete instead of silently orphaning it.
+			continue
 		}
 		if err := p.idx.DeleteByID(ctx, row.ID); err != nil {
 			slog.Error("capture sweep: index delete failed", "id", row.ID, "err", err)
