@@ -97,11 +97,18 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	sess, _ := sessionFrom(r.Context())
 	id := r.PathValue("id")
+	// Pointers (Roles excepted — nil vs. non-nil-empty already distinguishes
+	// "omitted" from "explicitly cleared" for a slice) so a field the
+	// request leaves out is detectable and keeps its current stored value.
+	// The admin console's own form always sends every field, but this is a
+	// general admin API: any other caller omitting roles/disabled must not
+	// silently wipe the user's roles or re-enable a disabled account just
+	// because it meant to touch something else.
 	var body struct {
-		Email    string   `json:"email"`
-		Display  string   `json:"display"`
+		Email    *string  `json:"email"`
+		Display  *string  `json:"display"`
 		Roles    []string `json:"roles"`
-		Disabled bool     `json:"disabled"`
+		Disabled *bool    `json:"disabled"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeControlError(w, http.StatusBadRequest, "invalid body")
@@ -124,11 +131,31 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	if err := s.guardLastAdminTx(r.Context(), tx, id, body.Roles, body.Disabled); err != nil {
+
+	current, err := s.users().LockByID(r.Context(), tx, id)
+	if err != nil {
+		s.writeUserErr(w, err)
+		return
+	}
+	email, display, roles, disabled := current.Email, current.Display, current.Roles, current.Disabled
+	if body.Email != nil {
+		email = *body.Email
+	}
+	if body.Display != nil {
+		display = *body.Display
+	}
+	if body.Roles != nil {
+		roles = body.Roles
+	}
+	if body.Disabled != nil {
+		disabled = *body.Disabled
+	}
+
+	if err := s.guardLastAdminTx(r.Context(), tx, id, roles, disabled); err != nil {
 		writeControlError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := s.users().Update(r.Context(), tx, id, body.Email, body.Display, body.Roles, body.Disabled); err != nil {
+	if err := s.users().Update(r.Context(), tx, id, email, display, roles, disabled); err != nil {
 		s.writeUserErr(w, err)
 		return
 	}
@@ -140,7 +167,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		writeControlError(w, http.StatusInternalServerError, "operation failed")
 		return
 	}
-	s.audit(r.Context(), sess.principal.Subject, "user.update", id, map[string]any{"disabled": body.Disabled, "roles": body.Roles})
+	s.audit(r.Context(), sess.principal.Subject, "user.update", id, map[string]any{"disabled": disabled, "roles": roles})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 

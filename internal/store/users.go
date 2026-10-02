@@ -147,4 +147,21 @@ func (p *PGUsers) ByID(ctx context.Context, id string) (auth.UserRow, error) {
 	return u, err
 }
 
+// LockByID returns the row locked FOR UPDATE for the rest of the
+// transaction — used before a partial update to resolve "field omitted from
+// the request = keep what's stored" without racing a concurrent save of the
+// same user (the same lost-update class as a provider save, see
+// handleAdminPutProvider).
+func (p *PGUsers) LockByID(ctx context.Context, tx pgx.Tx, id string) (auth.UserRow, error) {
+	var u auth.UserRow
+	err := tx.QueryRow(ctx, `
+		SELECT id::text, subject, email, display, roles, password_hash, disabled, auth_source
+		FROM users WHERE id=$1 FOR UPDATE`, id,
+	).Scan(&u.ID, &u.Subject, &u.Email, &u.Display, &u.Roles, &u.PasswordHash, &u.Disabled, &u.AuthSource)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return auth.UserRow{}, ErrUserNotFound
+	}
+	return u, err
+}
+
 var ErrUserNotFound = errors.New("user not found")
