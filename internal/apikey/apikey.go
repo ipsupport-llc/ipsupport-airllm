@@ -52,13 +52,39 @@ func Hash(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// maxUnbiasedByte is the largest byte value (exclusive) rejection sampling
+// keeps: 256 isn't a multiple of len(alphabet) (62), so mapping every byte
+// via %len(alphabet) made the first 256%62=8 alphabet characters ~25% more
+// likely than the rest. Bytes at or above this threshold are discarded and
+// redrawn instead, so every character has exactly 256/62=4 equally likely
+// byte values mapping to it.
+const maxUnbiasedByte = (256 / len(alphabet)) * len(alphabet)
+
+// unbiasedChar maps a random byte to an alphabet character, or reports
+// false when b would bias the distribution — the caller must draw another
+// byte instead of using this one.
+func unbiasedChar(b byte) (c byte, ok bool) {
+	if int(b) >= maxUnbiasedByte {
+		return 0, false
+	}
+	return alphabet[int(b)%len(alphabet)], true
+}
+
 func randString(n int) (string, error) {
-	buf := make([]byte, n)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
+	out := make([]byte, 0, n)
+	var scratch [64]byte
+	for len(out) < n {
+		if _, err := rand.Read(scratch[:]); err != nil {
+			return "", err
+		}
+		for _, b := range scratch {
+			if len(out) == n {
+				break
+			}
+			if c, ok := unbiasedChar(b); ok {
+				out = append(out, c)
+			}
+		}
 	}
-	for i := range buf {
-		buf[i] = alphabet[int(buf[i])%len(alphabet)]
-	}
-	return string(buf), nil
+	return string(out), nil
 }

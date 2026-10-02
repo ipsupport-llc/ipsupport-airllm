@@ -38,6 +38,36 @@ func TestGenerateUnique(t *testing.T) {
 	}
 }
 
+// TestUnbiasedCharDistributionIsExactlyEven is the Auth-M1 fix: mapping a
+// random byte to an alphabet character via %len(alphabet) is biased unless
+// 256 is an exact multiple of the alphabet length (62 here; 256/62 leaves a
+// remainder of 8), so some characters land MORE often than others. This
+// test is exhaustive and deterministic — it tries every possible byte value
+// (no real randomness involved) and asserts every alphabet character is
+// reachable from exactly the same number of byte values.
+func TestUnbiasedCharDistributionIsExactlyEven(t *testing.T) {
+	counts := make(map[byte]int, len(alphabet))
+	rejected := 0
+	for b := 0; b <= 255; b++ {
+		c, ok := unbiasedChar(byte(b))
+		if !ok {
+			rejected++
+			continue
+		}
+		counts[c]++
+	}
+	wantRejected := 256 - maxUnbiasedByte
+	if rejected != wantRejected {
+		t.Errorf("rejected %d byte values, want exactly %d (256 - maxUnbiasedByte)", rejected, wantRejected)
+	}
+	want := maxUnbiasedByte / len(alphabet)
+	for _, c := range []byte(alphabet) {
+		if counts[c] != want {
+			t.Errorf("alphabet char %q is reachable from %d byte values, want exactly %d (even distribution)", c, counts[c], want)
+		}
+	}
+}
+
 func TestHashStable(t *testing.T) {
 	const tok = "air_dev_example"
 	if Hash(tok) != Hash(tok) {
