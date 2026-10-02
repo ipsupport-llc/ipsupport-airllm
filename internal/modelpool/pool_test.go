@@ -7,7 +7,9 @@ import (
 	"net/http/httptest"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // cfg returns a fixed cfgFn for tests.
@@ -157,6 +159,41 @@ func TestScanLazyResolvesWhenEmpty(t *testing.T) {
 	}
 	if p.Size() == 0 {
 		t.Fatalf("Scan did not lazily resolve")
+	}
+}
+
+// TestScanConcurrentLazyResolveDedupes is the Routing/fallback Minor fix:
+// Scan's lazy-resolve check (`if !p.resolved.Load() { ... }`) was a classic
+// check-then-act race — several concurrent Scans against a never-Started
+// pool, racing before the first resolve completes, used to each kick off
+// their own independent Resolve (duplicate DNS lookups + endpoint-slice
+// rebuilds), the same shape as the already-fixed model-catalog cache
+// finding. Holds N concurrent Scans in flight against a resolver that
+// blocks until released, then asserts it was called exactly once.
+func TestScanConcurrentLazyResolveDedupes(t *testing.T) {
+	var resolves int32
+	release := make(chan struct{})
+	p := New(cfg([]string{"http://bert:8000"}, 0), func(string) ([]string, error) {
+		atomic.AddInt32(&resolves, 1)
+		<-release
+		return []string{"127.0.0.1"}, nil
+	})
+
+	const n = 5
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			_, _ = p.Scan(context.Background(), http.DefaultClient, "x", 0.5) // outcome unchecked: only the resolve-call count matters
+		}()
+	}
+	time.Sleep(100 * time.Millisecond) // let every goroutine reach the lazy-resolve check
+	close(release)
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&resolves); got != 1 {
+		t.Errorf("resolve calls = %d, want 1 (concurrent lazy resolves must dedupe)", got)
 	}
 }
 

@@ -45,6 +45,20 @@ func classifyUpstreamErr(err error) (int, string) {
 	return http.StatusBadGateway, "upstream_error"
 }
 
+// warnUnregisteredTarget logs the one case classifyUpstreamErr can never
+// distinguish from an ordinary upstream failure: a provider row that's
+// `enabled=true` in Postgres (so routing.Resolve's JOIN offers it as a
+// valid target) but failed to build into the LIVE in-memory Registry — a
+// malformed kind-specific config logs only at startup/reload time
+// (registry_load.go), not when a real request actually hits the gap. If
+// every tier hits this, the client just sees a generic 502 with nothing
+// to tell an operator the alias is silently broken short of correlating
+// an old reload log by hand.
+func warnUnregisteredTarget(alias, provider string) {
+	slog.Warn("executor: resolved target's provider is not in the live registry",
+		"alias", alias, "provider", provider)
+}
+
 func (s *Server) freeFunc(reg *providers.Registry) func(string) int {
 	return func(name string) int {
 		if e, ok := reg.Get(name); ok {
@@ -206,6 +220,7 @@ func (s *Server) runChat(ctx context.Context, plan *routing.Plan, req llm.ChatRe
 			lastTarget = t
 			e, ok := reg.Get(t.Provider)
 			if !ok {
+				warnUnregisteredTarget(plan.Alias, t.Provider)
 				lastErr = fmt.Errorf("provider %q not registered", t.Provider)
 				continue
 			}
@@ -267,6 +282,7 @@ func (s *Server) runStream(ctx context.Context, plan *routing.Plan, req llm.Chat
 			lastTarget = t
 			e, ok := reg.Get(t.Provider)
 			if !ok {
+				warnUnregisteredTarget(plan.Alias, t.Provider)
 				lastErr = fmt.Errorf("provider %q not registered", t.Provider)
 				continue
 			}

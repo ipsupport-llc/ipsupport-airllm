@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -201,6 +203,43 @@ func TestRunStreamExhaustionReturnsLastAttemptedTarget(t *testing.T) {
 	}
 	if target.Provider != "mock-ctxfail-b" {
 		t.Errorf("target.Provider = %q, want mock-ctxfail-b (the last tier attempted, not an empty target)", target.Provider)
+	}
+}
+
+// unregisteredTargetPlan points at a provider name the registry was never
+// given — the gap a Postgres row with enabled=true but a build-time failure
+// in registry_load.go (a malformed kind-specific config) leaves behind.
+func unregisteredTargetPlan() *routing.Plan {
+	return &routing.Plan{
+		Alias:    "ghost-alias",
+		Strategy: "round_robin",
+		Tiers: [][]routing.Target{
+			{{Provider: "ghost-provider", UpstreamModel: "ghost-model"}},
+		},
+	}
+}
+
+// TestRunChatLogsUnregisteredTarget is the Routing/fallback Minor fix: a
+// resolved target whose provider isn't in the live registry used to fail
+// silently into a generic error classifyUpstreamErr can't recognize —
+// nothing told an operator the alias was broken short of correlating an
+// old reload-time log by hand. Proves the gap is now logged, naming both
+// the alias and the provider.
+func TestRunChatLogsUnregisteredTarget(t *testing.T) {
+	s := newRunChatTestServer(t) // no providers registered at all
+	req := llm.ChatRequest{Messages: []llm.Message{{Role: "user", Content: "hi"}}}
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(prev)
+
+	if _, _, err := s.runChat(context.Background(), unregisteredTargetPlan(), req); err == nil {
+		t.Fatal("expected an error when the only target's provider isn't registered")
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "ghost-alias") || !strings.Contains(logged, "ghost-provider") {
+		t.Errorf("expected a warning naming the alias and provider, got log output: %s", logged)
 	}
 }
 

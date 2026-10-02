@@ -173,14 +173,22 @@ func (r *Router) passthroughTarget(ctx context.Context, provider, upstreamModel 
 		return Target{}, fmt.Errorf("explicit model %q missing upstream name", provider+"/")
 	}
 	var kind string
+	var enabled bool
 	err := r.st.PG.QueryRow(ctx,
-		`SELECT kind FROM providers WHERE name = $1 AND enabled = true`, provider,
-	).Scan(&kind)
+		`SELECT kind, enabled FROM providers WHERE name = $1`, provider,
+	).Scan(&kind, &enabled)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Target{}, fmt.Errorf("provider %q not found", provider)
 		}
 		return Target{}, err
+	}
+	if !enabled {
+		// A passthrough-capable key already knows the provider's name (it had
+		// to supply it); "not found" would be misleading when it in fact
+		// exists but an admin disabled it — the same pgx.ErrNoRows branch
+		// above used to cover both cases identically.
+		return Target{}, fmt.Errorf("provider %q is disabled", provider)
 	}
 	proto := "openai"
 	if kind == "anthropic" {

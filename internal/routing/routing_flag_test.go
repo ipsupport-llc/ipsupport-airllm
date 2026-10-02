@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -207,6 +208,59 @@ func TestDLPAudioScanFlag(t *testing.T) {
 	}
 	if dlpAudioScan {
 		t.Errorf("dlp_audio_scan = true, want false for audioflag-test-alias")
+	}
+}
+
+// TestPassthroughDisabledProviderDistinctFromNotFound is the Routing/
+// fallback Minor fix: passthroughTarget's query filtered on enabled = true,
+// so a disabled provider and a nonexistent one both hit pgx.ErrNoRows and
+// got the identical "not found" message — misleading for a passthrough-
+// capable key holder targeting a provider an admin just disabled (the key
+// already had to know the name to attempt it, so this isn't an information
+// leak, just a clearer diagnosis).
+func TestPassthroughDisabledProviderDistinctFromNotFound(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	r := NewRouter(&store.Store{PG: pool})
+
+	// Deliberately NOT naming the fixture "...disabled..." — an earlier
+	// version of this test did, and the provider's own name contained the
+	// word, making a substring assertion pass even when the production code
+	// was reverted to the old conflated behavior (a genuine false-positive
+	// caught by the surgical-revert step itself).
+	provider := fmt.Sprintf("passthrough-toggle-%d", time.Now().UnixNano())
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO providers (name, kind, base_url, enabled) VALUES ($1, $2, $3, $4)`,
+		provider, "openai", "http://example.invalid", false); err != nil {
+		t.Fatalf("insert disabled provider: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := pool.Exec(context.Background(), `DELETE FROM providers WHERE name = $1`, provider); err != nil {
+			t.Errorf("cleanup provider: %v", err)
+		}
+	})
+
+	_, err := r.passthroughTarget(ctx, provider, "upstream-model")
+	if err == nil {
+		t.Fatal("expected an error for a disabled provider")
+	}
+	if !strings.Contains(err.Error(), "is disabled") {
+		t.Errorf("disabled provider: err = %q, want it to say \"is disabled\"", err.Error())
+	}
+	if strings.Contains(err.Error(), "not found") {
+		t.Errorf("disabled provider: err = %q, must not say \"not found\" (that's the nonexistent-provider case)", err.Error())
+	}
+
+	ghost := fmt.Sprintf("passthrough-missing-%d", time.Now().UnixNano())
+	_, err = r.passthroughTarget(ctx, ghost, "upstream-model")
+	if err == nil {
+		t.Fatal("expected an error for a nonexistent provider")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("nonexistent provider: err = %q, want it to say \"not found\"", err.Error())
+	}
+	if strings.Contains(err.Error(), "is disabled") {
+		t.Errorf("nonexistent provider: err = %q, must not say \"is disabled\" (that's the disabled-provider case)", err.Error())
 	}
 }
 

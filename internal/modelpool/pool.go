@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -81,6 +82,14 @@ type Pool struct {
 	eps      atomic.Pointer[[]*endpoint]
 	rr       atomic.Uint64
 	resolved atomic.Bool // set true after the first Resolve (initial or lazy)
+
+	// lazyResolve guards the Scan hot path's lazy Resolve call (see Scan):
+	// without it, several concurrent Scans racing a never-Started pool
+	// before resolved flips true would each kick off their own independent
+	// Resolve (duplicate DNS lookups + endpoint-slice rebuilds). A
+	// Start()-ed pool never touches this — resolved is already true by the
+	// time any Scan runs, so the outer check short-circuits first.
+	lazyResolve sync.Once
 }
 
 // New builds a pool. cfgFn supplies the live endpoint URLs and per-endpoint
@@ -210,7 +219,7 @@ func (p *Pool) pick() (*endpoint, bool) {
 // returned to the caller (which fails open).
 func (p *Pool) Scan(ctx context.Context, hc *http.Client, content string, minScore float64) ([]dlp.Finding, error) {
 	if !p.resolved.Load() {
-		p.Resolve()
+		p.lazyResolve.Do(p.Resolve)
 	}
 	e, ok := p.pick()
 	if !ok {
