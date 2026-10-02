@@ -624,11 +624,11 @@ async function loadKeys() {
 
 function keyRow(k) {
   const revoke = k.status === "active"
-    ? `<button class="btn danger sm" data-revoke="${k.id}">Revoke</button>` : "";
+    ? `<button class="btn danger sm" data-revoke="${esc(k.id)}">Revoke</button>` : "";
   return `<tr>
     <td>${esc(k.name)}</td>
     <td class="mono">${esc(k.prefix)}…${esc(k.last4)}</td>
-    <td><span class="badge ${k.status}">${k.status}</span></td>
+    <td><span class="badge ${esc(k.status)}">${esc(k.status)}</span></td>
     <td>${fmtTime(k.created_at)}</td>
     <td>${fmtTime(k.last_used_at)}</td>
     <td style="text-align:right">${revoke}</td></tr>`;
@@ -793,9 +793,9 @@ async function adminKeys(c) {
   c.innerHTML = panelTable("All API keys", ["Owner", "Name", "Key", "Status", "Last used", ""],
     keys.map((k) => `<tr><td>${esc(k.owner)}</td><td>${esc(k.name)}</td>
       <td class="mono">${esc(k.prefix)}…${esc(k.last4)}</td>
-      <td><span class="badge ${k.status}">${k.status}</span></td>
+      <td><span class="badge ${esc(k.status)}">${esc(k.status)}</span></td>
       <td>${fmtTime(k.last_used_at)}</td>
-      <td style="text-align:right">${k.status === "active" ? `<button class="btn danger sm" data-arev="${k.id}">Revoke</button>` : ""}</td></tr>`));
+      <td style="text-align:right">${k.status === "active" ? `<button class="btn danger sm" data-arev="${esc(k.id)}">Revoke</button>` : ""}</td></tr>`));
   document.querySelectorAll("[data-arev]").forEach((b) => b.addEventListener("click", async () => {
     if (!confirm("Revoke this key?")) return;
     const x = await api("POST", `/api/admin/keys/${b.getAttribute("data-arev")}/revoke`);
