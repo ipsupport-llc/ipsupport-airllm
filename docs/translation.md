@@ -62,6 +62,13 @@ equivalent. When a request crosses protocols, these may degrade:
   there if an upstream never reports prompt tokens at all). A client that
   trusts `message_start`'s number without reading the stream to completion
   will see the estimate, not the real count.
+- **Temperature scale** — Anthropic's API documents `temperature` as
+  0–1, OpenAI's as 0–2. The IR carries the raw value through unchanged;
+  it is never rescaled. Since every real upstream in this codebase is
+  OpenAI-shaped (see below), an Anthropic client's `temperature: 1`
+  (its own maximum) reaches the upstream as OpenAI's *midpoint*, not
+  its maximum — a silent difference in effective randomness from what
+  a real Anthropic backend would have produced for that same value.
 - **Gemini thought signatures** — a `tool_use` block has nowhere to carry
   `extra_content`, so an Anthropic client cannot echo the signature back.
   Vertex then sends Google's stand-in instead, which Google says costs some
