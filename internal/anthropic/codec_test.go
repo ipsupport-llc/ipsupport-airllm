@@ -97,6 +97,40 @@ func TestDecodeInterleavedToolResultsPreserveOrder(t *testing.T) {
 	}
 }
 
+// TestDecodeToolResultImageIsCaptured is the Protocol-I2 fix: a tool_result's
+// content can be an array of blocks, same as a top-level user turn, and an
+// image block in there must not be silently dropped — it belongs on the
+// resulting tool message's Images, same as blocksText already captures the
+// text blocks.
+func TestDecodeToolResultImageIsCaptured(t *testing.T) {
+	body := `{
+		"model": "claude-x",
+		"max_tokens": 50,
+		"messages": [
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"t1","content":[
+					{"type":"text","text":"here is the screenshot"},
+					{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}
+				]}
+			]}
+		]
+	}`
+	req, err := DecodeMessagesRequest(strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Messages) != 1 {
+		t.Fatalf("want 1 IR message, got %d: %+v", len(req.Messages), req.Messages)
+	}
+	m := req.Messages[0]
+	if m.Role != "tool" || m.ToolCallID != "t1" || m.Content != "here is the screenshot" {
+		t.Fatalf("message wrong: %+v", m)
+	}
+	if len(m.Images) != 1 || m.Images[0].URL != "data:image/png;base64,AAAA" {
+		t.Errorf("tool_result image was dropped instead of captured: Images = %+v", m.Images)
+	}
+}
+
 // TestDecodeToolChoiceTranslation proves Anthropic's tool_choice shapes are
 // translated into OpenAI's shape at decode time (Protocol translation C3
 // fix) — every real upstream in this codebase is OpenAI-shaped regardless

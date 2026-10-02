@@ -73,6 +73,34 @@ func TestEncodeChatRequestImageWithDetail(t *testing.T) {
 	}
 }
 
+// TestEncodeChatRequestToolMessageImageDropped is the Protocol-I2 fix:
+// OpenAI's tool-message content schema only accepts text parts
+// (ChatCompletionToolMessageParam), unlike user/assistant messages — an
+// image on a tool-role IR message must not reach the wire as an
+// image_url part, which a real upstream would reject.
+func TestEncodeChatRequestToolMessageImageDropped(t *testing.T) {
+	req := llm.ChatRequest{Model: "m", Messages: []llm.Message{{
+		Role: "tool", ToolCallID: "t1", Content: "here is the screenshot",
+		Images: []llm.Image{{URL: "data:image/png;base64,AAAA"}},
+	}}}
+	b, err := EncodeChatRequest(req, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	msg := got["messages"].([]any)[0].(map[string]any)
+	content, ok := msg["content"].(string)
+	if !ok || content != "here is the screenshot" {
+		t.Errorf("content = %#v, want the plain text string (no image_url part)", msg["content"])
+	}
+	if strings.Contains(string(b), "image_url") {
+		t.Errorf("tool message must never carry an image_url part, got %s", b)
+	}
+}
+
 func TestEncodeChatRequestEmptyContentNoImagesOmitsContentKey(t *testing.T) {
 	// A tool-calls-only assistant message: Content == "", no Images.
 	// Today's plain `Content string `json:"content,omitempty"`` field
