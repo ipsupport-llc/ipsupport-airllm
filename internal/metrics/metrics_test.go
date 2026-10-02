@@ -54,6 +54,7 @@ func TestNilSafe(t *testing.T) {
 	m.RegisterModelEndpoints(func() float64 { return 0 })
 	m.RegisterCaptureDropped(func() float64 { return 0 })
 	m.RegisterLedgerDropped(func() float64 { return 0 })
+	m.RegisterWebhookDropped(func() float64 { return 0 })
 }
 
 func TestRegisterModelGauges(t *testing.T) {
@@ -83,5 +84,14 @@ func TestRegisterLedgerDropped(t *testing.T) {
 	got, err := testutil.GatherAndCount(m.reg, "airllm_ledger_dropped")
 	if err != nil || got != 1 {
 		t.Fatalf("ledger_dropped gauge not registered: count=%d err=%v", got, err)
+	}
+}
+
+func TestRegisterWebhookDropped(t *testing.T) {
+	m := New()
+	m.RegisterWebhookDropped(func() float64 { return 5 })
+	got, err := testutil.GatherAndCount(m.reg, "airllm_webhook_dropped")
+	if err != nil || got != 1 {
+		t.Fatalf("webhook_dropped gauge not registered: count=%d err=%v", got, err)
 	}
 }
