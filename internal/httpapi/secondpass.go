@@ -16,6 +16,11 @@ type secondpassConfig struct {
 	Model       string  `json:"model"`        // model alias to use for scanning
 	IntervalSec int     `json:"interval_sec"` // ticker interval; applied at start
 	MinScore    float64 `json:"min_score"`    // minimum LLM confidence to report a finding
+	// AllowRaw opts into sending the un-redacted raw-window capture copy to
+	// the scanning model alias (which may be a third-party provider) for
+	// precise byte-aligned re-scanning. Off by default: raw_training alone
+	// must not silently expose un-redacted secrets to an external model.
+	AllowRaw bool `json:"allow_raw"`
 }
 
 func defaultSecondpassConfig() secondpassConfig {
@@ -24,6 +29,7 @@ func defaultSecondpassConfig() secondpassConfig {
 		Model:       "",
 		IntervalSec: 60,
 		MinScore:    0.7,
+		AllowRaw:    false,
 	}
 }
 

@@ -220,11 +220,18 @@ func run() error {
 		}
 		return srv.SecondpassCfg().MinScore
 	}
+	spAllowRaw := func() bool {
+		srv := apiSrvPtr.Load()
+		if srv == nil {
+			return false
+		}
+		return srv.SecondpassCfg().AllowRaw
+	}
 	spEngine := &secondpass.LLMEngine{
 		Chat:     spChatFn,
 		MinScore: spMinScore,
 	}
-	spJob := secondpass.NewJob(spStoreAdapter, spBodyReader, spEngine, spWebhookSender, 50)
+	spJob := secondpass.NewJob(spStoreAdapter, spBodyReader, spEngine, spWebhookSender, 50, spAllowRaw)
 
 	spCfg := apiSrv.SecondpassCfg()
 	spInterval := time.Duration(spCfg.IntervalSec) * time.Second

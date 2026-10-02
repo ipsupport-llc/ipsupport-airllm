@@ -126,6 +126,7 @@ request/job without a restart.
 | `model` | — | Model alias the job uses to scan |
 | `interval_sec` | `60` | Ticker interval (applied at start) |
 | `min_score` | `0.7` | Minimum confidence to report a finding |
+| `allow_raw` | `false` | Send the un-redacted `raw_training` window to `model` for byte-aligned re-scanning. **`model` may be a third-party provider** — leave this off unless you've chosen a model you trust with real secrets; without it, second-pass always scans the (possibly redacted) main capture body |
 
 ## Provider kinds
 
