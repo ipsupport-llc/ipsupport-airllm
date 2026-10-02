@@ -1,7 +1,9 @@
 package providers
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -79,6 +81,35 @@ func TestClassifyErrorBody(t *testing.T) {
 				t.Errorf("classifyErrorBody() = %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// TestTransportErrorCancellation proves a canceled caller context is
+// classified as non-retryable/non-fallback-worthy (Routing/fallback I1
+// fix) — in this codebase that's almost always the original client
+// disconnecting, which another tier can't fix, so a full tier-walk for it
+// would just waste real upstream calls nobody is waiting for. Any other
+// transport failure (a dial error, a reset connection) stays retryable,
+// unchanged.
+func TestTransportErrorCancellation(t *testing.T) {
+	canceled := transportError(context.Canceled)
+	if IsRetryable(canceled) {
+		t.Error("context.Canceled must not be retryable")
+	}
+	if IsFallbackWorthy(canceled) {
+		t.Error("context.Canceled must not be fallback-worthy")
+	}
+
+	// http.Client.Do wraps a canceled-context failure inside *url.Error,
+	// not just the bare sentinel — errors.Is must still see through it.
+	wrapped := transportError(fmt.Errorf("Post \"http://x\": %w", context.Canceled))
+	if IsRetryable(wrapped) {
+		t.Error("a wrapped context.Canceled must not be retryable")
+	}
+
+	plain := transportError(errors.New("dial tcp: connection refused"))
+	if !IsRetryable(plain) {
+		t.Error("a genuine transport failure must stay retryable")
 	}
 }
 

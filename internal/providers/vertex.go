@@ -90,18 +90,18 @@ func (p *Vertex) ListModels(context.Context) ([]string, error) {
 
 // bearer mints the access token for one call.
 //
-// A token-source failure is reported as retryable rather than fatal: the
-// exchange that failed once will very likely work again, and meanwhile
-// another tier can serve this request. Treating it as fatal would take the
-// whole alias down for a transient metadata-server hiccup.
+// A token-source failure is reported as retryable rather than fatal (via
+// transportError): the exchange that failed once will very likely work
+// again, and meanwhile another tier can serve this request. Treating it as
+// fatal would take the whole alias down for a transient metadata-server
+// hiccup. The one exception transportError carves out — the caller's own
+// context being canceled — applies here too: a client that disconnected
+// while this call was waiting on a token isn't helped by another tier
+// either.
 func (p *Vertex) bearer(ctx context.Context) (string, error) {
 	token, err := p.tokens.Token(ctx)
 	if err != nil {
-		return "", &Error{
-			Status:    http.StatusBadGateway,
-			Retryable: true,
-			Message:   fmt.Sprintf("upstream %s token source: %v", p.name, err),
-		}
+		return "", transportError(fmt.Errorf("upstream %s token source: %w", p.name, err))
 	}
 	return token, nil
 }
