@@ -27,9 +27,20 @@ type Querier interface {
 func EffectivePolicy(ctx context.Context, q Querier, roles []string) ([]byte, error) {
 	eff := policy.KeyPolicy{}
 	if len(roles) > 0 {
+		// ORDER BY role: roles_policy has no precedence/priority column, so
+		// "first non-empty limits wins" below has no defined meaning across
+		// an unordered scan — without this, which role's limits apply to a
+		// multi-role user is decided by incidental physical row order, which
+		// a VACUUM, a changed query plan, or a Postgres version bump could
+		// silently flip for existing users with no code change and no log
+		// line marking it. This does not define a real precedence model
+		// (that's a product decision, not implied by this fix) — it only
+		// makes the existing "first wins" rule reproducible: alphabetically
+		// first by role name, consistently, instead of whatever the
+		// database happens to return today.
 		rows, err := q.Query(ctx, `
 			SELECT allowed_models, allow_passthrough, limits
-			FROM roles_policy WHERE role = ANY($1)`, roles)
+			FROM roles_policy WHERE role = ANY($1) ORDER BY role`, roles)
 		if err != nil {
 			return nil, err
 		}
@@ -69,6 +80,13 @@ func RebuildKeySnapshotsUser(ctx context.Context, q Querier, userID string) erro
 		`SELECT roles FROM users WHERE id = $1`, userID).Scan(&roles); err != nil {
 		return fmt.Errorf("load user roles: %w", err)
 	}
+	return applyKeySnapshot(ctx, q, userID, roles)
+}
+
+// applyKeySnapshot computes and applies one user's effective policy, given
+// their already-known role set — shared by both rebuild paths so the role
+// path (below) doesn't have to re-query roles it was just handed.
+func applyKeySnapshot(ctx context.Context, q Querier, userID string, roles []string) error {
 	snap, err := EffectivePolicy(ctx, q, roles)
 	if err != nil {
 		return fmt.Errorf("effective policy: %w", err)
@@ -82,29 +100,36 @@ func RebuildKeySnapshotsUser(ctx context.Context, q Querier, userID string) erro
 }
 
 // RebuildKeySnapshotsRole rebuilds the key snapshots of every user holding
-// the role. Runs at admin-edit frequency; the per-user loop is intentional
-// (each user's snapshot merges their full role set).
+// the role. Runs at admin-edit frequency; the per-user EffectivePolicy call
+// is intentional (each user's snapshot merges their full role set) — but
+// their role sets come back in the SAME initial query, not one extra
+// "SELECT roles FROM users WHERE id = $1" per user the way routing through
+// RebuildKeySnapshotsUser would.
 func RebuildKeySnapshotsRole(ctx context.Context, q Querier, role string) error {
 	rows, err := q.Query(ctx,
-		`SELECT id::text FROM users WHERE $1 = ANY(roles)`, role)
+		`SELECT id::text, roles FROM users WHERE $1 = ANY(roles)`, role)
 	if err != nil {
 		return fmt.Errorf("list users for role: %w", err)
 	}
-	ids := []string{}
+	type userRoles struct {
+		id    string
+		roles []string
+	}
+	var users []userRoles
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var u userRoles
+		if err := rows.Scan(&u.id, &u.roles); err != nil {
 			rows.Close()
-			return fmt.Errorf("scan user id: %w", err)
+			return fmt.Errorf("scan user: %w", err)
 		}
-		ids = append(ids, id)
+		users = append(users, u)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	for _, id := range ids {
-		if err := RebuildKeySnapshotsUser(ctx, q, id); err != nil {
+	for _, u := range users {
+		if err := applyKeySnapshot(ctx, q, u.id, u.roles); err != nil {
 			return err
 		}
 	}

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -215,10 +216,16 @@ func loadOIDC() (OIDCConfig, error) {
 }
 
 // parseRoleMap parses a comma-separated "idp_role:airllm_role" mapping string.
+// A repeated idp_role key resolves last-wins via plain map assignment; that's
+// silent and easy to typo into (e.g. "admin:x,admin:y"), so it's logged.
 func parseRoleMap(s string) map[string]string {
 	out := map[string]string{}
 	for _, pair := range strings.Split(s, ",") {
 		if k, v, ok := strings.Cut(strings.TrimSpace(pair), ":"); ok && k != "" {
+			if prev, dup := out[k]; dup {
+				slog.Warn("config: duplicate OIDC_ROLE_MAP key, last one wins",
+					"idp_role", k, "ignored", prev, "applied", v)
+			}
 			out[k] = v
 		}
 	}
