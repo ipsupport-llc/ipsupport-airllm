@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/anthropic"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/limits"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
 )
@@ -35,7 +36,8 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t0 = time.Now()
-	if msg, denied := s.limitDenied(r.Context(), ak); denied {
+	msg, denied, limDec := s.limitDenied(r.Context(), ak, reserveTokensFor(req.MaxTokens))
+	if denied {
 		s.metrics.ObserveComponent("limits", time.Since(t0))
 		s.metrics.IncRateLimited("usage_limit")
 		writeProtocolError(w, r, http.StatusTooManyRequests, "rate_limit_error", msg)
@@ -51,7 +53,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Stream {
-		s.streamMessages(w, r, req, ak, start, plan, dlpRes)
+		s.streamMessages(w, r, req, ak, start, plan, dlpRes, limDec)
 		return
 	}
 
@@ -63,14 +65,14 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		code, typ := classifyUpstreamErr(callErr)
 		entry.Status = code
 		entry.ErrorMsg = callErr.Error()
-		s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, llm.Usage{})
+		s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, llm.Usage{}, limDec.ReservedTokens, limDec.ReservedBucket)
 		writeProtocolError(w, r, code, typ, callErr.Error())
 		return
 	}
 
 	resp.Model = req.Model
 	entry.Status = http.StatusOK
-	s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, resp.Usage)
+	s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, resp.Usage, limDec.ReservedTokens, limDec.ReservedBucket)
 
 	var responseText string
 	if len(resp.Choices) > 0 {
@@ -93,7 +95,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
-func (s *Server) streamMessages(w http.ResponseWriter, r *http.Request, req llm.ChatRequest, ak authedKey, start time.Time, plan *routing.Plan, dlpRes dlpResult) {
+func (s *Server) streamMessages(w http.ResponseWriter, r *http.Request, req llm.ChatRequest, ak authedKey, start time.Time, plan *routing.Plan, dlpRes dlpResult, limDec limits.Decision) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeProtocolError(w, r, http.StatusInternalServerError, "internal_error", "streaming unsupported")
@@ -117,12 +119,12 @@ func (s *Server) streamMessages(w http.ResponseWriter, r *http.Request, req llm.
 		if !started {
 			code, typ := classifyUpstreamErr(err)
 			entry.Status = code
-			s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, llm.Usage{})
+			s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, llm.Usage{}, limDec.ReservedTokens, limDec.ReservedBucket)
 			writeProtocolError(w, r, code, typ, err.Error())
 			return
 		}
 		entry.Status = http.StatusOK
-		s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, usage)
+		s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, usage, limDec.ReservedTokens, limDec.ReservedBucket)
 		s.enqueueCapture(ak, "anthropic", req.Model, target.Provider, target.UpstreamModel,
 			http.StatusOK, usage.PromptTokens, usage.CompletionTokens, entry.CostUSD,
 			dlpRes, req.Messages, sink.assembled())
@@ -130,7 +132,7 @@ func (s *Server) streamMessages(w http.ResponseWriter, r *http.Request, req llm.
 	}
 
 	entry.Status = http.StatusOK
-	s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, usage)
+	s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, usage, limDec.ReservedTokens, limDec.ReservedBucket)
 	s.enqueueCapture(ak, "anthropic", req.Model, target.Provider, target.UpstreamModel,
 		http.StatusOK, usage.PromptTokens, usage.CompletionTokens, entry.CostUSD,
 		dlpRes, req.Messages, sink.assembled())

@@ -53,7 +53,7 @@ func (s *Server) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reques
 		writeProtocolError(w, r, http.StatusNotFound, "invalid_request_error", err.Error())
 		return
 	}
-	if msg, denied := s.limitDenied(r.Context(), ak); denied {
+	if msg, denied, _ := s.limitDenied(r.Context(), ak, 0); denied {
 		s.metrics.IncRateLimited("usage_limit")
 		writeProtocolError(w, r, http.StatusTooManyRequests, "rate_limit_error", msg)
 		return
@@ -182,7 +182,7 @@ func (s *Server) handleAudioSpeech(w http.ResponseWriter, r *http.Request) {
 		writeProtocolError(w, r, http.StatusNotFound, "invalid_request_error", err.Error())
 		return
 	}
-	if msg, denied := s.limitDenied(r.Context(), ak); denied {
+	if msg, denied, _ := s.limitDenied(r.Context(), ak, 0); denied {
 		s.metrics.IncRateLimited("usage_limit")
 		writeProtocolError(w, r, http.StatusTooManyRequests, "rate_limit_error", msg)
 		return

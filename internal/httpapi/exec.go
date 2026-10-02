@@ -54,18 +54,40 @@ func (s *Server) freeFunc(reg *providers.Registry) func(string) int {
 	}
 }
 
-// limitDenied checks the key's usage limits. It returns a 429-ready message
-// and true when the request must be rejected. Redis errors fail open.
-func (s *Server) limitDenied(ctx context.Context, ak authedKey) (string, bool) {
-	dec, err := s.limiter.Check(ctx, ak.KeyID, ak.Policy.ParseLimits())
+// defaultTokenReservation is the conservative headroom Check reserves
+// against a key's token limit when the caller has no better estimate
+// (e.g. the client didn't declare max_tokens) — completion length isn't
+// knowable before the response, so this is a deliberate, documented
+// heuristic ceiling, not a measured value.
+const defaultTokenReservation = 4096
+
+// reserveTokensFor picks the token reservation Check should make: the
+// client's own declared max_tokens when set (an honest, client-supplied
+// worst case), else the default ceiling.
+func reserveTokensFor(maxTokens *int) int64 {
+	if maxTokens != nil && *maxTokens > 0 {
+		return int64(*maxTokens)
+	}
+	return defaultTokenReservation
+}
+
+// limitDenied checks the key's usage limits, optimistically reserving
+// reserveTokens of token headroom when the check passes (see
+// Limiter.Check's doc) — pass 0 to skip reservation (e.g. for ingresses,
+// like audio, with no token dimension). It returns a 429-ready message and
+// true when the request must be rejected, plus the Decision so the caller
+// can thread its reservation fields through to finalizeUsage/Add. Redis
+// errors fail open.
+func (s *Server) limitDenied(ctx context.Context, ak authedKey, reserveTokens int64) (string, bool, limits.Decision) {
+	dec, err := s.limiter.Check(ctx, ak.KeyID, ak.Policy.ParseLimits(), reserveTokens)
 	if err != nil {
 		slog.Error("limiter check failed; failing open", "err", err)
-		return "", false
+		return "", false, limits.Decision{}
 	}
 	if dec.Allowed {
-		return "", false
+		return "", false, dec
 	}
-	return limitMessage(dec), true
+	return limitMessage(dec), true, limits.Decision{}
 }
 
 func limitMessage(d limits.Decision) string {
@@ -87,7 +109,7 @@ func limitMessage(d limits.Decision) string {
 // same two numbers they always did and are right for a reasoning model without
 // knowing what one is; the reasoning count rides along for the ledger, the
 // metrics and the log line, where an operator can see the split.
-func (s *Server) finalizeUsage(ctx context.Context, entry ledger.Entry, keyID, upstreamModel string, u llm.Usage) {
+func (s *Server) finalizeUsage(ctx context.Context, entry ledger.Entry, keyID, upstreamModel string, u llm.Usage, reservedTokens, reservedBucket int64) {
 	entry.PromptTokens = u.PromptTokens
 	entry.CompletionTokens = u.CompletionTokens
 	entry.ReasoningTokens = u.ReasoningTokens
@@ -114,7 +136,14 @@ func (s *Server) finalizeUsage(ctx context.Context, entry ledger.Entry, keyID, u
 	}
 
 	if entry.Status == http.StatusOK && (u.PromptTokens > 0 || u.CompletionTokens > 0) {
-		if err := s.limiter.Add(ctx, keyID, u.BilledTokens(), costMicro, 0, 0); err != nil {
+		if err := s.limiter.Add(ctx, keyID, u.BilledTokens(), costMicro, 0, 0, reservedTokens, reservedBucket); err != nil {
+			slog.Error("limiter add failed", "err", err)
+		}
+	} else if reservedTokens != 0 {
+		// No billable usage (failed request, or a success with zero usage),
+		// but Check still reserved headroom optimistically before the
+		// outcome was known — refund it now rather than leak it forever.
+		if err := s.limiter.Add(ctx, keyID, 0, 0, 0, 0, reservedTokens, reservedBucket); err != nil {
 			slog.Error("limiter add failed", "err", err)
 		}
 	}
@@ -151,7 +180,7 @@ func (s *Server) finalizeAudioUsage(ctx context.Context, entry ledger.Entry, key
 	}
 
 	if costMicro != 0 || audioSeconds != 0 || ttsChars != 0 {
-		if err := s.limiter.Add(ctx, keyID, 0, costMicro, audioSeconds, ttsChars); err != nil {
+		if err := s.limiter.Add(ctx, keyID, 0, costMicro, audioSeconds, ttsChars, 0, 0); err != nil {
 			slog.Error("limiter add failed", "err", err)
 		}
 	}
