@@ -33,11 +33,11 @@ and set `APP_BIND`, e.g. `APP_BIND=10.0.0.2:8088`.
 ### Sign in
 
 On first boot the gateway creates a persistent bootstrap admin. If
-`AIRLLM_ADMIN_PASSWORD` is not set, a random password is generated and
-**logged once** at `WARN`:
+`AIRLLM_ADMIN_PASSWORD` is not set, a random password is generated and written
+(never logged) to a file inside the container:
 
 ```sh
-docker compose -f deploy/docker-compose.yml logs app | grep "bootstrap admin"
+docker compose -f deploy/docker-compose.yml exec app cat /tmp/airllm-bootstrap-admin-password
 ```
 
 The password is stored permanently — it does **not** change on restart. Set

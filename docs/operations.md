@@ -56,9 +56,11 @@ migrations. A clean re-bootstrap is `make compose-down && make compose-up`.
   over plain HTTP, so local dev keeps working without TLS.
 - **Bootstrap admin.** On first boot (`local` mode), the gateway creates one
   persistent admin user. If `AIRLLM_ADMIN_PASSWORD` is set, the password is
-  stored silently and never logged. If unset, a random password is logged once
-  at `WARN` and never regenerated. The bootstrap is a no-op once an admin
-  account exists.
+  stored silently and never logged. If unset, a random password is written
+  (never logged) to `/tmp/airllm-bootstrap-admin-password` inside the
+  container — read it once via `kubectl exec`/`docker compose exec` and
+  delete the file — and never regenerated. The bootstrap is a no-op once an
+  admin account exists.
 - **OIDC behind the ingress.** In `AUTH_MODE=oidc`, the gateway listens on
   `0.0.0.0:8080` behind your ingress (same as without OIDC). The IdP redirect
   and callback (`/auth/sso`, `/auth/callback`) must be reachable at the public

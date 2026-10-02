@@ -92,9 +92,8 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("bootstrap admin: %w", err)
 		}
-		if created && gen != "" {
-			slog.Warn("bootstrap admin created (change this password)",
-				"username", envOr("AIRLLM_ADMIN_USERNAME", "admin"), "password", gen)
+		if err := reportBootstrapAdmin(bootstrapPasswordFile, envOr("AIRLLM_ADMIN_USERNAME", "admin"), created, gen); err != nil {
+			return err
 		}
 	case "oidc":
 		oa, err := auth.NewOIDCAuth(ctx, auth.OIDCConfig{
@@ -265,6 +264,28 @@ func run() error {
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)
 	}
+}
+
+// bootstrapPasswordFile is where a generated bootstrap-admin password is
+// written when AIRLLM_ADMIN_PASSWORD isn't set, instead of being logged — a
+// log line the app itself ships to centralized log storage (see the slog
+// setup in run()) is a much larger, longer-lived blast radius than a local
+// file the operator reads once via a shell into the container.
+const bootstrapPasswordFile = "/tmp/airllm-bootstrap-admin-password"
+
+// reportBootstrapAdmin hands a freshly generated bootstrap-admin password to
+// the operator without ever passing it to slog. A no-op unless a new admin
+// was just created with no AIRLLM_ADMIN_PASSWORD supplied.
+func reportBootstrapAdmin(passwordFile, username string, created bool, generated string) error {
+	if !created || generated == "" {
+		return nil
+	}
+	if err := os.WriteFile(passwordFile, []byte(generated+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write bootstrap admin password: %w", err)
+	}
+	slog.Warn("bootstrap admin created; password written to a local file, never logged — read it once (e.g. kubectl exec/docker compose exec cat), then delete the file",
+		"username", username, "path", passwordFile)
+	return nil
 }
 
 func envOr(k, def string) string {
