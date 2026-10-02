@@ -60,6 +60,7 @@ type Server struct {
 	ledger        *ledger.Ledger
 	auth          auth.Authenticator
 	login         auth.LoginProvider
+	loginLimiter  *auth.LoginLimiter
 	oidc          oidcHandler
 	httpc         *http.Client      // shared client for the DLP model sidecar
 	capturePl     *capture.Pipeline // nil when capture is not configured
@@ -77,19 +78,20 @@ type Server struct {
 // NewServer builds the routed handler.
 func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 	s := &Server{
-		cfg:     cfg,
-		st:      st,
-		mux:     http.NewServeMux(),
-		router:  routing.NewRouter(st),
-		limiter: deps.Limiter,
-		pricing: deps.Pricing,
-		sealer:  deps.Sealer,
-		ledger:  ledger.New(st),
-		auth:    deps.Auth,
-		login:   deps.Login,
-		oidc:    deps.OIDC,
-		httpc:   &http.Client{},
-		metrics: metrics.New(),
+		cfg:          cfg,
+		st:           st,
+		mux:          http.NewServeMux(),
+		router:       routing.NewRouter(st),
+		limiter:      deps.Limiter,
+		pricing:      deps.Pricing,
+		sealer:       deps.Sealer,
+		ledger:       ledger.New(st),
+		auth:         deps.Auth,
+		login:        deps.Login,
+		loginLimiter: auth.NewLoginLimiter(st.RDB),
+		oidc:         deps.OIDC,
+		httpc:        &http.Client{},
+		metrics:      metrics.New(),
 	}
 	s.regPtr.Store(deps.Providers)
 	s.loadDLP(context.Background())
