@@ -230,21 +230,27 @@ func MarshalMessagesResponse(resp llm.ChatResponse) ([]byte, error) {
 	if len(resp.Choices) > 0 {
 		choice = resp.Choices[0]
 	}
-	if len(choice.Message.ToolCalls) > 0 {
-		for _, tc := range choice.Message.ToolCalls {
-			input := tc.Function.Arguments
-			if input == "" {
-				input = "{}"
-			}
-			out.Content = append(out.Content, contentBlockOut{
-				Type:  "tool_use",
-				ID:    tc.ID,
-				Name:  tc.Function.Name,
-				Input: json.RawMessage(input),
-			})
-		}
-	} else {
+	// Text and tool_use are independent, not mutually exclusive: a model can
+	// emit lead-in commentary alongside a tool call in the same turn (e.g.
+	// "Let me check that." + a tool_use). This used to be an if/else keyed
+	// on ToolCalls, which silently dropped Content whenever tool calls were
+	// also present. A message with no tool calls still gets a text block
+	// even when Content is empty, matching the prior always-text-when-no-
+	// tools behavior.
+	if choice.Message.Content != "" || len(choice.Message.ToolCalls) == 0 {
 		out.Content = append(out.Content, contentBlockOut{Type: "text", Text: choice.Message.Content})
+	}
+	for _, tc := range choice.Message.ToolCalls {
+		input := tc.Function.Arguments
+		if input == "" {
+			input = "{}"
+		}
+		out.Content = append(out.Content, contentBlockOut{
+			Type:  "tool_use",
+			ID:    tc.ID,
+			Name:  tc.Function.Name,
+			Input: json.RawMessage(input),
+		})
 	}
 	out.StopReason = StopReason(choice.FinishReason)
 	return json.Marshal(out)
