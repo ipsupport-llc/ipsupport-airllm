@@ -187,6 +187,7 @@ func run() error {
 	defer apiSrv.Ledger().Stop()
 	apiSrv.Metrics().RegisterCaptureDropped(func() float64 { return float64(capturePipeline.Dropped()) })
 	apiSrv.Metrics().RegisterLedgerDropped(func() float64 { return float64(apiSrv.Ledger().Dropped()) })
+	apiSrv.Metrics().RegisterWebhookDropped(func() float64 { return float64(webhook.Dropped()) })
 	apiSrv.StartModelPool(ctx)
 
 	// Build and start the second-pass background job. It uses an atomic

@@ -139,3 +139,62 @@ func TestValidateDialAddrAllowsPublicHostAndReturnsResolvedIP(t *testing.T) {
 		t.Errorf("got ip=%s port=%s, want 203.0.113.1/443", ip, port)
 	}
 }
+
+// TestSendDropsWhenQueueFullWithoutBlocking is the Limits-I2 fix: Send must
+// never grow goroutines/connections without bound, no matter how many
+// endpoints a DLP incident fans out to. It saturates all `workers` real
+// worker goroutines with a resolver that blocks until released, floods the
+// shared queue well past its capacity, and asserts (a) Send itself never
+// blocks the caller and (b) the excess is dropped rather than queued or
+// spawned as new goroutines.
+func TestSendDropsWhenQueueFullWithoutBlocking(t *testing.T) {
+	block := make(chan struct{})
+	var calls atomic.Int32
+	prev := LookupIP
+	LookupIP = func(ctx context.Context, _, _ string) ([]net.IP, error) {
+		calls.Add(1)
+		select {
+		case <-block:
+		case <-ctx.Done():
+		}
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		close(block)
+		// Every accepted job (the `workers` that saturated real workers,
+		// plus whatever fit in the buffer) must finish calling LookupIP
+		// before it's safe to restore it — otherwise a straggler could
+		// still be reading this package var when a later test writes to
+		// it, the same race TestDeliverRefusesLoopbackTarget guards against.
+		want := int32(workers + chanSize)
+		deadline := time.Now().Add(2 * time.Second)
+		for calls.Load() < want && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		LookupIP = prev
+	})
+
+	// Saturate all real workers first.
+	for i := 0; i < workers; i++ {
+		Send([]Endpoint{{URL: "http://blocked-target.test/"}}, []byte(`{}`))
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for calls.Load() < int32(workers) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if calls.Load() < int32(workers) {
+		t.Fatal("workers never became saturated")
+	}
+
+	before := Dropped()
+	start := time.Now()
+	for i := 0; i < chanSize+50; i++ {
+		Send([]Endpoint{{URL: "http://overflow-target.test/"}}, []byte(`{}`))
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("Send took %v to enqueue %d overflowing endpoints; want near-instant (non-blocking)", elapsed, chanSize+50)
+	}
+	if Dropped() <= before {
+		t.Error("expected the dropped counter to increase once the queue filled up")
+	}
+}

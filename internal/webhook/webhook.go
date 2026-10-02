@@ -13,6 +13,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -112,13 +114,60 @@ func ValidateURL(ctx context.Context, rawURL string) error {
 	return nil
 }
 
-// Send posts body to each endpoint asynchronously (fire-and-forget). When an
-// endpoint has a secret, the body is signed with HMAC-SHA256 in the
-// X-AirLLM-Signature header ("sha256=<hex>").
+// chanSize and workers bound webhook delivery's fan-out, the same way
+// internal/capture.Pipeline and internal/ledger.Ledger bound theirs:
+// a goroutine (and outbound connection) per endpoint, with no cap, meant
+// unlimited concurrent deliveries could pile up under a sustained run of
+// DLP incidents (the request path that calls Send) — unbounded goroutine
+// and connection growth, not just a slow response.
+const (
+	chanSize = 1024
+	workers  = 4
+)
+
+type deliveryJob struct {
+	endpoint Endpoint
+	body     []byte
+}
+
+var (
+	queue        = make(chan deliveryJob, chanSize)
+	dropped      atomic.Int64
+	startWorkers sync.Once
+)
+
+// Dropped returns how many deliveries were dropped because the queue was
+// full.
+func Dropped() int64 { return dropped.Load() }
+
+func ensureWorkers() {
+	startWorkers.Do(func() {
+		for i := 0; i < workers; i++ {
+			go func() {
+				for j := range queue {
+					deliver(j.endpoint, j.body)
+				}
+			}()
+		}
+	})
+}
+
+// Send posts body to each endpoint asynchronously (fire-and-forget) through
+// a fixed worker pool. When an endpoint has a secret, the body is signed
+// with HMAC-SHA256 in the X-AirLLM-Signature header ("sha256=<hex>"). If
+// the queue is full, a delivery is dropped (Dropped() increments and a
+// warning is logged) rather than spawning another goroutine — delivery is
+// already best-effort, so dropping under sustained overload is consistent
+// with Send's existing fire-and-forget contract, not a new one.
 func Send(endpoints []Endpoint, body []byte) {
+	ensureWorkers()
 	for _, e := range endpoints {
-		e := e
-		go deliver(e, body)
+		select {
+		case queue <- deliveryJob{endpoint: e, body: body}:
+		default:
+			dropped.Add(1)
+			slog.Warn("webhook delivery dropped; queue full", "url", e.URL)
+		}
 	}
 }
 

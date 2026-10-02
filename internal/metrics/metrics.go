@@ -173,3 +173,15 @@ func (m *Metrics) RegisterLedgerDropped(fn func() float64) {
 		Name: "airllm_ledger_dropped", Help: "Usage ledger records dropped due to a full buffer.",
 	}, fn))
 }
+
+// RegisterWebhookDropped registers a gauge that reads the webhook package's
+// cumulative dropped-delivery count from fn — a delivery dropped because
+// its bounded queue was full under sustained fan-out.
+func (m *Metrics) RegisterWebhookDropped(fn func() float64) {
+	if m == nil {
+		return
+	}
+	m.reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "airllm_webhook_dropped", Help: "Webhook deliveries dropped due to a full buffer.",
+	}, fn))
+}
