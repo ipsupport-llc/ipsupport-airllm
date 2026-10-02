@@ -1,8 +1,16 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 )
 
 // TestProviderConfigToStore covers the two decisions a provider save makes
@@ -86,5 +94,85 @@ func TestCredentialToStore(t *testing.T) {
 				t.Errorf("got (%q, %s), want (%q, %s)", secret, change, c.wantSecret, c.wantChange)
 			}
 		})
+	}
+}
+
+// TestPutProviderSerializesConcurrentSaves proves a concurrent save of the
+// same provider does not silently discard another transaction's genuine
+// concurrent change (Admin API I1 fix): it holds an UPDATE open in another
+// transaction (simulating a slow in-flight save that already changed the
+// config but hasn't committed yet), then calls handleAdminPutProvider for
+// the SAME provider with config OMITTED — "keep whatever is stored". The
+// held transaction's row lock forces the handler to block; once it commits,
+// the handler's read MUST see the held transaction's committed value, not
+// whatever was there before it even started, or "keep stored" silently
+// reverts a real concurrent change.
+func TestPutProviderSerializesConcurrentSaves(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	sl := testAuditSealer(t)
+	name := fmt.Sprintf("race-test-%d", time.Now().UnixNano())
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO providers (name, kind, base_url, enabled, max_concurrency, config)
+		VALUES ($1, 'openai', 'https://api.openai.com/v1', true, 1, '{"a":1}'::jsonb)`,
+		name,
+	); err != nil {
+		t.Fatalf("seed provider: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM providers WHERE name = $1`, name)
+	})
+
+	heldTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin held tx: %v", err)
+	}
+	if _, err := heldTx.Exec(ctx, `UPDATE providers SET config = '{"a":99}'::jsonb WHERE name = $1`, name); err != nil {
+		t.Fatalf("held tx update: %v", err)
+	}
+
+	s := &Server{st: &store.Store{PG: pool}, sealer: sl}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// config omitted: "keep whatever is already stored".
+		body := `{"kind":"openai","base_url":"https://api.openai.com/v1","enabled":true,"max_concurrency":1}`
+		req := httptest.NewRequest(http.MethodPut, "/api/admin/providers/"+name, strings.NewReader(body))
+		req.SetPathValue("name", name)
+		rec := httptest.NewRecorder()
+		s.handleAdminPutProvider(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Errorf("concurrent save failed: %d %s", rec.Code, rec.Body.String())
+		}
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("concurrent save completed before the holding transaction released its lock — the read isn't serialized against the write")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	if err := heldTx.Commit(ctx); err != nil {
+		t.Fatalf("release held tx: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("concurrent save never completed after the lock was released")
+	}
+
+	var finalConfig string
+	if err := pool.QueryRow(ctx, `SELECT config::text FROM providers WHERE name = $1`, name).Scan(&finalConfig); err != nil {
+		t.Fatalf("read final config: %v", err)
+	}
+	var got map[string]int
+	if err := json.Unmarshal([]byte(finalConfig), &got); err != nil {
+		t.Fatalf("unmarshal final config %q: %v", finalConfig, err)
+	}
+	if got["a"] != 99 {
+		t.Fatalf("expected the held transaction's committed config {\"a\":99} to survive a concurrent \"keep stored\" save, got %s — lost update", finalConfig)
 	}
 }
