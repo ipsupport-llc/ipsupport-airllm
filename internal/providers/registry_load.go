@@ -44,6 +44,10 @@ func LoadFromStore(ctx context.Context, st *store.Store, sealer *secrets.Sealer)
 		return nil, err
 	}
 	reg := NewRegistry()
+	// Fingerprints of every vertex credential this load actually resolved a
+	// token source for — reconciled against the token cache at the end, so
+	// a credential rotated away in a prior save doesn't linger forever.
+	liveTokenFingerprints := map[string]bool{}
 	for _, p := range rows {
 		var cred []byte
 		var credErr error
@@ -73,12 +77,16 @@ func LoadFromStore(ctx context.Context, st *store.Store, sealer *secrets.Sealer)
 				continue
 			}
 			prov = v
+			if credErr == nil {
+				liveTokenFingerprints[googleTokenFingerprint(cred)] = true
+			}
 		default:
 			slog.Warn("provider kind has no client yet; skipping", "provider", p.Name, "kind", p.Kind)
 			continue
 		}
 		reg.Register(prov, p.MaxConcurrency)
 	}
+	PruneGoogleTokenSources(liveTokenFingerprints)
 
 	if _, ok := reg.Get("mock"); !ok {
 		reg.Register(NewMock("mock"), 0)

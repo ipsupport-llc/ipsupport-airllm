@@ -9,8 +9,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 )
@@ -145,6 +150,108 @@ func TestGoogleTokenSourceDistinguishesCredentials(t *testing.T) {
 	}
 	if a == b {
 		t.Error("two different credentials must not share a token source; they authenticate as different accounts")
+	}
+}
+
+// TestGoogleTokenSourceDoesNotSerializeDifferentCredentials proves resolving
+// one credential's token source does not block a concurrent resolution of a
+// DIFFERENT credential (Routing/fallback I2 fix) — the old code held a
+// single global mutex across the whole ambient-credential round trip, so a
+// slow resolution for one provider stalled every other vertex provider's
+// token lookup too. A blocking handler simulates that slow round trip; a
+// second, independent credential must resolve while the first is still
+// in flight.
+func TestGoogleTokenSourceDoesNotSerializeDifferentCredentials(t *testing.T) {
+	// Substitute the actual network/ambient-probing call with a stand-in
+	// that blocks for the "slow" credential specifically, so the test
+	// controls exactly how long resolution takes without a real network
+	// call or depending on this machine's ambient identity.
+	slowCred := []byte("slow-marker")
+	fastCred := []byte("fast-marker")
+	block := make(chan struct{})
+	var unblockOnce sync.Once
+	unblock := func() { unblockOnce.Do(func() { close(block) }) }
+	defer unblock() // safety net if a t.Fatal below exits before the explicit unblock
+
+	orig := resolveGoogleCredentials
+	resolveGoogleCredentials = func(ctx context.Context, credJSON []byte) (*google.Credentials, error) {
+		if string(credJSON) == string(slowCred) {
+			<-block
+		}
+		return &google.Credentials{TokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "ya29.stub"})}, nil
+	}
+	t.Cleanup(func() { resolveGoogleCredentials = orig })
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := GoogleTokenSource(context.Background(), slowCred)
+		done <- err
+	}()
+
+	// Give the slow resolution a moment to reach (and block in) the stub.
+	time.Sleep(50 * time.Millisecond)
+
+	fastDone := make(chan error, 1)
+	go func() {
+		_, err := GoogleTokenSource(context.Background(), fastCred)
+		fastDone <- err
+	}()
+
+	select {
+	case err := <-fastDone:
+		if err != nil {
+			t.Fatalf("fast credential resolution failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a different credential's resolution was blocked by the slow one still in flight")
+	}
+
+	unblock()
+	if err := <-done; err != nil {
+		t.Fatalf("slow credential resolution failed: %v", err)
+	}
+}
+
+// TestPruneGoogleTokenSourcesEvictsRotatedCredentials proves a credential no
+// longer configured drops out of the cache instead of accumulating forever
+// (Routing/fallback I3 fix) — simulating what LoadFromStore does on every
+// registry rebuild: after resolving today's live credentials, it prunes
+// anything else out of the shared cache.
+func TestPruneGoogleTokenSourcesEvictsRotatedCredentials(t *testing.T) {
+	var hits atomic.Int32
+	srv := tokenEndpoint(t, &hits)
+
+	oldCred := serviceAccountJSON(t, "prune-old", srv.URL)
+	newCred := serviceAccountJSON(t, "prune-new", srv.URL)
+	oldFP := googleTokenFingerprint(oldCred)
+	newFP := googleTokenFingerprint(newCred)
+
+	if _, err := GoogleTokenSource(context.Background(), oldCred); err != nil {
+		t.Fatalf("resolve old credential: %v", err)
+	}
+	googleTokenMu.Lock()
+	_, cached := googleTokenSources[oldFP]
+	googleTokenMu.Unlock()
+	if !cached {
+		t.Fatal("old credential was not cached before rotation")
+	}
+
+	// The operator rotates the credential: a rebuild resolves the NEW one
+	// and prunes with only the new fingerprint marked live.
+	if _, err := GoogleTokenSource(context.Background(), newCred); err != nil {
+		t.Fatalf("resolve new credential: %v", err)
+	}
+	PruneGoogleTokenSources(map[string]bool{newFP: true})
+
+	googleTokenMu.Lock()
+	_, oldStillCached := googleTokenSources[oldFP]
+	_, newStillCached := googleTokenSources[newFP]
+	googleTokenMu.Unlock()
+	if oldStillCached {
+		t.Error("rotated-away credential's token source was not evicted")
+	}
+	if !newStillCached {
+		t.Error("current credential's token source was wrongly evicted")
 	}
 }
 
