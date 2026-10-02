@@ -244,7 +244,7 @@ func (p *OpenAICompat) Transcribe(ctx context.Context, in audio.TranscriptionReq
 
 	resp, err := p.hc.Do(req)
 	if err != nil {
-		return audio.TranscriptionResponse{}, &Error{Status: http.StatusBadGateway, Retryable: true, Message: err.Error()}
+		return audio.TranscriptionResponse{}, transportError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
@@ -286,7 +286,7 @@ func (p *OpenAICompat) Synthesize(ctx context.Context, in audio.SpeechRequest) (
 
 	resp, err := p.hc.Do(req)
 	if err != nil {
-		return audio.SpeechResponse{}, &Error{Status: http.StatusBadGateway, Retryable: true, Message: err.Error()}
+		return audio.SpeechResponse{}, transportError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {

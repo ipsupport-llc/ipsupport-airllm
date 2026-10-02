@@ -24,10 +24,14 @@ var debugUpstreamSSE = os.Getenv("DEBUG_UPSTREAM_SSE") == "1"
 // decode; the caller closes its body.
 //
 // It is the shared request half of what decodeSSEStream is the shared
-// response half of. Both things a caller must not get wrong live here: a
-// transport failure is retryable (the next attempt may well connect), and a
-// non-2xx goes through httpError so the vendor's error envelope is
-// classified in one place rather than per provider.
+// response half of. Several things a caller must not get wrong live here: a
+// transport failure is retryable (the next attempt may well connect) UNLESS
+// it's the caller's own context being canceled — in this codebase that is
+// almost always the original client disconnecting, not something another
+// tier could fix, so retrying would just make another real upstream call
+// nobody is waiting for; and a non-2xx goes through httpError so the
+// vendor's error envelope is classified in one place rather than per
+// provider.
 //
 // bearer is omitted when empty, which is how a local upstream with no
 // authentication is addressed.
@@ -46,7 +50,7 @@ func sendChatCompletions(ctx context.Context, hc *http.Client, name, baseURL, be
 
 	resp, err := hc.Do(req)
 	if err != nil {
-		return nil, &Error{Status: http.StatusBadGateway, Retryable: true, Message: err.Error()}
+		return nil, transportError(err)
 	}
 	if resp.StatusCode/100 != 2 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))

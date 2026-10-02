@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
 )
@@ -35,6 +36,39 @@ func collectChunks(t *testing.T, ts *httptest.Server) []llm.StreamChunk {
 		t.Fatalf("ChatStream: %v", err)
 	}
 	return got
+}
+
+// TestChatTransportCancellationIsNotRetryable proves a client context
+// canceled mid-request is NOT classified as retryable/fallback-worthy
+// (Routing/fallback I1 fix) — in this codebase that's almost always the
+// original client disconnecting, which another tier can't fix, so marking
+// it retryable would make runChat walk every remaining tier for a response
+// nobody is waiting for.
+func TestChatTransportCancellationIsNotRetryable(t *testing.T) {
+	block := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-block // hang until the test cancels the client context
+	}))
+	defer ts.Close()
+	defer close(block)
+
+	p := NewOpenAICompat("up", "openai", ts.URL, "sk-test")
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := p.Chat(ctx, llm.ChatRequest{Model: "m", Messages: []llm.Message{{Role: "user", Content: "hi"}}})
+	if err == nil {
+		t.Fatal("expected an error from a canceled context")
+	}
+	if IsRetryable(err) {
+		t.Error("a canceled client context must not be retryable")
+	}
+	if IsFallbackWorthy(err) {
+		t.Error("a canceled client context must not be fallback-worthy")
+	}
 }
 
 func TestChatStreamSynthesizesFinishReasonBeforeUsage(t *testing.T) {

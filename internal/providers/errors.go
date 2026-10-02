@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -186,6 +187,19 @@ func classifyErrorBody(body []byte) string {
 		}
 	}
 	return ""
+}
+
+// transportError classifies a failed HTTP round trip (or token acquisition):
+// retryable, UNLESS the caller's own context was canceled. In this codebase
+// that is almost always the original client disconnecting before the
+// request finished — not something a different tier could fix — so marking
+// it retryable/fallback-worthy would just make another real upstream call
+// (cost, concurrency slot, latency) nobody is waiting for anymore.
+func transportError(err error) *Error {
+	if errors.Is(err, context.Canceled) {
+		return &Error{Status: http.StatusBadGateway, Retryable: false, Message: err.Error()}
+	}
+	return &Error{Status: http.StatusBadGateway, Retryable: true, Message: err.Error()}
 }
 
 // httpError builds a provider Error from a non-2xx upstream response.
