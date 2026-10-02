@@ -90,19 +90,51 @@ func (p *PGUsers) SetPassword(ctx context.Context, id, hash string) error {
 	return err
 }
 
-func (p *PGUsers) Delete(ctx context.Context, id string) error {
-	tag, err := p.st.PG.Exec(ctx, `DELETE FROM users WHERE id=$1`, id)
+// Delete removes a user. q lets the caller run it inside a transaction (pass
+// p.st.PG when no tx is needed).
+func (p *PGUsers) Delete(ctx context.Context, q Querier, id string) error {
+	tag, err := q.Exec(ctx, `DELETE FROM users WHERE id=$1`, id)
 	if err == nil && tag.RowsAffected() == 0 {
 		return ErrUserNotFound
 	}
 	return err
 }
 
-// KeyCount returns how many active API keys the user owns (delete guard).
-func (p *PGUsers) KeyCount(ctx context.Context, id string) (int, error) {
+// KeyCount returns how many active API keys the user owns (delete guard). q
+// lets the caller run it inside a transaction (pass p.st.PG when no tx is
+// needed).
+func (p *PGUsers) KeyCount(ctx context.Context, q Querier, id string) (int, error) {
 	var n int
-	err := p.st.PG.QueryRow(ctx, `SELECT count(*) FROM api_keys WHERE user_id=$1 AND status='active'`, id).Scan(&n)
+	err := q.QueryRow(ctx, `SELECT count(*) FROM api_keys WHERE user_id=$1 AND status='active'`, id).Scan(&n)
 	return n, err
+}
+
+// LockAdminIDs returns the ids of every currently active (non-disabled)
+// admin, with those rows locked FOR UPDATE for the rest of the transaction.
+// Callers use this to serialize a demote/disable/delete against any other
+// concurrent one targeting a DIFFERENT admin — without the lock, two such
+// guards could each see "more than one admin remains" before either write
+// commits, and both proceed, leaving zero admins (a TOCTOU, not just a
+// theoretical race: the two writes are ordinary separate UPDATE/DELETE
+// statements with nothing else tying them to the earlier count).
+func (p *PGUsers) LockAdminIDs(ctx context.Context, tx pgx.Tx) ([]string, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT id::text FROM users
+		WHERE NOT disabled AND 'airllm_admin' = ANY(roles)
+		FOR UPDATE`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // ByID returns the row for self password-change (verify current password).

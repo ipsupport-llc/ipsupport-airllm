@@ -1,9 +1,12 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/auth"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
@@ -115,16 +118,16 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := s.guardLastAdmin(r, id, body.Roles, body.Disabled); err != nil {
-		writeControlError(w, http.StatusBadRequest, err.Error())
-		return
-	}
 	tx, err := s.st.PG.Begin(r.Context())
 	if err != nil {
 		writeControlError(w, http.StatusInternalServerError, "operation failed")
 		return
 	}
 	defer tx.Rollback(r.Context())
+	if err := s.guardLastAdminTx(r.Context(), tx, id, body.Roles, body.Disabled); err != nil {
+		writeControlError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err := s.users().Update(r.Context(), tx, id, body.Email, body.Display, body.Roles, body.Disabled); err != nil {
 		s.writeUserErr(w, err)
 		return
@@ -171,11 +174,18 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	sess, _ := sessionFrom(r.Context())
 	id := r.PathValue("id")
-	if err := s.guardLastAdmin(r, id, nil, true); err != nil {
+
+	tx, err := s.st.PG.Begin(r.Context())
+	if err != nil {
+		writeControlError(w, http.StatusInternalServerError, "operation failed")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	if err := s.guardLastAdminTx(r.Context(), tx, id, nil, true); err != nil {
 		writeControlError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	n, err := s.users().KeyCount(r.Context(), id)
+	n, err := s.users().KeyCount(r.Context(), tx, id)
 	if err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to check keys")
 		return
@@ -184,8 +194,12 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		writeControlError(w, http.StatusBadRequest, "user still owns active API keys; revoke them first")
 		return
 	}
-	if err := s.users().Delete(r.Context(), id); err != nil {
+	if err := s.users().Delete(r.Context(), tx, id); err != nil {
 		s.writeUserErr(w, err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeControlError(w, http.StatusInternalServerError, "operation failed")
 		return
 	}
 	s.audit(r.Context(), sess.principal.Subject, "user.delete", id, nil)
@@ -233,19 +247,25 @@ func (s *Server) handleChangeOwnPassword(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// guardLastAdmin blocks an update/delete that would remove the final admin.
-func (s *Server) guardLastAdmin(r *http.Request, id string, newRoles []string, disabling bool) error {
-	u, err := s.users().ByID(r.Context(), id)
+// guardLastAdminTx blocks an update/delete/disable that would remove the
+// final admin. It MUST run inside the same transaction that performs the
+// change, after LockAdminIDs has locked every active admin row FOR UPDATE —
+// without that lock, two concurrent guards (each demoting/disabling/
+// deleting a DIFFERENT admin) could each see "more than one admin remains"
+// before either write commits, and both proceed, leaving zero admins.
+func (s *Server) guardLastAdminTx(ctx context.Context, tx pgx.Tx, id string, newRoles []string, disabling bool) error {
+	adminIDs, err := s.users().LockAdminIDs(ctx, tx)
 	if err != nil {
-		return nil // not found -> let the underlying op report it
+		return fmt.Errorf("admin count: %w", err)
 	}
 	wasAdmin := false
-	for _, role := range u.Roles {
-		if role == auth.AdminRole {
+	for _, aid := range adminIDs {
+		if aid == id {
 			wasAdmin = true
+			break
 		}
 	}
-	if !wasAdmin || u.Disabled {
+	if !wasAdmin {
 		return nil
 	}
 	stillAdmin := false
@@ -254,14 +274,8 @@ func (s *Server) guardLastAdmin(r *http.Request, id string, newRoles []string, d
 			stillAdmin = true
 		}
 	}
-	if disabling || !stillAdmin {
-		n, err := s.users().CountAdmins(r.Context())
-		if err != nil {
-			return fmt.Errorf("admin count: %w", err)
-		}
-		if n <= 1 {
-			return errors.New("cannot remove or disable the last admin")
-		}
+	if (disabling || !stillAdmin) && len(adminIDs) <= 1 {
+		return errors.New("cannot remove or disable the last admin")
 	}
 	return nil
 }
