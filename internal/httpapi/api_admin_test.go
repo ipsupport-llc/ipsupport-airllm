@@ -97,6 +97,28 @@ func TestCredentialToStore(t *testing.T) {
 	}
 }
 
+// TestPutProviderRejectsNegativeMaxConcurrency is the Admin API Minor fix:
+// 0 means unlimited concurrency (internal/providers.Registry.Register — a
+// nil semaphore lets every Acquire succeed), so silently clamping a negative
+// max_concurrency to 0 turned a fat-fingered or buggy request into the MOST
+// permissive possible outcome instead of rejecting it. This never reaches
+// the database — the check is the first thing after body decode — so a
+// zero-value *Server is enough to exercise it.
+func TestPutProviderRejectsNegativeMaxConcurrency(t *testing.T) {
+	s := &Server{}
+	body := `{"kind":"openai","base_url":"https://api.openai.com/v1","enabled":true,"max_concurrency":-1}`
+	req := httptest.NewRequest(http.MethodPut, "/api/admin/providers/x", strings.NewReader(body))
+	req.SetPathValue("name", "x")
+	rec := httptest.NewRecorder()
+	s.handleAdminPutProvider(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "max_concurrency") {
+		t.Errorf("error body = %s, want it to name max_concurrency", rec.Body.String())
+	}
+}
+
 // TestPutProviderSerializesConcurrentSaves proves a concurrent save of the
 // same provider does not silently discard another transaction's genuine
 // concurrent change (Admin API I1 fix): it holds an UPDATE open in another

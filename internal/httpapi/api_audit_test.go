@@ -33,6 +33,7 @@ type fakeCaptureStore struct {
 	mu          sync.Mutex
 	rows        []capture.IndexRow
 	reviewCalls []fakeReviewCall
+	lastFilter  capture.ListFilter
 }
 
 type fakeReviewCall struct {
@@ -44,6 +45,7 @@ type fakeReviewCall struct {
 func (f *fakeCaptureStore) List(_ context.Context, filter capture.ListFilter) ([]capture.IndexRow, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.lastFilter = filter
 	if filter.ReviewStatus == "" {
 		return f.rows, nil
 	}
@@ -206,6 +208,27 @@ func TestAuditListCaptures(t *testing.T) {
 	}
 	if len(captures) != 2 {
 		t.Fatalf("expected 2 captures, got %d", len(captures))
+	}
+}
+
+// TestAuditListCapturesClampsLimit is the Admin API Minor fix: unlike the
+// analogous usage-series endpoints (clampHours, capped at 168), the ?limit
+// param here had only a lower bound, so an auditor could force an unbounded
+// ORDER BY ts DESC LIMIT n scan over capture_index.
+func TestAuditListCapturesClampsLimit(t *testing.T) {
+	store := &fakeCaptureStore{}
+	auditor := auth.Principal{Subject: "tester", Roles: []string{auth.AuditorRole}}
+	srv, _ := newAuditTestServer(t, auditor, store, newFakeMemBlob())
+
+	req := httptest.NewRequest("GET", "/api/audit/captures?limit=999999999", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if store.lastFilter.Limit > maxCaptureListLimit {
+		t.Errorf("Limit = %d, want clamped to <= %d", store.lastFilter.Limit, maxCaptureListLimit)
 	}
 }
 
