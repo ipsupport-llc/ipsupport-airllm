@@ -77,20 +77,22 @@ func (s *Store) RecordDLPIncident(ctx context.Context, in DLPIncident) error {
 	return err
 }
 
-// Webhook is an outbound alert endpoint.
+// Webhook is an outbound alert endpoint. SecretEnc is the AES-GCM-sealed
+// signing secret (nil when the webhook has none) — callers decrypt it with
+// the same secrets.Sealer used for provider credentials.
 type Webhook struct {
-	ID      string
-	Name    string
-	URL     string
-	Secret  string
-	Events  []string
-	Enabled bool
+	ID        string
+	Name      string
+	URL       string
+	SecretEnc []byte
+	Events    []string
+	Enabled   bool
 }
 
 // WebhooksForEvent returns enabled webhooks subscribed to an event.
 func (s *Store) WebhooksForEvent(ctx context.Context, event string) ([]Webhook, error) {
 	rows, err := s.PG.Query(ctx,
-		`SELECT id::text, url, secret FROM webhooks WHERE enabled = true AND $1 = ANY(events)`, event)
+		`SELECT id::text, url, secret_enc FROM webhooks WHERE enabled = true AND $1 = ANY(events)`, event)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +100,7 @@ func (s *Store) WebhooksForEvent(ctx context.Context, event string) ([]Webhook, 
 	var out []Webhook
 	for rows.Next() {
 		var w Webhook
-		if err := rows.Scan(&w.ID, &w.URL, &w.Secret); err != nil {
+		if err := rows.Scan(&w.ID, &w.URL, &w.SecretEnc); err != nil {
 			return nil, err
 		}
 		out = append(out, w)

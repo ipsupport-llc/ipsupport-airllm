@@ -125,7 +125,9 @@ Endpoints registered under **Admin → DLP** receive HMAC-signed POSTs
 (`X-AirLLM-Signature`) for DLP events. Beyond `dlp.incident`, the flywheel emits
 `dlp.false_negative` (a secret the fast layer missed) and `dlp.alert_cleared`
 (a fast-layer alert the stronger pass could not confirm). Payloads never contain
-the secret value.
+the secret value. A webhook's own signing secret is sealed with the same
+AES-GCM master key as provider credentials (`secret_enc`, never returned by the
+API) — a webhook with no secret still delivers, just unsigned.
 
 ## Capture store
 
