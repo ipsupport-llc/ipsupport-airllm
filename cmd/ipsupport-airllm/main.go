@@ -183,7 +183,10 @@ func run() error {
 
 	apiSrv := httpapi.NewServer(cfg, st, deps)
 	apiSrvPtr.Store(apiSrv)
+	apiSrv.Ledger().Start()
+	defer apiSrv.Ledger().Stop()
 	apiSrv.Metrics().RegisterCaptureDropped(func() float64 { return float64(capturePipeline.Dropped()) })
+	apiSrv.Metrics().RegisterLedgerDropped(func() float64 { return float64(apiSrv.Ledger().Dropped()) })
 	apiSrv.StartModelPool(ctx)
 
 	// Build and start the second-pass background job. It uses an atomic

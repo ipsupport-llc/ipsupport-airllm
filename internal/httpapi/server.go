@@ -117,6 +117,10 @@ func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 // Metrics exposes the server's metrics for wiring external gauge sources in main.
 func (s *Server) Metrics() *metrics.Metrics { return s.metrics }
 
+// Ledger exposes the server's ledger so main can drain it on graceful
+// shutdown and wire its dropped-record gauge.
+func (s *Server) Ledger() *ledger.Ledger { return s.ledger }
+
 // StartModelPool kicks off the DLP model pool's resolver (initial + periodic
 // re-resolve) until ctx is cancelled.
 func (s *Server) StartModelPool(ctx context.Context) { s.modelPool.Start(ctx) }
