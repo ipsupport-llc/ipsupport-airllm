@@ -450,6 +450,33 @@ models Google commits to for at least 12 months (3.5 Flash, 3.5 Flash-Lite,
 3.1 Flash-Lite, per its model-versions page read 2026-09-24), so re-check it
 when touching this list.
 
+### Gemini thought signatures
+
+Gemini 3 attaches a **thought signature** to the function calls it makes. On
+Vertex's OpenAI-compatible surface it arrives on the tool call as
+`"extra_content": {"google": {"thought_signature": "…"}}`. With parallel calls,
+only the first call of a step carries it. The next request must send it back on
+that same call; without it, Vertex answers `400 INVALID_ARGUMENT` ("Function
+call is missing a thought_signature"). That error is not fallback-worthy, so
+the whole request fails. Gemini 2.5 emitted signatures but never checked them.
+
+The gateway carries `extra_content` opaquely on every leg: client request to
+upstream, upstream response to client, and streamed deltas. A client therefore
+only has to echo the tool calls it received, as the OpenAI tool-calling loop
+already does. Two rules sit on top of that:
+
+- **Vertex, Gemini models (`google/…`).** If an assistant message's first tool
+  call has no signature, the gateway adds Google's documented stand-in,
+  `skip_thought_signature_validator`, to that call's `extra_content`, keeping
+  any other keys already there. This covers a step served by a fallback tier,
+  a client that drops `extra_content`, and Anthropic ingress, which has no
+  place for it. Google calls the stand-in a last resort that costs reasoning
+  quality, so a real signature is always sent as is. Other publishers' models
+  on Vertex get the request as the client sent it.
+- **Every other provider.** `extra_content` is removed before the request goes
+  upstream. A turn that falls back from a Vertex tier still carries it, and
+  the other vendors should get the request they got before the field existed.
+
 ## Scaling the DLP BERT sidecar
 
 The BERT-NER model layer runs as an external sidecar and is load-balanced by a

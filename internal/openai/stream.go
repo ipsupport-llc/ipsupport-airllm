@@ -24,6 +24,9 @@ type streamToolCall struct {
 	ID       string         `json:"id,omitempty"`
 	Type     string         `json:"type,omitempty"`
 	Function streamToolFunc `json:"function"`
+	// ExtraContent carries a vendor's per-call metadata (Gemini's thought
+	// signature) through to the client untouched.
+	ExtraContent json.RawMessage `json:"extra_content,omitempty"`
 }
 
 type streamDelta struct {
@@ -69,10 +72,11 @@ func MarshalStreamChunk(meta StreamMeta, c llm.StreamChunk) ([]byte, error) {
 	choice.Delta.Content = c.Content
 	for _, tc := range c.ToolCalls {
 		choice.Delta.ToolCalls = append(choice.Delta.ToolCalls, streamToolCall{
-			Index:    tc.Index,
-			ID:       tc.ID,
-			Type:     tc.Type,
-			Function: streamToolFunc{Name: tc.Function.Name, Arguments: tc.Function.Arguments},
+			Index:        tc.Index,
+			ID:           tc.ID,
+			Type:         tc.Type,
+			Function:     streamToolFunc{Name: tc.Function.Name, Arguments: tc.Function.Arguments},
+			ExtraContent: tc.ExtraContent,
 		})
 	}
 	if c.FinishReason != "" {

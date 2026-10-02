@@ -102,6 +102,10 @@ type ToolCall struct {
 	ID       string       `json:"id"`
 	Type     string       `json:"type"` // always "function" today
 	Function FunctionCall `json:"function"`
+	// ExtraContent is a vendor's per-call metadata, carried opaquely. Vertex
+	// puts Gemini's thought signature here, and Gemini 3 refuses the next
+	// request unless it comes back unchanged.
+	ExtraContent json.RawMessage `json:"extra_content,omitempty"`
 }
 
 // ToolCallDelta is one streamed increment of a tool call. Index identifies
@@ -112,6 +116,9 @@ type ToolCallDelta struct {
 	ID       string       `json:"id,omitempty"`
 	Type     string       `json:"type,omitempty"`
 	Function FunctionCall `json:"function"`
+	// ExtraContent is ToolCall.ExtraContent as it arrives in a stream: on the
+	// delta that opens the call.
+	ExtraContent json.RawMessage `json:"extra_content,omitempty"`
 }
 
 // FunctionCall carries the called function name and JSON-string arguments.

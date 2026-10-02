@@ -186,18 +186,19 @@ func TestVertexListModelsIsCuratedAndNotAliased(t *testing.T) {
 	}
 }
 
-// vertexUpstream is an in-process stand-in for Vertex's OpenAI-compatible
-// surface. It records the one request it is given and replies with resp.
-type vertexUpstream struct {
+// recordingUpstream is an in-process stand-in for an OpenAI-compatible
+// surface (Vertex's, or any other vendor's). It records the one request it is
+// given and replies with resp.
+type recordingUpstream struct {
 	*httptest.Server
 	path string
 	auth string
 	body map[string]any
 }
 
-func newVertexUpstream(t *testing.T, status int, contentType, resp string) *vertexUpstream {
+func newRecordingUpstream(t *testing.T, status int, contentType, resp string) *recordingUpstream {
 	t.Helper()
-	up := &vertexUpstream{}
+	up := &recordingUpstream{}
 	up.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		up.path = r.URL.Path
 		up.auth = r.Header.Get("Authorization")
@@ -211,7 +212,7 @@ func newVertexUpstream(t *testing.T, status int, contentType, resp string) *vert
 }
 
 func TestVertexChatQualifiesTheModelAndBearsTheToken(t *testing.T) {
-	up := newVertexUpstream(t, http.StatusOK, "application/json",
+	up := newRecordingUpstream(t, http.StatusOK, "application/json",
 		`{"id":"c1","model":"google/gemini-2.5-flash","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`)
 
 	p := NewVertex("vx", up.URL, stubTokenSource{token: "ya29.stub"})

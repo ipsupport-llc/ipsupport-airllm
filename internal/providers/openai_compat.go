@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"mime/multipart"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -66,7 +67,7 @@ func (p *OpenAICompat) Chat(ctx context.Context, in llm.ChatRequest) (llm.ChatRe
 	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
-	body, err := openai.EncodeChatRequest(in, false)
+	body, err := openai.EncodeChatRequest(withoutToolCallExtras(in), false)
 	if err != nil {
 		return llm.ChatResponse{}, err
 	}
@@ -80,7 +81,7 @@ func (p *OpenAICompat) Chat(ctx context.Context, in llm.ChatRequest) (llm.ChatRe
 
 // ChatStream streams an upstream call, translating SSE chunks into the IR.
 func (p *OpenAICompat) ChatStream(ctx context.Context, in llm.ChatRequest, yield func(llm.StreamChunk) error) error {
-	body, err := openai.EncodeChatRequest(in, true)
+	body, err := openai.EncodeChatRequest(withoutToolCallExtras(in), true)
 	if err != nil {
 		return err
 	}
@@ -94,6 +95,24 @@ func (p *OpenAICompat) ChatStream(ctx context.Context, in llm.ChatRequest, yield
 	defer resp.Body.Close()
 
 	return decodeSSEStream(resp.Body, streamDecodeOptions{provider: p.name}, yield)
+}
+
+// withoutToolCallExtras drops every tool call's ExtraContent. It is Vertex's
+// field (Gemini's thought signature), and a turn that falls back from a
+// Vertex tier still carries it; other vendors get exactly the request they
+// got before the field existed. The caller's request is shared across tiers,
+// so it is copied, never edited.
+func withoutToolCallExtras(in llm.ChatRequest) llm.ChatRequest {
+	return rewriteToolCalls(in, func(calls []llm.ToolCall) []llm.ToolCall {
+		if !slices.ContainsFunc(calls, func(tc llm.ToolCall) bool { return len(tc.ExtraContent) > 0 }) {
+			return nil
+		}
+		stripped := slices.Clone(calls)
+		for j := range stripped {
+			stripped[j].ExtraContent = nil
+		}
+		return stripped
+	})
 }
 
 // ListModels fetches GET {base}/models and returns the sorted, de-duplicated
