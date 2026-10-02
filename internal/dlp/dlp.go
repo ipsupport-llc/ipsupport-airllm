@@ -306,29 +306,53 @@ func Labels(findings []Finding) []string {
 	return out
 }
 
-// Merge sorts findings by start and drops any that overlap an earlier one, so
-// redaction offsets never collide. The earliest (most specific) rule wins.
-// It is used to combine the regex layer with the model layer.
+// patternPriority ranks a built-in label by its position in patterns (lower
+// = more specific, wins an overlap). A label with no entry — a custom
+// pattern, "high_entropy", or a model-layer label — ranks below every
+// built-in label.
+var patternPriority = func() map[string]int {
+	m := make(map[string]int, len(patterns))
+	for i, p := range patterns {
+		m[p.label] = i
+	}
+	return m
+}()
+
+func priorityOf(label string) int {
+	if i, ok := patternPriority[label]; ok {
+		return i
+	}
+	return len(patterns)
+}
+
+// Merge drops any finding that overlaps a more specific one (by patterns'
+// order — see priorityOf), then returns the survivors sorted by start with
+// no overlaps, so redaction offsets never collide. It is used both to merge
+// overlapping matches from different built-in patterns and to combine the
+// regex/entropy layer with the model layer.
 func Merge(in []Finding) []Finding {
 	if len(in) <= 1 {
 		return in
 	}
-	sort.SliceStable(in, func(a, b int) bool {
-		if in[a].Start != in[b].Start {
-			return in[a].Start < in[b].Start
+	ranked := append([]Finding(nil), in...)
+	sort.SliceStable(ranked, func(a, b int) bool {
+		if pa, pb := priorityOf(ranked[a].Label), priorityOf(ranked[b].Label); pa != pb {
+			return pa < pb // more specific pattern wins over a less specific/unranked one
 		}
-		return in[a].End > in[b].End // prefer the longer span at the same start
+		if la, lb := ranked[a].End-ranked[a].Start, ranked[b].End-ranked[b].Start; la != lb {
+			return la > lb // equal priority: prefer the longer span
+		}
+		return ranked[a].Start < ranked[b].Start
 	})
-	out := in[:0:0]
-	end := -1
-	for _, f := range in {
-		if f.Start < end {
-			continue // overlaps a kept finding
+	var kept []Finding
+	for _, f := range ranked {
+		if overlapsAny(f.Start, f.End, kept) {
+			continue // overlaps a higher-priority (or equal-priority, longer) kept finding
 		}
-		out = append(out, f)
-		end = f.End
+		kept = append(kept, f)
 	}
-	return out
+	sort.SliceStable(kept, func(a, b int) bool { return kept[a].Start < kept[b].Start })
+	return kept
 }
 
 // shannon returns the Shannon entropy (bits per character) of s.
