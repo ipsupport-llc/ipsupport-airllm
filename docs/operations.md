@@ -419,11 +419,12 @@ by hand on that date — nothing in the gateway expires it, so left alone it
 under-prices every 3.8 Flash call by half from then on. (3.6 and 3.7 Flash carry
 the same offer; they are not offered here, see below.)
 
-**The Gemini 2.5 family retires on 2026-10-20.** Google names
-`gemini-3.5-flash` as the replacement for 2.5 Pro, and 3.5 Flash-Lite or 3.1
-Flash-Lite for 2.5 Flash and Flash-Lite. Any alias tier still targeting a 2.5 id
-on that date stops being served; move it before then, and drop
-the 2.5 ids from the curated list once nothing points at them.
+**The Gemini 2.5 family retires on 2026-10-20.** Google names `gemini-3.8-flash`
+or `gemini-3.5-flash` as the replacement for 2.5 Pro, and 3.8 Flash, 3.5
+Flash-Lite or 3.1 Flash-Lite for 2.5 Flash and Flash-Lite (model-versions page,
+read 2026-10-01). The 2.5 ids are no longer in the curated list. Their price rows
+stay, so the ledger keeps pricing the history it already holds; any alias tier
+still typed in by hand against a 2.5 id stops being served on that date.
 
 **What the curated model list offers, and why.** The alias editor's Vertex
 dropdown is a hand-maintained list (`vertexCuratedModels` in
@@ -431,9 +432,10 @@ dropdown is a hand-maintained list (`vertexCuratedModels` in
 any id, so no test can check it. On 2026-09-24 each candidate was called once
 through passthrough (`vertex/google/<id>`) against Vertex's Global endpoint:
 
-- **Offered:** exactly the ids in the table above. Every one answered `200`.
-- **Removed:** `gemini-3-flash` and `gemini-3-pro`, which the list used to
-  offer. Vertex answers both with `404 Publisher model … was not found`, and
+- **Offered:** exactly the Gemini 3 ids in the table above. Every one answered
+  `200`. The 2.5 rows there are priced history, no longer on offer.
+- **Removed:** the three 2.5 ids, ahead of their retirement (see above), and
+  `gemini-3-flash` and `gemini-3-pro`, which the list used to offer. Vertex answers both with `404 Publisher model … was not found`, and
   `gemini-3-pro-preview` likewise — there is no Gemini 3 Pro on Vertex, only
   3.1 Pro, and only as a preview.
 - **Answered, but deliberately not offered:** `gemini-3-flash-preview`
