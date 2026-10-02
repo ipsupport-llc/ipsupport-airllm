@@ -183,6 +183,8 @@ Auditors label captures in the **Review** queue (`review_status` ∈ `confirmed`
 **gold labels**. `POST /api/admin/dataset/export` then emits a JSONL artifact of
 reviewed captures — one line per message with attributed spans,
 `{"text": "...", "spans": [{"label","start","end"}]}` — for offline fine-tuning.
+The artifact is sealed at rest like every other capture blob;
+`GET /api/admin/dataset/download?key=` decrypts and streams it back.
 The fine-tune runbook is [`deploy/dlp-bert/TRAINING.md`](../deploy/dlp-bert/TRAINING.md).
 
 ## Audit
