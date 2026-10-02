@@ -129,7 +129,8 @@ to it — adding the two double-counts. Operators see the same split as
 | `GET`/`PUT` | `/api/admin/capture` | Capture policy |
 | `GET`/`PUT` | `/api/admin/secondpass` | Second-pass (flywheel) policy |
 | `GET` | `/api/admin/webhooks` · `POST` · `DELETE /{id}` | Alert webhook endpoints (HMAC-signed delivery) |
-| `POST` | `/api/admin/dataset/export` | Export reviewed captures as a labeled JSONL training artifact |
+| `POST` | `/api/admin/dataset/export` | Export reviewed captures as a labeled JSONL training artifact (sealed at rest) |
+| `GET` | `/api/admin/dataset/download?key=` | Decrypt and download a `datasets/` export artifact |
 | `GET` | `/api/admin/audit` | Admin audit log |
 
 ### Provider fields

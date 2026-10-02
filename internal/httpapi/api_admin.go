@@ -42,6 +42,7 @@ func (s *Server) adminRoutes() {
 
 	// Dataset export for DLP model fine-tuning.
 	s.mux.HandleFunc("POST /api/admin/dataset/export", a(s.handleAdminDatasetExport))
+	s.mux.HandleFunc("GET /api/admin/dataset/download", a(s.handleAdminDatasetDownload))
 
 	// DLP: config, pattern catalog, incidents, alert webhooks.
 	s.mux.HandleFunc("GET /api/admin/dlp", a(s.handleAdminGetDLP))

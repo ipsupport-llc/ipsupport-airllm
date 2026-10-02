@@ -21,18 +21,19 @@ curl -s -X POST https://<gateway-host>/api/admin/dataset/export \
 ```
 
 The artifact is written to the configured blob store (filesystem path under
-`CAPTURE_BLOB_DIR` in dev; MinIO/GCS bucket in production).
+`CAPTURE_BLOB_DIR` in dev; MinIO/GCS bucket in production), **sealed at rest**
+like every other capture blob — the raw file in storage is ciphertext, not
+JSONL.
 
 ### 1b. Fetch the JSONL artifact
 
-**Dev (filesystem blob):**
-```sh
-cat /var/lib/airllm/blobs/datasets/20260627-143012.jsonl > train.jsonl
-```
+Always go through the download endpoint, which decrypts on the way out — a
+direct `cat`/`mc cp` of the blob now yields ciphertext:
 
-**MinIO:**
 ```sh
-mc cp airllm/blobs/datasets/20260627-143012.jsonl train.jsonl
+curl -s "https://<gateway-host>/api/admin/dataset/download?key=datasets/20260627-143012.jsonl" \
+  -H "Authorization: Bearer <admin-session-token>" \
+  -o train.jsonl
 ```
 
 ### JSONL format
