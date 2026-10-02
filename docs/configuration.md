@@ -135,12 +135,12 @@ a **kind** (which client speaks to it), an **address**, a **credential**, and �
 for kinds that need more than a URL — a structured **configuration**. Saving
 one rebuilds the registry immediately; no restart.
 
-`openai`, `openrouter`, `xai`, `groq` and `ollama` are one OpenAI-compatible
-HTTP client pointed at different addresses, authenticating with
-`Authorization: Bearer <api_key>`; an explicit `base_url` always overrides the
-default below. The other three are each their own thing: `mock` answers
-in-process, `anthropic` has no client yet, and `vertex` is described in full
-further down.
+`openai`, `openrouter`, `xai`, `groq`, `ollama` and `muse` are one
+OpenAI-compatible HTTP client pointed at different addresses,
+authenticating with `Authorization: Bearer <api_key>`; an explicit
+`base_url` always overrides the default below. The other three are each
+their own thing: `mock` answers in-process, `anthropic` has no client yet,
+and `vertex` is described in full further down.
 
 | Kind | Default address | Credential |
 |------|-----------------|------------|
@@ -150,6 +150,7 @@ further down.
 | `xai` | `https://api.x.ai/v1` | `api_key` |
 | `groq` | `https://api.groq.com/openai/v1` | `api_key` |
 | `ollama` | `http://localhost:11434/v1` | none — leave it blank and point `base_url` at the host running the daemon |
+| `muse` | `https://api.meta.ai/v1` | `api_key` — Meta Model API (Muse Spark); also exposes an Anthropic-shaped `/v1/messages` surface this codebase doesn't use, since every kind here speaks OpenAI wire format upstream regardless |
 | `anthropic` | — | **no client yet**: a row of this kind is skipped when the registry is built, with a warning. Unrelated to the Anthropic-shaped `/v1/messages` *ingress*, which works with any kind. |
 | `vertex` | assembled from its configuration — see below | a short-lived OAuth2 access token, consulted per request and refreshed when it expires |
 

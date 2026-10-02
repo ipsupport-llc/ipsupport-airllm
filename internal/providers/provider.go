@@ -15,7 +15,7 @@ import (
 type Provider interface {
 	// Name is the unique provider name (matches providers.name in the DB).
 	Name() string
-	// Kind is the provider family: openai | openrouter | xai | groq | ollama | anthropic | vertex | mock.
+	// Kind is the provider family: openai | openrouter | xai | groq | ollama | muse | anthropic | vertex | mock.
 	Kind() string
 	// Protocol is the native wire protocol: openai | anthropic.
 	Protocol() string

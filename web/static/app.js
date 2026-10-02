@@ -881,7 +881,7 @@ function editProvider(c, p) {
   const cfg = p.config || {};
   modalForm(p.name ? `Edit provider ${p.name}` : "New provider", [
     { name: "name", label: "Name", value: p.name || "", disabled: !!p.name },
-    { name: "kind", label: "Kind", type: "select", options: ["mock", "openai", "openrouter", "xai", "groq", "ollama", "anthropic", "vertex"], value: p.kind || "mock" },
+    { name: "kind", label: "Kind", type: "select", options: ["mock", "openai", "openrouter", "xai", "groq", "ollama", "muse", "anthropic", "vertex"], value: p.kind || "mock" },
     { name: "base_url", label: "Base URL (optional override)", value: p.base_url || "" },
     // Vertex is addressed by project and location rather than by a URL, and
     // holds an OAuth2 credential rather than a key — so its fields appear
