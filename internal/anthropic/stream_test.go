@@ -172,3 +172,50 @@ func TestBlockClosesOnAStreamThatNeverFinishes(t *testing.T) {
 		t.Errorf("event order:\n got %s\nwant %s", joined, want)
 	}
 }
+
+// TestMessageDeltaCorrectsInputTokens is the Protocol-I1 fix: message_start's
+// input_tokens is only ever a rune/4 estimate (collect seeds it with 1); once
+// the upstream's real usage arrives, the final message_delta must carry the
+// real prompt-token count so a client reading to the end of the stream gets
+// an accurate number instead of the estimate.
+func TestMessageDeltaCorrectsInputTokens(t *testing.T) {
+	events := collect(t, []llm.StreamChunk{
+		{Content: "Hi!", FinishReason: "stop"},
+		{Usage: &llm.Usage{PromptTokens: 42, CompletionTokens: 2}},
+	})
+	for _, e := range events {
+		msg, ok := e.Data["message"].(map[string]any)
+		if e.Name == "message_start" && ok {
+			usage, _ := msg["usage"].(map[string]any)
+			if got := usage["input_tokens"]; got != float64(1) {
+				t.Errorf("message_start input_tokens = %v, want the seeded estimate 1", got)
+			}
+		}
+		if e.Name == "message_delta" {
+			usage, _ := e.Data["usage"].(map[string]any)
+			if got := usage["input_tokens"]; got != float64(42) {
+				t.Errorf("message_delta input_tokens = %v, want the real count 42", got)
+			}
+		}
+	}
+}
+
+// TestMessageDeltaOmitsInputTokensWhenUpstreamNeverReportsThem proves the fix
+// doesn't turn "unknown" into a misleading zero: when an upstream's usage
+// chunk never carries a prompt-token count, message_delta must not claim
+// input_tokens is 0 — it must simply omit the field.
+func TestMessageDeltaOmitsInputTokensWhenUpstreamNeverReportsThem(t *testing.T) {
+	events := collect(t, []llm.StreamChunk{
+		{Content: "Hi!", FinishReason: "stop"},
+		{Usage: &llm.Usage{CompletionTokens: 2}}, // PromptTokens left at zero value
+	})
+	for _, e := range events {
+		if e.Name != "message_delta" {
+			continue
+		}
+		usage, _ := e.Data["usage"].(map[string]any)
+		if _, present := usage["input_tokens"]; present {
+			t.Errorf("message_delta usage = %v, must omit input_tokens when the upstream never reported one", usage)
+		}
+	}
+}

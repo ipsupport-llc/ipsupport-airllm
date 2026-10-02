@@ -117,10 +117,20 @@ func (s *StreamWriter) Chunk(c llm.StreamChunk) error {
 		if err := s.closeBlock(); err != nil {
 			return err
 		}
+		usage := map[string]int{"output_tokens": c.Usage.CompletionTokens}
+		if c.Usage.PromptTokens > 0 {
+			// message_start's input_tokens was only ever a rune/4 estimate (the
+			// real count isn't known until the upstream's own usage arrives,
+			// normally in its last chunk) — correct it here now that it's
+			// real. Omitted rather than sent as 0 when an upstream never
+			// reports prompt tokens at all, so an absent count doesn't read as
+			// a confident zero.
+			usage["input_tokens"] = c.Usage.PromptTokens
+		}
 		if err := s.event("message_delta", map[string]any{
 			"type":  "message_delta",
 			"delta": map[string]any{"stop_reason": s.stop, "stop_sequence": nil},
-			"usage": map[string]int{"output_tokens": c.Usage.CompletionTokens},
+			"usage": usage,
 		}); err != nil {
 			return err
 		}
