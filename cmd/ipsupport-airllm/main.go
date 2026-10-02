@@ -58,6 +58,10 @@ func run() error {
 		return err
 	}
 
+	if err := cfg.ResolveDevMasterKey(ctx, st.PutSettingIfAbsent); err != nil {
+		return fmt.Errorf("resolve dev master key: %w", err)
+	}
+
 	if err := seed.EnsureBuiltinRoles(ctx, st); err != nil {
 		return fmt.Errorf("ensure builtin roles: %w", err)
 	}
@@ -124,7 +128,7 @@ func run() error {
 	}
 
 	if cfg.MasterKeyDev {
-		slog.Warn("AIRLLM_MASTER_KEY not set; using an insecure deterministic dev key (mock only)")
+		slog.Warn("AIRLLM_MASTER_KEY not set; using a random per-install dev key persisted in the database (mock only, never for prod)")
 	}
 	sealer, err := secrets.New(cfg.MasterKey)
 	if err != nil {

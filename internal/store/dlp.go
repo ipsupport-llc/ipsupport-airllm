@@ -27,6 +27,26 @@ func (s *Store) PutSetting(ctx context.Context, name string, value []byte) error
 	return err
 }
 
+// PutSettingIfAbsent inserts name=value only if no row exists yet, and
+// returns the value now stored for name — the caller's own value if it won
+// the race, or whatever a concurrent caller already persisted if it lost.
+// Used to let several replicas converge on one generated value (e.g. a
+// per-install key) without any of them overwriting another's.
+func (s *Store) PutSettingIfAbsent(ctx context.Context, name string, value []byte) ([]byte, error) {
+	var stored []byte
+	err := s.PG.QueryRow(ctx, `
+		INSERT INTO settings (name, value) VALUES ($1, $2::jsonb)
+		ON CONFLICT (name) DO NOTHING
+		RETURNING value`, name, string(value)).Scan(&stored)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return s.GetSetting(ctx, name)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return stored, nil
+}
+
 func nullUUID(s string) any {
 	if s == "" {
 		return nil
