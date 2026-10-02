@@ -34,6 +34,25 @@ func TestDecodeStringContentWithSystemAndTools(t *testing.T) {
 	}
 }
 
+// TestDecodeRequiresMaxTokens is a Protocol-translation Minor fix:
+// Anthropic's real Messages API makes max_tokens a required, positive
+// field (unlike OpenAI's optional max_tokens) — a request missing it, or
+// sending 0/negative, must get a clean 400 here too rather than silently
+// falling back to a gateway-chosen default.
+func TestDecodeRequiresMaxTokens(t *testing.T) {
+	cases := []string{
+		`{"model":"claude-x","messages":[{"role":"user","content":"hi"}]}`,
+		`{"model":"claude-x","max_tokens":0,"messages":[{"role":"user","content":"hi"}]}`,
+		`{"model":"claude-x","max_tokens":-1,"messages":[{"role":"user","content":"hi"}]}`,
+	}
+	for _, body := range cases {
+		_, err := DecodeMessagesRequest(strings.NewReader(body))
+		if err == nil || !strings.Contains(err.Error(), "max_tokens") {
+			t.Errorf("body %s: want a max_tokens error, got %v", body, err)
+		}
+	}
+}
+
 func TestDecodeBlockContentAndToolResult(t *testing.T) {
 	body := `{
 		"model": "claude-x",
