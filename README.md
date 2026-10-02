@@ -130,7 +130,7 @@ make run        # run against local DATABASE_URL / REDIS_URL
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis URL |
 | `ENV` | `dev` | `dev` \| `prod`; API-key tag; dev seeds mock data |
 | `AUTH_MODE` | `mock` | `mock` (password login) \| `oidc` (deploy) |
-| `AIRLLM_MASTER_KEY` | — | base64 32-byte AES key; **required in prod**, derived in dev |
+| `AIRLLM_MASTER_KEY` | — | base64 32-byte AES key; **required in prod**, auto-generated per install in dev |
 | `CAPTURE_BLOB_DIR` | `capture-blobs` | writable dir for capture blobs |
 
 See [docs/configuration.md](docs/configuration.md) for the full reference,

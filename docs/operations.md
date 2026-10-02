@@ -39,9 +39,12 @@ migrations. A clean re-bootstrap is `make compose-down && make compose-up`.
   via an SSH tunnel or `kubectl port-forward`. Override the gateway's host
   binding with `APP_BIND` only to a specific private interface.
 - **Master key.** `AIRLLM_MASTER_KEY` (base64, 32 bytes) seals provider
-  credentials and capture bodies. It is **required in `prod`**; `dev` derives a
-  deterministic insecure key for convenience. Generate one with
-  `openssl rand -base64 32` and deliver it out of band — never commit it.
+  credentials and capture bodies. It is **required in `prod`**; `dev` generates
+  a random key on first boot and persists it in the `settings` table, so it
+  survives restarts and stays identical across replicas of the same install
+  without being a hardcoded value anyone reading this repo could derive.
+  Generate one with `openssl rand -base64 32` and deliver it out of band —
+  never commit it.
 - **Session key stability.** The HMAC session signing key is derived from the
   master key via HKDF-SHA256 (`AIRLLM_SESSION_KEY` overrides it explicitly).
   Sessions survive restarts and work across replicas without any extra secret to

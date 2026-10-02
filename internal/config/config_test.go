@@ -1,8 +1,10 @@
 package config
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"testing"
 )
 
@@ -155,6 +157,97 @@ func TestAuthModeNormalizesMockToLocal(t *testing.T) {
 	if err != nil || c.AuthMode != "local" {
 		t.Fatalf("mock must normalize to local, got %q err=%v", c.AuthMode, err)
 	}
+}
+
+func TestResolveDevMasterKeyNoOpWithRealKey(t *testing.T) {
+	setBase(t)
+	raw := make([]byte, 32)
+	for i := range raw {
+		raw[i] = byte(i)
+	}
+	t.Setenv("AIRLLM_MASTER_KEY", base64.StdEncoding.EncodeToString(raw))
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	called := false
+	if err := c.ResolveDevMasterKey(context.Background(), func(ctx context.Context, name string, value []byte) ([]byte, error) {
+		called = true
+		return value, nil
+	}); err != nil {
+		t.Fatalf("ResolveDevMasterKey: %v", err)
+	}
+	if called {
+		t.Error("putIfAbsent must not be called when a real key was supplied")
+	}
+	if string(c.MasterKey) != string(raw) {
+		t.Error("MasterKey must stay the explicitly configured value")
+	}
+}
+
+func TestResolveDevMasterKeyPersistsAndRederivesSessionKey(t *testing.T) {
+	setBase(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	placeholder := string(c.MasterKey)
+	var persisted []byte
+	if err := c.ResolveDevMasterKey(context.Background(), func(ctx context.Context, name string, value []byte) ([]byte, error) {
+		persisted = value // simulate winning the race: store returns our own value
+		return value, nil
+	}); err != nil {
+		t.Fatalf("ResolveDevMasterKey: %v", err)
+	}
+	if persisted == nil {
+		t.Fatal("putIfAbsent was never called")
+	}
+	if len(c.MasterKey) != 32 {
+		t.Fatalf("MasterKey length = %d, want 32", len(c.MasterKey))
+	}
+	if string(c.MasterKey) == placeholder {
+		t.Error("MasterKey must no longer be the hardcoded dev placeholder")
+	}
+	wantSK, err := loadSessionKey(c.MasterKey)
+	if err != nil {
+		t.Fatalf("loadSessionKey: %v", err)
+	}
+	if string(c.SessionKey) != string(wantSK) {
+		t.Error("SessionKey must be re-derived from the resolved master key")
+	}
+}
+
+func TestResolveDevMasterKeyConvergesOnRaceLoser(t *testing.T) {
+	setBase(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	existing := devMasterKeyPayload{KeyB64: base64.StdEncoding.EncodeToString(bytesOfLen32(7))}
+	existingRaw, err := json.Marshal(existing)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	if err := c.ResolveDevMasterKey(context.Background(), func(ctx context.Context, name string, value []byte) ([]byte, error) {
+		// Simulate losing the race: a concurrent writer already persisted
+		// existingRaw, so a real PutSettingIfAbsent would hand that back
+		// instead of our own generated value.
+		return existingRaw, nil
+	}); err != nil {
+		t.Fatalf("ResolveDevMasterKey: %v", err)
+	}
+	wantKey, _ := base64.StdEncoding.DecodeString(existing.KeyB64)
+	if string(c.MasterKey) != string(wantKey) {
+		t.Error("MasterKey must converge on the value PutSettingIfAbsent actually returned, not the one generated locally")
+	}
+}
+
+func bytesOfLen32(fill byte) []byte {
+	b := make([]byte, 32)
+	for i := range b {
+		b[i] = fill
+	}
+	return b
 }
 
 func TestAuthModeRejectsUnknown(t *testing.T) {

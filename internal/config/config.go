@@ -3,8 +3,11 @@
 package config
 
 import (
+	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -107,6 +110,56 @@ func loadMasterKey(envName string) ([]byte, bool, error) {
 	}
 	sum := sha256.Sum256([]byte("airllm-dev-insecure-master-key"))
 	return sum[:], true, nil
+}
+
+// devMasterKeySetting is the settings-table key under which a generated dev
+// master key is persisted (see ResolveDevMasterKey).
+const devMasterKeySetting = "dev_master_key"
+
+type devMasterKeyPayload struct {
+	KeyB64 string `json:"key_b64"`
+}
+
+// ResolveDevMasterKey replaces the dev placeholder master key — a fixed
+// value derived from a hardcoded string, visible to anyone who reads this
+// public repo's source, and therefore identical across every install that
+// never sets AIRLLM_MASTER_KEY — with a random key generated once per
+// install and persisted via putIfAbsent, so it stays constant across
+// restarts and replicas of the SAME install without being a publicly
+// knowable constant. No-op when MasterKeyDev is false (a real key was
+// supplied via AIRLLM_MASTER_KEY). Must be called before anything uses
+// MasterKey or SessionKey, once Postgres is reachable.
+func (c *Config) ResolveDevMasterKey(ctx context.Context, putIfAbsent func(ctx context.Context, name string, value []byte) ([]byte, error)) error {
+	if !c.MasterKeyDev {
+		return nil
+	}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return fmt.Errorf("generate dev master key: %w", err)
+	}
+	payload, err := json.Marshal(devMasterKeyPayload{KeyB64: base64.StdEncoding.EncodeToString(key)})
+	if err != nil {
+		return fmt.Errorf("encode dev master key: %w", err)
+	}
+	stored, err := putIfAbsent(ctx, devMasterKeySetting, payload)
+	if err != nil {
+		return fmt.Errorf("persist dev master key: %w", err)
+	}
+	var p devMasterKeyPayload
+	if err := json.Unmarshal(stored, &p); err != nil {
+		return fmt.Errorf("decode stored dev master key: %w", err)
+	}
+	resolved, err := base64.StdEncoding.DecodeString(p.KeyB64)
+	if err != nil || len(resolved) != 32 {
+		return fmt.Errorf("stored dev master key is invalid")
+	}
+	sk, err := loadSessionKey(resolved)
+	if err != nil {
+		return err
+	}
+	c.MasterKey = resolved
+	c.SessionKey = sk
+	return nil
 }
 
 // loadSessionKey returns the HMAC session signing key: AIRLLM_SESSION_KEY
