@@ -201,7 +201,7 @@ func TestJob_ConfirmPath(t *testing.T) {
 		Detected: []dlp.Finding{{Label: "key", Start: 0, End: 5}},
 	})
 	engine := &fakeEngine{findings: []dlp.Finding{{Label: "key", Start: 0, End: 5}}}
-	job := NewJob(store, fakeReadBody([]byte("hello")), engine, nil, 10)
+	job := NewJob(store, fakeReadBody([]byte("hello")), engine, nil, 10, func() bool { return false })
 	job.RunOnce(context.Background())
 
 	u, ok := store.updates["id1"]
@@ -220,7 +220,7 @@ func TestJob_FalsePositivePath(t *testing.T) {
 		Detected: []dlp.Finding{{Label: "key", Start: 0, End: 5}},
 	})
 	engine := &fakeEngine{findings: nil} // engine finds nothing -> FP
-	job := NewJob(store, fakeReadBody([]byte("hello")), engine, nil, 10)
+	job := NewJob(store, fakeReadBody([]byte("hello")), engine, nil, 10, func() bool { return false })
 	job.RunOnce(context.Background())
 
 	u, ok := store.updates["id2"]
@@ -246,7 +246,7 @@ func TestJob_FalseNegativePath(t *testing.T) {
 		hookEvent = event
 	})
 
-	job := NewJob(store, fakeReadBody([]byte("hello")), engine, hook, 10)
+	job := NewJob(store, fakeReadBody([]byte("hello")), engine, hook, 10, func() bool { return false })
 	job.RunOnce(context.Background())
 
 	u, ok := store.updates["id3"]
@@ -274,7 +274,7 @@ func TestJob_FalsePositiveFiresAlertClearedWebhook(t *testing.T) {
 		hookEvent = event
 	})
 
-	job := NewJob(store, fakeReadBody([]byte("hello")), engine, hook, 10)
+	job := NewJob(store, fakeReadBody([]byte("hello")), engine, hook, 10, func() bool { return false })
 	job.RunOnce(context.Background())
 
 	if hookEvent != "dlp.alert_cleared" {
@@ -288,7 +288,7 @@ func TestJob_CleanPath(t *testing.T) {
 		BlobKey: "k4",
 	})
 	engine := &fakeEngine{findings: nil}
-	job := NewJob(store, fakeReadBody([]byte("hello")), engine, nil, 10)
+	job := NewJob(store, fakeReadBody([]byte("hello")), engine, nil, 10, func() bool { return false })
 	job.RunOnce(context.Background())
 
 	u, ok := store.updates["id4"]
@@ -318,7 +318,7 @@ func TestJob_RedactedRow_NoFalsePositive(t *testing.T) {
 		hookEvent = event
 	})
 
-	job := NewJob(store, fakeReadBody([]byte("[REDACTED:key]")), engine, hook, 10)
+	job := NewJob(store, fakeReadBody([]byte("[REDACTED:key]")), engine, hook, 10, func() bool { return false })
 	job.RunOnce(context.Background())
 
 	u, ok := store.updates["id-red"]
@@ -355,7 +355,7 @@ func TestJob_RawWindow_AllowsFalsePositive(t *testing.T) {
 	var hookEvent string
 	hook := WebhookSender(func(_ context.Context, event string, _ []byte) { hookEvent = event })
 
-	job := NewJob(store, fakeReadBody([]byte("totally benign text")), engine, hook, 10)
+	job := NewJob(store, fakeReadBody([]byte("totally benign text")), engine, hook, 10, func() bool { return true })
 	job.RunOnce(context.Background())
 
 	u, ok := store.updates["id-raw"]
@@ -384,7 +384,7 @@ func TestJob_ExpiredRawWindow_StillDowngrades(t *testing.T) {
 	})
 	engine := &fakeEngine{findings: nil}
 
-	job := NewJob(store, fakeReadBody([]byte("[REDACTED:key]")), engine, nil, 10)
+	job := NewJob(store, fakeReadBody([]byte("[REDACTED:key]")), engine, nil, 10, func() bool { return true })
 	job.RunOnce(context.Background())
 
 	u, ok := store.updates["id-exp"]
@@ -393,6 +393,35 @@ func TestJob_ExpiredRawWindow_StillDowngrades(t *testing.T) {
 	}
 	if u.status != "confirmed" {
 		t.Fatalf("expired raw must fall back to redacted downgrade (confirmed), got %s", u.status)
+	}
+}
+
+// TestJob_RawDisallowedByDefault_FallsBackToRedactedBody proves that a
+// valid, unexpired raw window is NOT used when allowRaw returns false (DLP
+// C4 fix) — the row behaves exactly as if no raw window existed at all, so
+// the un-redacted copy is never sent to the (possibly third-party) second-
+// pass model alias without an explicit, separate opt-in.
+func TestJob_RawDisallowedByDefault_FallsBackToRedactedBody(t *testing.T) {
+	future := time.Now().Add(time.Hour)
+	store := newFakeStore(PendingRow{
+		ID:           "id-raw-disallowed",
+		BlobKey:      "k-red",
+		Detected:     []dlp.Finding{{Label: "key", Start: 0, End: 5}},
+		Redacted:     true,
+		RawBlobKey:   "k-raw",
+		RawExpiresAt: &future,
+	})
+	engine := &fakeEngine{findings: nil} // would look like a true FP if raw were used
+
+	job := NewJob(store, fakeReadBody([]byte("[REDACTED:key]")), engine, nil, 10, func() bool { return false })
+	job.RunOnce(context.Background())
+
+	u, ok := store.updates["id-raw-disallowed"]
+	if !ok {
+		t.Fatal("expected update for id-raw-disallowed")
+	}
+	if u.status != "confirmed" {
+		t.Fatalf("raw window must be ignored when allowRaw=false, so the redacted downgrade still applies; got %s", u.status)
 	}
 }
 
@@ -406,7 +435,7 @@ func TestJob_MalformedEngineOutput_NoCrash(t *testing.T) {
 		Chat:     func(_ context.Context, _ string) (string, error) { return "not-json!", nil },
 		MinScore: func() float64 { return 0.5 },
 	}
-	job := NewJob(store, fakeReadBody([]byte("hello")), engine, nil, 10)
+	job := NewJob(store, fakeReadBody([]byte("hello")), engine, nil, 10, func() bool { return false })
 	job.RunOnce(context.Background()) // must not panic
 
 	// Malformed LLM output -> no findings -> clean (no detected either)
@@ -428,7 +457,7 @@ func TestJob_ReadBodyError_LeavePending(t *testing.T) {
 	errBody := func(_ context.Context, _ string) ([]byte, error) {
 		return nil, errReadBody
 	}
-	job := NewJob(store, errBody, engine, nil, 10)
+	job := NewJob(store, errBody, engine, nil, 10, func() bool { return false })
 	job.RunOnce(context.Background())
 
 	// Body read error -> row left pending (no update).
@@ -443,7 +472,7 @@ func TestJob_EngineScanError_LeavePending(t *testing.T) {
 		BlobKey: "k-scan-err",
 	})
 	engine := &fakeEngine{err: errStr("scan failed")}
-	job := NewJob(store, fakeReadBody([]byte("hello")), engine, nil, 10)
+	job := NewJob(store, fakeReadBody([]byte("hello")), engine, nil, 10, func() bool { return false })
 	job.RunOnce(context.Background())
 
 	// Engine error -> row left pending (no update).

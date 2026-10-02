@@ -162,8 +162,15 @@ pending captures with a stronger engine. For each capture it:
 Accurate confirm/clear and training-data export need text whose byte offsets
 line up with the detections. On a redacted stream they don't. The **raw window**
 (`raw_training`, default off) stores a second, **un-redacted** copy of the body,
-sealed, with a short TTL (`raw_ttl_hours`). Second-pass and dataset export
-prefer it while it is unexpired; both fall back to the redacted body afterward.
+sealed, with a short TTL (`raw_ttl_hours`). Dataset export always prefers it
+while unexpired (operator-triggered, same trust boundary as the admin console).
+Second-pass only prefers it when the separate `allow_raw` second-pass flag is
+also on (default off) — second-pass's `model` is an ordinary model alias and
+may point at a third-party provider, so sending it real, un-redacted secrets
+must be its own explicit opt-in, not a side effect of turning on `raw_training`
+for export accuracy. Without `allow_raw`, second-pass always scans the
+(possibly redacted) main body and falls back the same way an expired raw
+window would.
 
 Safety properties:
 

@@ -106,6 +106,14 @@ type Job struct {
 	engine    Engine
 	sendHook  WebhookSender // nil = no webhooks
 	batchSize int
+	// allowRaw is called on each row to read the current policy, so a config
+	// change via PUT /api/admin/secondpass takes effect without restart. nil
+	// or a false result means never use the raw (un-redacted) window — the
+	// engine runs through an operator-configured model alias, which may be a
+	// third-party provider, so sending un-redacted secrets there must be an
+	// explicit opt-in, not a side effect of enabling raw_training for
+	// byte-alignment accuracy.
+	allowRaw func() bool
 
 	stopCh    chan struct{}
 	doneCh    chan struct{}
@@ -113,13 +121,15 @@ type Job struct {
 	stopOnce  sync.Once
 }
 
-// NewJob creates a Job. batchSize <= 0 defaults to 50.
+// NewJob creates a Job. batchSize <= 0 defaults to 50. A nil allowRaw means
+// the raw (un-redacted) window is never sent to the engine.
 func NewJob(
 	store Store,
 	readBody func(ctx context.Context, blobKey string) ([]byte, error),
 	engine Engine,
 	sendHook WebhookSender,
 	batchSize int,
+	allowRaw func() bool,
 ) *Job {
 	if batchSize <= 0 {
 		batchSize = 50
@@ -130,6 +140,7 @@ func NewJob(
 		engine:    engine,
 		sendHook:  sendHook,
 		batchSize: batchSize,
+		allowRaw:  allowRaw,
 		stopCh:    make(chan struct{}),
 		doneCh:    make(chan struct{}),
 	}
@@ -188,7 +199,8 @@ func (j *Job) processOne(ctx context.Context, row PendingRow) {
 	// clearing is accurate. Otherwise fall back to the (possibly redacted) main body.
 	key := row.BlobKey
 	usingRaw := false
-	if row.RawBlobKey != "" && row.RawExpiresAt != nil && row.RawExpiresAt.After(time.Now()) {
+	if j.allowRaw != nil && j.allowRaw() &&
+		row.RawBlobKey != "" && row.RawExpiresAt != nil && row.RawExpiresAt.After(time.Now()) {
 		key = row.RawBlobKey
 		usingRaw = true
 	}
