@@ -14,8 +14,9 @@ import (
 
 // memBlob is a simple in-memory blob.Store for testing.
 type memBlob struct {
-	mu   sync.Mutex
-	objs map[string][]byte
+	mu         sync.Mutex
+	objs       map[string][]byte
+	deleteErrs map[string]error // key -> error Delete returns instead of deleting, if set
 }
 
 func newMemBlob() *memBlob { return &memBlob{objs: map[string][]byte{}} }
@@ -42,6 +43,9 @@ func (m *memBlob) Get(_ context.Context, key string) ([]byte, error) {
 func (m *memBlob) Delete(_ context.Context, key string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err, ok := m.deleteErrs[key]; ok {
+		return err
+	}
 	if _, ok := m.objs[key]; !ok {
 		return fmt.Errorf("not found: %s", key)
 	}
@@ -398,5 +402,28 @@ func TestSweepDeletesExpiredRows(t *testing.T) {
 	}
 	if _, ok := bs.objs["captures/new-id"]; !ok {
 		t.Error("new blob must survive sweep")
+	}
+}
+
+// TestSweepKeepsRowWhenBlobDeleteFails proves sweep does not delete an
+// expired row's index entry when its blob delete fails (DLP C3 fix) — doing
+// so would destroy the only pointer to the blob, making it permanently
+// unreachable instead of retried on the next sweep cycle.
+func TestSweepKeepsRowWhenBlobDeleteFails(t *testing.T) {
+	bs := newMemBlob()
+	idx := &fakeInserter{}
+	p := NewPipeline(bs, idx, testSealer(t), func() Config {
+		return Config{Enabled: true, SampleRate: 1, Redact: true, RetentionDays: 30}
+	})
+
+	_ = bs.Put(context.Background(), "captures/old-id", []byte("old"))
+	bs.deleteErrs = map[string]error{"captures/old-id": fmt.Errorf("storage unavailable")}
+	oldTime := time.Now().Add(-31 * 24 * time.Hour)
+	idx.rows = []IndexRow{{ID: "old-id", TS: oldTime, BlobKey: "captures/old-id"}}
+
+	p.sweep(context.Background(), time.Now(), 30)
+
+	if len(idx.rows) != 1 || idx.rows[0].ID != "old-id" {
+		t.Fatalf("expected old-id's row to survive a failed blob delete so the next sweep can retry, got %v", idx.rows)
 	}
 }
