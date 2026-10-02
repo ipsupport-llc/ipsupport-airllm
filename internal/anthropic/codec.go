@@ -68,6 +68,13 @@ func DecodeMessagesRequest(r io.Reader) (llm.ChatRequest, error) {
 	if len(w.Messages) == 0 {
 		return llm.ChatRequest{}, errors.New("messages is required")
 	}
+	if w.MaxTokens <= 0 {
+		// Unlike OpenAI, Anthropic's real Messages API makes max_tokens a
+		// required, positive field — a request missing it (or sending
+		// 0/negative) gets a clean 400 from the real API, not a silent
+		// gateway-chosen default.
+		return llm.ChatRequest{}, errors.New("max_tokens is required and must be positive")
+	}
 
 	var msgs []llm.Message
 	if sys := blocksText(w.System); sys != "" {
@@ -89,17 +96,15 @@ func DecodeMessagesRequest(r io.Reader) (llm.ChatRequest, error) {
 		})
 	}
 
+	mt := w.MaxTokens
 	req := llm.ChatRequest{
 		Model:       w.Model,
 		Messages:    msgs,
 		Tools:       tools,
 		ToolChoice:  translateToolChoice(w.ToolChoice),
+		MaxTokens:   &mt,
 		Temperature: w.Temperature,
 		Stream:      w.Stream,
-	}
-	if w.MaxTokens > 0 {
-		mt := w.MaxTokens
-		req.MaxTokens = &mt
 	}
 	return req, nil
 }
