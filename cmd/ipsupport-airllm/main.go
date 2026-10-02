@@ -212,7 +212,15 @@ func run() error {
 		}
 		endpoints := make([]webhook.Endpoint, 0, len(eps))
 		for _, e := range eps {
-			endpoints = append(endpoints, webhook.Endpoint{URL: e.URL, Secret: e.Secret})
+			secret := ""
+			if len(e.SecretEnc) > 0 {
+				if pt, err := sealer.Open(e.SecretEnc); err != nil {
+					slog.Error("webhook secret decrypt failed; delivering unsigned", "err", err)
+				} else {
+					secret = string(pt)
+				}
+			}
+			endpoints = append(endpoints, webhook.Endpoint{URL: e.URL, Secret: secret})
 		}
 		webhook.Send(endpoints, payload)
 	})

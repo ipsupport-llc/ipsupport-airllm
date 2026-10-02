@@ -452,9 +452,25 @@ func (s *Server) recordDLP(ctx context.Context, ak authedKey, ingress, alias, ac
 	})
 	endpoints := make([]webhook.Endpoint, 0, len(eps))
 	for _, e := range eps {
-		endpoints = append(endpoints, webhook.Endpoint{URL: e.URL, Secret: e.Secret})
+		endpoints = append(endpoints, webhook.Endpoint{URL: e.URL, Secret: s.openWebhookSecret(e.SecretEnc)})
 	}
 	webhook.Send(endpoints, payload)
+}
+
+// openWebhookSecret decrypts a sealed webhook signing secret, or returns ""
+// (unsigned delivery, matching the "no secret configured" case) if it's nil
+// or fails to decrypt — a webhook alert must still fire, same fail-open
+// posture this codebase uses elsewhere for degraded-but-not-fatal paths.
+func (s *Server) openWebhookSecret(secretEnc []byte) string {
+	if len(secretEnc) == 0 {
+		return ""
+	}
+	pt, err := s.sealer.Open(secretEnc)
+	if err != nil {
+		slog.Error("webhook secret decrypt failed; delivering unsigned", "err", err)
+		return ""
+	}
+	return string(pt)
 }
 
 func actionPast(action string) string {

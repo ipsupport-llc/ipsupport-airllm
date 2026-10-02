@@ -99,7 +99,7 @@ func (s *Server) handleAdminDLPIncidents(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleAdminWebhooks(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.st.PG.Query(r.Context(),
-		`SELECT id::text, name, url, events, enabled, (secret <> '') FROM webhooks ORDER BY created_at`)
+		`SELECT id::text, name, url, events, enabled, (secret_enc IS NOT NULL) FROM webhooks ORDER BY created_at`)
 	if err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to list webhooks")
 		return
@@ -145,11 +145,20 @@ func (s *Server) handleAdminCreateWebhook(w http.ResponseWriter, r *http.Request
 	if len(body.Events) == 0 {
 		body.Events = []string{"dlp.incident"}
 	}
+	var secretEnc []byte
+	if body.Secret != "" {
+		sealed, err := s.sealer.Seal([]byte(body.Secret))
+		if err != nil {
+			writeControlError(w, http.StatusInternalServerError, "failed to seal webhook secret")
+			return
+		}
+		secretEnc = sealed
+	}
 	var id string
 	if err := s.st.PG.QueryRow(r.Context(), `
-		INSERT INTO webhooks (name, url, secret, events, enabled)
+		INSERT INTO webhooks (name, url, secret_enc, events, enabled)
 		VALUES ($1, $2, $3, $4, $5) RETURNING id::text`,
-		body.Name, body.URL, body.Secret, body.Events, body.Enabled,
+		body.Name, body.URL, secretEnc, body.Events, body.Enabled,
 	).Scan(&id); err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to create webhook")
 		return
