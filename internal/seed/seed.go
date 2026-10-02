@@ -133,7 +133,7 @@ func Dev(ctx context.Context, st *store.Store) (string, error) {
 		if _, err := st.PG.Exec(ctx, `
 			INSERT INTO pricing (provider, model, input_per_1m, output_per_1m)
 			VALUES ('', $1, $2, $3)
-			ON CONFLICT (provider, model) DO UPDATE SET input_per_1m = EXCLUDED.input_per_1m, output_per_1m = EXCLUDED.output_per_1m`,
+			ON CONFLICT (provider, model) DO NOTHING`,
 			p.model, p.input, p.output); err != nil {
 			return "", fmt.Errorf("seed pricing: %w", err)
 		}
@@ -144,7 +144,7 @@ func Dev(ctx context.Context, st *store.Store) (string, error) {
 		INSERT INTO api_keys (user_id, name, hash, prefix, last4, policy_snapshot, status)
 		VALUES ($1, 'dev demo key', $2, $3, $4,
 			'{"allowed_models":["*"],"allow_passthrough":true,"limits":{}}'::jsonb, 'active')
-		ON CONFLICT (hash) DO UPDATE SET policy_snapshot = EXCLUDED.policy_snapshot, status = 'active'`,
+		ON CONFLICT (hash) DO NOTHING`,
 		userID, k.Hash, k.Prefix, k.Last4); err != nil {
 		return "", fmt.Errorf("seed api key: %w", err)
 	}
