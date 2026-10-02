@@ -48,7 +48,12 @@ func (p *PGUsers) CreateLocal(ctx context.Context, u auth.UserRow) (string, erro
 
 // UpsertOIDC creates/refreshes an OIDC user from IdP claims. Roles may change
 // at any login, so the user's key snapshots are rebuilt in the same
-// transaction.
+// transaction. If pr.Subject already belongs to a local (password) user, the
+// upsert is refused (auth.ErrLocalUserSubjectConflict) rather than silently
+// overwriting that account's email/roles and handing an IdP-controlled login
+// the same identity — an IdP that lets a user pick their own subject/
+// username claim could otherwise impersonate any existing local account by
+// matching its subject.
 func (p *PGUsers) UpsertOIDC(ctx context.Context, pr auth.Principal) (string, error) {
 	tx, err := p.st.PG.Begin(ctx)
 	if err != nil {
@@ -56,11 +61,16 @@ func (p *PGUsers) UpsertOIDC(ctx context.Context, pr auth.Principal) (string, er
 	}
 	defer tx.Rollback(ctx)
 	var id string
-	if err := tx.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		INSERT INTO users (subject, email, display, roles, auth_source)
 		VALUES ($1, $2, $1, $3, 'oidc')
 		ON CONFLICT (subject) DO UPDATE SET email=EXCLUDED.email, roles=EXCLUDED.roles, auth_source='oidc', updated_at=now()
-		RETURNING id::text`, pr.Subject, pr.Email, pr.Roles).Scan(&id); err != nil {
+		WHERE users.auth_source = 'oidc'
+		RETURNING id::text`, pr.Subject, pr.Email, pr.Roles).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", auth.ErrLocalUserSubjectConflict
+	}
+	if err != nil {
 		return "", err
 	}
 	if err := RebuildKeySnapshotsUser(ctx, tx, id); err != nil {
