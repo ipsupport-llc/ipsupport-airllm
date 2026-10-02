@@ -231,8 +231,19 @@ func (p *Pipeline) process(r Record) {
 	}
 
 	if err := p.idx.Insert(context.Background(), row); err != nil {
-		slog.Error("capture: index insert failed", "err", err)
-		// Best-effort: blob is orphaned but we don't fail the caller.
+		slog.Error("capture: index insert failed; deleting orphaned blob(s)", "err", err, "id", id)
+		// Without an index row the blob(s) can never be found by review,
+		// swept by retention, or counted toward storage — they'd otherwise
+		// sit as untracked (and, for the raw copy, un-redacted) secrets
+		// forever. Best-effort: we don't fail the caller either way.
+		if derr := p.bs.Delete(context.Background(), blobKey); derr != nil {
+			slog.Error("capture: cleanup blob delete failed", "err", derr, "key", blobKey)
+		}
+		if rawBlobKey != "" {
+			if derr := p.bs.Delete(context.Background(), rawBlobKey); derr != nil {
+				slog.Error("capture: cleanup raw blob delete failed", "err", derr, "key", rawBlobKey)
+			}
+		}
 	}
 }
 

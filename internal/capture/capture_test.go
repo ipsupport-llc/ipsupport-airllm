@@ -51,14 +51,18 @@ func (m *memBlob) Delete(_ context.Context, key string) error {
 
 // fakeInserter records inserted rows.
 type fakeInserter struct {
-	mu      sync.Mutex
-	rows    []IndexRow
-	deleted []string
+	mu        sync.Mutex
+	rows      []IndexRow
+	deleted   []string
+	insertErr error // when set, Insert fails instead of recording the row
 }
 
 func (f *fakeInserter) Insert(_ context.Context, row IndexRow) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.insertErr != nil {
+		return f.insertErr
+	}
 	f.rows = append(f.rows, row)
 	return nil
 }
@@ -146,6 +150,29 @@ func TestPipeline_RawTrainingWindow(t *testing.T) {
 	}
 	if string(plain) != "raw-secret" {
 		t.Fatalf("raw blob = %q, want raw-secret", plain)
+	}
+}
+
+// TestPipeline_IndexInsertFailureCleansUpOrphanedBlobs proves that when the
+// index insert fails, the blob(s) already written for that record are
+// deleted rather than left behind untracked forever (DLP C2 fix): without an
+// index row, an orphaned blob can never be found by review, swept by
+// retention, or counted toward storage.
+func TestPipeline_IndexInsertFailureCleansUpOrphanedBlobs(t *testing.T) {
+	bs := newMemBlob()
+	idx := &fakeInserter{insertErr: fmt.Errorf("boom")}
+	p := NewPipeline(bs, idx, testSealer(t), func() Config {
+		return Config{Enabled: true, SampleRate: 1, Redact: true, RawTraining: true, RawTTLHours: 1}
+	})
+	p.Start(1)
+	p.Enqueue(Record{Ingress: "openai", Body: []byte("redacted"), RawBody: []byte("raw-secret"), Status: 200})
+	p.Stop()
+
+	if len(idx.rows) != 0 {
+		t.Fatalf("expected 0 index rows (insert failed), got %d", len(idx.rows))
+	}
+	if len(bs.objs) != 0 {
+		t.Fatalf("expected 0 orphaned blobs after index insert failure, got %d: %v", len(bs.objs), bs.objs)
 	}
 }
 
