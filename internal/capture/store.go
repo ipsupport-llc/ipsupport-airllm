@@ -354,9 +354,15 @@ func scanRows(rows interface {
 		if userID != nil {
 			r.UserID = *userID
 		}
-		_ = json.Unmarshal(detectedRaw, &r.Detected)
-		_ = json.Unmarshal(secondpassRaw, &r.SecondpassLabels)
-		_ = json.Unmarshal(goldRaw, &r.GoldLabels)
+		if err := json.Unmarshal(detectedRaw, &r.Detected); err != nil {
+			slog.Warn("capture: corrupt detected JSON", "id", r.ID, "err", err)
+		}
+		if err := json.Unmarshal(secondpassRaw, &r.SecondpassLabels); err != nil {
+			slog.Warn("capture: corrupt secondpass_labels JSON", "id", r.ID, "err", err)
+		}
+		if err := json.Unmarshal(goldRaw, &r.GoldLabels); err != nil {
+			slog.Warn("capture: corrupt gold_labels JSON", "id", r.ID, "err", err)
+		}
 		out = append(out, r)
 	}
 	return out, rows.Err()

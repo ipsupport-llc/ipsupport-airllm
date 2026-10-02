@@ -1,14 +1,34 @@
 package capture
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/dlp"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// testPool connects to TEST_DATABASE_URL or skips. The DB must have the
+// migrations applied (run the dev compose stack: make compose-up).
+func testPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set; skipping capture store integration test")
+	}
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
 
 // execRecorder captures the SQL + args passed to Exec so we can assert them
 // without a live database.
@@ -149,5 +169,60 @@ func TestIndexRowJSONTags(t *testing.T) {
 		if strings.Contains(s, bad) {
 			t.Errorf("JSON should not contain PascalCase key %s in: %s", bad, s)
 		}
+	}
+}
+
+// TestScanRowsLogsCorruptJSON is the DLP/capture Minor fix: scanRows (shared
+// by every admin-facing capture view — List, Get, ReviewQueue) silently
+// discarded a JSON-unmarshal failure on detected/secondpass_labels/
+// gold_labels, while its sibling PendingForSecondPass at least logs a
+// warning for the identical kind of corruption on the same detected column.
+// A capture_index row can only ever hold syntactically valid JSON (the
+// columns are jsonb, which Postgres itself validates at write time), so the
+// realistic failure mode is a value that's valid JSON but the wrong shape
+// for []dlp.Finding — e.g. a stray object instead of an array, from a
+// future encoding bug or a hand-edited row.
+func TestScanRowsLogsCorruptJSON(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	p := &PGInserter{PG: pool}
+
+	row := IndexRow{
+		ID: newID(), TS: time.Now().UTC(),
+		IngressProtocol: "openai", Alias: "test",
+		ProviderName: "mock", UpstreamModel: "mock-model", Status: 200,
+		BlobKey: "test-blob", ReviewStatus: "unreviewed", SecondpassStatus: "pending",
+	}
+	if err := p.Insert(ctx, row); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM capture_index WHERE id = $1`, row.ID)
+	})
+
+	// Valid JSON, wrong shape: an object where []dlp.Finding is expected.
+	if _, err := pool.Exec(ctx,
+		`UPDATE capture_index SET secondpass_labels = '{"not":"an array"}'::jsonb WHERE id = $1`, row.ID,
+	); err != nil {
+		t.Fatalf("corrupt secondpass_labels: %v", err)
+	}
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(prev)
+
+	got, err := p.Get(ctx, row.ID)
+	if err != nil {
+		t.Fatalf("Get must still succeed despite the corrupt column: %v", err)
+	}
+	if got.SecondpassLabels != nil {
+		t.Errorf("SecondpassLabels = %+v, want nil (unmarshal into the wrong shape must fail silently into the zero value)", got.SecondpassLabels)
+	}
+	// The id column is uuid; Postgres normalizes newID()'s plain hex string
+	// to standard dashed form on scan-back, so compare against got.ID (what
+	// scanRows actually logged), not the original row.ID.
+	if !strings.Contains(buf.String(), "corrupt secondpass_labels JSON") || !strings.Contains(buf.String(), got.ID) {
+		t.Errorf("expected a warning naming both the corruption and the row id %q, got log output: %s", got.ID, buf.String())
 	}
 }
