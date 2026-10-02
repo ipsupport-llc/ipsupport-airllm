@@ -9,6 +9,18 @@ function esc(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+// staleGuard protects one view/loader against out-of-order async
+// responses: each call to start() marks a new "latest" request; a result
+// is current() only if no later call has started since. A loader that can
+// be re-triggered before its previous fetch resolves (navigating back to a
+// view, clicking a filter/action again before the first reload finished)
+// would otherwise let an earlier, now-stale response overwrite a later
+// one's already-rendered, fresher content.
+function staleGuard() {
+  let gen = 0;
+  return { start: () => ++gen, current: (token) => token === gen };
+}
+
 async function api(method, path, body) {
   const opts = { method, headers: {} };
   if (body !== undefined) {
@@ -191,10 +203,13 @@ function route() {
 }
 
 // ---------- dashboard ----------
+const dashGuard = staleGuard();
 async function viewDashboard(view) {
+  const token = dashGuard.start();
   view.innerHTML = `<h1 class="page-title">Dashboard</h1><div id="dash"></div>`;
   const seriesPath = me.is_admin ? "/api/admin/usage/series" : "/api/usage/series";
   const [u, k, sr] = await Promise.all([api("GET", "/api/usage"), api("GET", "/api/keys"), api("GET", seriesPath)]);
+  if (!dashGuard.current(token)) return;
   const usage = u.data || {};
   const keys = (k.data && k.data.keys) || [];
   const active = keys.filter((x) => x.status === "active").length;
@@ -257,12 +272,15 @@ function connectPanel() {
 }
 
 // ---------- usage ----------
+const usageGuard = staleGuard();
 async function viewUsage(view) {
+  const token = usageGuard.start();
   view.innerHTML = `<h1 class="page-title">Usage</h1><div id="u"></div>`;
   const [u, b] = await Promise.all([
     api("GET", "/api/usage"),
     api("GET", "/api/usage/breakdown?hours=24"),
   ]);
+  if (!usageGuard.current(token)) return;
   $("#u").innerHTML = usageCards(u.data || {}) +
     `<p class="card-sub" style="color:var(--muted)">Rolling windows, enforced per API key. Limits are configured by your role policy.</p>` +
     breakdownTables(b.data || {});
@@ -310,7 +328,9 @@ async function viewCaptures(view) {
   await loadCaptures();
 }
 
+const capturesGuard = staleGuard();
 async function loadCaptures() {
+  const token = capturesGuard.start();
   const status = ($("#cap-status") && $("#cap-status").value) || "";
   const limit = ($("#cap-limit") && $("#cap-limit").value) || "50";
   const fromEl = $("#cap-from");
@@ -323,6 +343,7 @@ async function loadCaptures() {
   if (toEl && toEl.value) params.set("to", new Date(toEl.value).toISOString());
 
   const r = await api("GET", "/api/audit/captures?" + params.toString());
+  if (!capturesGuard.current(token)) return;
   const captures = (r.data && r.data.captures) || [];
   const el = $("#cap-results");
   if (!el) return;
@@ -608,8 +629,11 @@ async function viewKeys(view) {
   await loadKeys();
 }
 
+const keysGuard = staleGuard();
 async function loadKeys() {
+  const token = keysGuard.start();
   const r = await api("GET", "/api/keys");
+  if (!keysGuard.current(token)) return;
   const keys = (r.data && r.data.keys) || [];
   $("#keys-panel").innerHTML = `
     <div class="panel">

@@ -68,3 +68,13 @@ jobs:
           python-version: '3.12'
       - name: check doc links
         run: python3 scripts/check-links.py
+
+  js:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: console admin SPA unit tests
+        run: node --test web/*.test.mjs

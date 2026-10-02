@@ -116,6 +116,7 @@ without a cluster. See [Operations → Kubernetes (Helm chart)](docs/operations.
 make build      # build the binary
 make test       # unit tests
 make test-race  # unit tests under the race detector
+make test-js    # admin console SPA unit tests (plain Node, no dependencies)
 make vet        # go vet
 make run        # run against local DATABASE_URL / REDIS_URL
 ```
