@@ -11,14 +11,19 @@ import (
 )
 
 type chatRequestWire struct {
-	Model             string          `json:"model"`
-	Messages          []llm.Message   `json:"messages"`
-	Tools             []llm.Tool      `json:"tools,omitempty"`
-	ToolChoice        json.RawMessage `json:"tool_choice,omitempty"`
-	ParallelToolCalls *bool           `json:"parallel_tool_calls,omitempty"`
-	Temperature       *float64        `json:"temperature,omitempty"`
-	MaxTokens         *int            `json:"max_tokens,omitempty"`
-	Stream            bool            `json:"stream,omitempty"`
+	Model             string             `json:"model"`
+	Messages          []llm.Message      `json:"messages"`
+	Tools             []llm.Tool         `json:"tools,omitempty"`
+	ToolChoice        json.RawMessage    `json:"tool_choice,omitempty"`
+	ParallelToolCalls *bool              `json:"parallel_tool_calls,omitempty"`
+	Temperature       *float64           `json:"temperature,omitempty"`
+	MaxTokens         *int               `json:"max_tokens,omitempty"`
+	Stream            bool               `json:"stream,omitempty"`
+	StreamOptions     *streamOptionsWire `json:"stream_options,omitempty"`
+}
+
+type streamOptionsWire struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 // ownedRequestKeys are the OpenAI request fields the wire struct maps into
@@ -50,8 +55,17 @@ func DecodeChatRequest(r io.Reader) (llm.ChatRequest, error) {
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return llm.ChatRequest{}, err
 	}
-	if nRaw, ok := raw["n"]; ok && string(nRaw) != "1" && string(nRaw) != "null" {
-		return llm.ChatRequest{}, errors.New("n is not supported (single choice only)")
+	if nRaw, ok := raw["n"]; ok {
+		// Compare the semantic value, not the raw JSON bytes: "n":1.0 is a
+		// valid, semantically-identical single-choice request, but its wire
+		// bytes ("1.0") never equal the literal string "1".
+		var n *float64
+		if err := json.Unmarshal(nRaw, &n); err != nil {
+			return llm.ChatRequest{}, errors.New("n must be a number")
+		}
+		if n != nil && *n != 1 {
+			return llm.ChatRequest{}, errors.New("n is not supported (single choice only)")
+		}
 	}
 	var extra map[string]json.RawMessage
 	for k, v := range raw {
@@ -63,16 +77,19 @@ func DecodeChatRequest(r io.Reader) (llm.ChatRequest, error) {
 		}
 	}
 
+	includeStreamUsage := w.StreamOptions != nil && w.StreamOptions.IncludeUsage
+
 	return llm.ChatRequest{
-		Model:             w.Model,
-		Messages:          w.Messages,
-		Tools:             w.Tools,
-		ToolChoice:        w.ToolChoice,
-		ParallelToolCalls: w.ParallelToolCalls,
-		Temperature:       w.Temperature,
-		MaxTokens:         w.MaxTokens,
-		Stream:            w.Stream,
-		Extra:             extra,
+		Model:              w.Model,
+		Messages:           w.Messages,
+		Tools:              w.Tools,
+		ToolChoice:         w.ToolChoice,
+		ParallelToolCalls:  w.ParallelToolCalls,
+		Temperature:        w.Temperature,
+		MaxTokens:          w.MaxTokens,
+		Stream:             w.Stream,
+		IncludeStreamUsage: includeStreamUsage,
+		Extra:              extra,
 	}, nil
 }
 

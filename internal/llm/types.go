@@ -177,6 +177,15 @@ type ChatRequest struct {
 	MaxTokens         *int
 	Stream            bool
 
+	// IncludeStreamUsage mirrors OpenAI's stream_options.include_usage: the
+	// client's own preference for whether the OpenAI-shaped streaming
+	// response gets a terminal usage-only chunk. Only read by the OpenAI
+	// egress sink — this gateway's own billing never depends on it, that
+	// always reads usage from the upstream call directly. Defaults to
+	// false (no usage chunk) when the client omits stream_options
+	// entirely, matching OpenAI's own documented default.
+	IncludeStreamUsage bool
+
 	// Extra carries unmapped OpenAI request fields verbatim (OpenAI ingress →
 	// OpenAI-compatible upstream). Nil when the request had none.
 	Extra map[string]json.RawMessage
