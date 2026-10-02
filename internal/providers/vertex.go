@@ -68,13 +68,10 @@ func (p *Vertex) Protocol() string { return "openai" }
 //
 // Being curated, it is a statement of intent rather than a mirror of the
 // catalogue: an id belongs here only once Vertex answers to it and it is
-// priced, and a superseded id comes out rather than staying on offer. The
-// 2.5 ids stay only until their announced retirement. docs/operations.md
+// priced, and a superseded id comes out rather than staying on offer, as the
+// 2.5 family did ahead of its 2026-10-20 retirement. docs/operations.md
 // (Vertex AI prices) records why each id is or is not here, and its rates.
 var vertexCuratedModels = []string{
-	"google/gemini-2.5-flash",
-	"google/gemini-2.5-flash-lite",
-	"google/gemini-2.5-pro",
 	"google/gemini-3.1-flash-lite",
 	"google/gemini-3.1-pro-preview",
 	"google/gemini-3.5-flash",
