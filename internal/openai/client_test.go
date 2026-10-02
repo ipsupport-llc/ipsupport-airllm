@@ -101,6 +101,34 @@ func TestEncodeChatRequestToolMessageImageDropped(t *testing.T) {
 	}
 }
 
+// TestEncodeChatRequestToolMessageEmptyContentKeyStays is the Protocol-I3
+// fix: the "omit content when empty" rule exists for a tool-calls-only
+// ASSISTANT message (see the test right below), but OpenAI's tool-message
+// schema requires content to be present — a tool call can legitimately
+// return an empty string, and that's different from a message with no
+// content key at all, which a strict backend can reject.
+func TestEncodeChatRequestToolMessageEmptyContentKeyStays(t *testing.T) {
+	req := llm.ChatRequest{Model: "m", Messages: []llm.Message{{
+		Role: "tool", ToolCallID: "t1", Content: "",
+	}}}
+	b, err := EncodeChatRequest(req, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	msg := got["messages"].([]any)[0].(map[string]any)
+	content, present := msg["content"]
+	if !present {
+		t.Fatalf("content key must be present for a tool message even with empty content, got: %s", b)
+	}
+	if content != "" {
+		t.Errorf("content = %#v, want an explicit empty string", content)
+	}
+}
+
 func TestEncodeChatRequestEmptyContentNoImagesOmitsContentKey(t *testing.T) {
 	// A tool-calls-only assistant message: Content == "", no Images.
 	// Today's plain `Content string `json:"content,omitempty"`` field

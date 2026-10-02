@@ -66,7 +66,16 @@ func toOpenAIOutMessage(m llm.Message) openaiOutMessage {
 		// to emitting `"content":""`. Leaving out.Content as its zero
 		// value (untyped nil) when Content == "" preserves today's
 		// omitted-field behavior exactly.
-		if m.Content != "" {
+		//
+		// A tool message is the one exception: unlike an assistant message
+		// (where an omitted content key legitimately means "no text, just
+		// tool_calls"), OpenAI's tool-message schema requires content to be
+		// present — it's the tool's result, and a tool can legitimately
+		// return an empty string. Omitting the key there isn't a style
+		// choice, it's a different, invalid message a strict backend can
+		// reject outright, so a tool message always gets an explicit
+		// (possibly empty) content string.
+		if m.Content != "" || m.Role == "tool" {
 			out.Content = m.Content
 		}
 		return out
