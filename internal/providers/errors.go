@@ -19,6 +19,19 @@ const (
 	ErrCodeReasoningEffortUnsupported = "reasoning_effort_unsupported"
 )
 
+// ErrCodeProviderAuth marks an upstream that refused the gateway's own
+// credentials or account: a 401/403, or a Google permission, billing or
+// failed-precondition error. Not fallback-worthy by itself — whether another
+// tier should be tried is a per-target choice (see IsAuthFailure).
+const ErrCodeProviderAuth = "provider_auth"
+
+// IsAuthFailure reports whether err is an upstream authorisation or billing
+// failure (ErrCodeProviderAuth).
+func IsAuthFailure(err error) bool {
+	var pe *Error
+	return errors.As(err, &pe) && pe.Code == ErrCodeProviderAuth
+}
+
 // Error is a provider call failure. Retryable failures (e.g. upstream 429 or
 // 5xx) let the router fall back to the next target; non-retryable failures
 // (e.g. a bad request) abort — UNLESS Code names a known fallback-worthy

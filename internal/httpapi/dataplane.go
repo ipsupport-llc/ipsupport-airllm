@@ -182,15 +182,17 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 }
 
 // chatEntry seeds a ledger entry common to the chat and messages paths.
-func chatEntry(ak authedKey, alias string, t routing.Target, ingress string, start time.Time) ledger.Entry {
+func chatEntry(ak authedKey, alias string, res execResult, ingress string, start time.Time) ledger.Entry {
 	return ledger.Entry{
 		KeyID:            ak.KeyID,
 		UserID:           ak.UserID,
 		Alias:            alias,
-		ProviderName:     t.Provider,
-		UpstreamModel:    t.UpstreamModel,
+		ProviderName:     res.Provider,
+		UpstreamModel:    res.UpstreamModel,
 		IngressProtocol:  ingress,
-		UpstreamProtocol: t.UpstreamProtocol,
+		UpstreamProtocol: res.UpstreamProtocol,
+		Tier:             res.Tier,
+		Attempts:         res.Attempts,
 		LatencyMS:        time.Since(start).Milliseconds(),
 	}
 }

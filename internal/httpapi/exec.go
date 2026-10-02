@@ -200,60 +200,22 @@ func (s *Server) finalizeAudioUsage(ctx context.Context, entry ledger.Entry, key
 	}
 }
 
-// runChat executes the plan: it walks the tiers (each ordered by the alias
-// strategy), acquiring a concurrency slot per attempt. A busy target is
-// skipped; a retryable or fallback-worthy error advances to the next
-// target; if every target is busy it waits briefly and retries. On total
-// exhaustion, the LAST attempted target is returned (not an empty one) so
-// the ledger/log can still attribute the failure to a real provider —
-// this matters most for the fallback-worthy-error case this function
-// exists to handle, where every tier gave a real (non-busy) answer.
-func (s *Server) runChat(ctx context.Context, plan *routing.Plan, req llm.ChatRequest) (llm.ChatResponse, routing.Target, error) {
-	reg := s.reg()
-	free := s.freeFunc(reg)
-	var lastErr error
-	var lastTarget routing.Target
-
-	for attempt := 0; attempt <= busyRetries; attempt++ {
-		anyBusy := false
-		for _, t := range plan.Ordered(s.router.NextRR(plan.Alias), free) {
-			lastTarget = t
-			e, ok := reg.Get(t.Provider)
-			if !ok {
-				warnUnregisteredTarget(plan.Alias, t.Provider)
-				lastErr = fmt.Errorf("provider %q not registered", t.Provider)
-				continue
-			}
-			if !e.Acquire() {
-				anyBusy = true
-				continue
-			}
-			resp, err := e.Provider.Chat(ctx, upstreamRequest(req, t.UpstreamModel))
-			e.Release()
-			if err == nil {
-				return resp, t, nil
-			}
-			lastErr = err
-			if !providers.IsFallbackWorthy(err) {
-				return llm.ChatResponse{}, t, err
-			}
-		}
-		if !anyBusy {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return llm.ChatResponse{}, routing.Target{}, ctx.Err()
-		case <-time.After(busyBackoff):
-		}
+// runChat executes the plan for a unary chat request (see executePlan). On
+// total exhaustion the LAST attempted target is returned (not an empty one)
+// so the ledger/log can still attribute the failure to a real provider —
+// this matters most for the fallback-worthy-error case, where every tier
+// gave a real (non-busy) answer.
+func (s *Server) runChat(ctx context.Context, plan *routing.Plan, req llm.ChatRequest) (llm.ChatResponse, execResult, error) {
+	var resp llm.ChatResponse
+	res, _, err := s.executePlan(ctx, plan, nil, func(ctx context.Context, p providers.Provider, t routing.Target, _ func() bool) error {
+		var err error
+		resp, err = p.Chat(ctx, upstreamRequest(req, t.UpstreamModel))
+		return err
+	})
+	if err != nil {
+		return llm.ChatResponse{}, res, err
 	}
-	if lastErr == nil {
-		lastErr = errAllBusy
-	}
-	if errors.Is(lastErr, errAllBusy) {
-		s.metrics.IncRateLimited("provider_busy")
-	}
-	return llm.ChatResponse{}, lastTarget, lastErr
+	return resp, res, nil
 }
 
 // streamSink encodes IR stream chunks into a client wire format. begin is
@@ -265,73 +227,43 @@ type streamSink interface {
 	chunk(llm.StreamChunk) error
 }
 
-// runStream executes the plan for a streaming request. Concurrency slots,
-// tier fallback, and the busy-retry wait mirror runChat; but once the first
+// errFirstChunkLate aborts a stream whose first chunk arrived after its
+// target's budget had already run out; runAttempt reports it as a timeout.
+var errFirstChunkLate = errors.New("first chunk arrived after the time budget")
+
+// runStream executes the plan for a streaming request (see executePlan).
+// The target's time budget bounds the wait for the first chunk; once that
 // chunk is emitted the response is committed and a later error cannot be
 // recovered (returned with started=true). On total exhaustion the LAST
 // attempted target is returned, same reasoning as runChat.
-func (s *Server) runStream(ctx context.Context, plan *routing.Plan, req llm.ChatRequest, sink streamSink) (served routing.Target, usage llm.Usage, started bool, err error) {
-	reg := s.reg()
-	free := s.freeFunc(reg)
-	var lastErr error
-	var lastTarget routing.Target
-
-	for attempt := 0; attempt <= busyRetries; attempt++ {
-		anyBusy := false
-		for _, t := range plan.Ordered(s.router.NextRR(plan.Alias), free) {
-			lastTarget = t
-			e, ok := reg.Get(t.Provider)
-			if !ok {
-				warnUnregisteredTarget(plan.Alias, t.Provider)
-				lastErr = fmt.Errorf("provider %q not registered", t.Provider)
-				continue
-			}
-			if !e.Acquire() {
-				anyBusy = true
-				continue
-			}
-
-			attemptStarted := false
-			var attemptUsage llm.Usage
-			callErr := e.Provider.ChatStream(ctx, upstreamRequest(req, t.UpstreamModel), func(c llm.StreamChunk) error {
-				if !attemptStarted {
-					sink.begin(t)
-					attemptStarted = true
+func (s *Server) runStream(ctx context.Context, plan *routing.Plan, req llm.ChatRequest, sink streamSink) (served execResult, usage llm.Usage, started bool, err error) {
+	served, started, err = s.executePlan(ctx, plan, nil, func(ctx context.Context, p providers.Provider, t routing.Target, commit func() bool) error {
+		attemptStarted := false
+		var attemptUsage llm.Usage
+		err := p.ChatStream(ctx, upstreamRequest(req, t.UpstreamModel), func(c llm.StreamChunk) error {
+			if !attemptStarted {
+				if !commit() {
+					return errFirstChunkLate
 				}
-				if c.Usage != nil {
-					attemptUsage = *c.Usage
-				}
-				return sink.chunk(c)
-			})
-			e.Release()
-
-			if callErr == nil {
-				return t, attemptUsage, true, nil
+				sink.begin(t)
+				attemptStarted = true
 			}
-			lastErr = callErr
-			if attemptStarted {
-				return t, attemptUsage, true, callErr
+			if c.Usage != nil {
+				attemptUsage = *c.Usage
 			}
-			if !providers.IsFallbackWorthy(callErr) {
-				return t, llm.Usage{}, false, callErr
-			}
-		}
-		if !anyBusy {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return routing.Target{}, llm.Usage{}, false, ctx.Err()
-		case <-time.After(busyBackoff):
-		}
+			return sink.chunk(c)
+		})
+		usage = attemptUsage
+		return err
+	})
+	if err == nil {
+		// A stream that ended cleanly without a single chunk still counts
+		// as answered: the handler finishes it like any other.
+		started = true
+	} else if !started {
+		usage = llm.Usage{}
 	}
-	if lastErr == nil {
-		lastErr = errAllBusy
-	}
-	if errors.Is(lastErr, errAllBusy) {
-		s.metrics.IncRateLimited("provider_busy")
-	}
-	return lastTarget, llm.Usage{}, false, lastErr
+	return served, usage, started, err
 }
 
 // openaiSink streams OpenAI chat.completion.chunk SSE events and accumulates

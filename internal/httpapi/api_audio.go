@@ -1,8 +1,8 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"math"
 	"net/http"
@@ -14,6 +14,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/ledger"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
 )
 
 // handleAudioTranscriptions implements POST /v1/audio/transcriptions:
@@ -59,57 +60,22 @@ func (s *Server) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	reg := s.reg()
-	var resp audio.TranscriptionResponse
-	var target string
-	var upstreamModel string
-	var callErr error
-	succeeded := false
-	for _, t := range plan.Ordered(s.router.NextRR(plan.Alias), s.freeFunc(reg)) {
-		e, ok := reg.Get(t.Provider)
-		if !ok {
-			callErr = fmt.Errorf("provider %q not registered", t.Provider)
-			continue
-		}
-		tr, ok := e.Provider.(providers.Transcriber)
-		if !ok {
-			callErr = &providers.Error{Status: http.StatusBadRequest, Retryable: false, Message: "provider " + t.Provider + " does not support transcription"}
-			continue
-		}
-		if !e.Acquire() {
-			callErr = errAllBusy
-			continue
-		}
-		resp, callErr = tr.Transcribe(r.Context(), audio.TranscriptionRequest{
-			Model: t.UpstreamModel, Audio: audioBytes, Filename: hdr.Filename,
-			Language: r.FormValue("language"), Prompt: r.FormValue("prompt"),
-		})
-		e.Release()
-		target, upstreamModel = t.Provider, t.UpstreamModel
-		if callErr == nil {
-			succeeded = true
-			break
-		}
-		if !providers.IsRetryable(callErr) {
-			break
-		}
-	}
+	resp, res, callErr := s.runTranscribe(r.Context(), plan, audio.TranscriptionRequest{
+		Audio: audioBytes, Filename: hdr.Filename,
+		Language: r.FormValue("language"), Prompt: r.FormValue("prompt"),
+	})
+	target, upstreamModel := res.Provider, res.UpstreamModel
 
 	entry := ledger.Entry{
 		KeyID: ak.KeyID, UserID: ak.UserID, Alias: model, ProviderName: target, UpstreamModel: upstreamModel,
-		IngressProtocol: "openai", UpstreamProtocol: "openai", LatencyMS: time.Since(start).Milliseconds(),
+		IngressProtocol: "openai", UpstreamProtocol: "openai", Tier: res.Tier, Attempts: res.Attempts,
+		LatencyMS: time.Since(start).Milliseconds(),
 	}
 
-	if !succeeded {
-		if callErr == nil {
-			callErr = errAllBusy
-		}
+	if callErr != nil {
 		code, typ := classifyUpstreamErr(callErr)
 		if pe, ok := callErr.(*providers.Error); ok && !pe.Retryable {
 			code = pe.Status
-		}
-		if code == http.StatusTooManyRequests {
-			s.metrics.IncRateLimited("provider_busy")
 		}
 		entry.Status = code
 		entry.ErrorMsg = callErr.Error()
@@ -200,56 +166,21 @@ func (s *Server) handleAudioSpeech(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	reg := s.reg()
-	var resp audio.SpeechResponse
-	var target string
-	var upstreamModel string
-	var callErr error
-	succeeded := false
-	for _, t := range plan.Ordered(s.router.NextRR(plan.Alias), s.freeFunc(reg)) {
-		e, ok := reg.Get(t.Provider)
-		if !ok {
-			callErr = fmt.Errorf("provider %q not registered", t.Provider)
-			continue
-		}
-		sy, ok := e.Provider.(providers.Synthesizer)
-		if !ok {
-			callErr = &providers.Error{Status: http.StatusBadRequest, Retryable: false, Message: "provider " + t.Provider + " does not support speech synthesis"}
-			continue
-		}
-		if !e.Acquire() {
-			callErr = errAllBusy
-			continue
-		}
-		resp, callErr = sy.Synthesize(r.Context(), audio.SpeechRequest{
-			Model: t.UpstreamModel, Input: redactedInput, Voice: body.Voice, ResponseFormat: body.ResponseFormat,
-		})
-		e.Release()
-		target, upstreamModel = t.Provider, t.UpstreamModel
-		if callErr == nil {
-			succeeded = true
-			break
-		}
-		if !providers.IsRetryable(callErr) {
-			break
-		}
-	}
+	resp, res, callErr := s.runSynthesize(r.Context(), plan, audio.SpeechRequest{
+		Input: redactedInput, Voice: body.Voice, ResponseFormat: body.ResponseFormat,
+	})
+	target, upstreamModel := res.Provider, res.UpstreamModel
 
 	entry := ledger.Entry{
 		KeyID: ak.KeyID, UserID: ak.UserID, Alias: body.Model, ProviderName: target, UpstreamModel: upstreamModel,
-		IngressProtocol: "openai", UpstreamProtocol: "openai", LatencyMS: time.Since(start).Milliseconds(),
+		IngressProtocol: "openai", UpstreamProtocol: "openai", Tier: res.Tier, Attempts: res.Attempts,
+		LatencyMS: time.Since(start).Milliseconds(),
 	}
 
-	if !succeeded {
-		if callErr == nil {
-			callErr = errAllBusy
-		}
+	if callErr != nil {
 		code, typ := classifyUpstreamErr(callErr)
 		if pe, ok := callErr.(*providers.Error); ok && !pe.Retryable {
 			code = pe.Status
-		}
-		if code == http.StatusTooManyRequests {
-			s.metrics.IncRateLimited("provider_busy")
 		}
 		entry.Status = code
 		entry.ErrorMsg = callErr.Error()
@@ -280,4 +211,50 @@ func (s *Server) handleAudioSpeech(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(resp.Audio)
+}
+
+// runTranscribe executes the plan for a transcription (see executePlan),
+// skipping targets whose provider cannot transcribe.
+func (s *Server) runTranscribe(ctx context.Context, plan *routing.Plan, req audio.TranscriptionRequest) (audio.TranscriptionResponse, execResult, error) {
+	var resp audio.TranscriptionResponse
+	supports := func(p providers.Provider) error {
+		if _, ok := p.(providers.Transcriber); !ok {
+			return &providers.Error{Status: http.StatusBadRequest, Retryable: false, Message: "provider " + p.Name() + " does not support transcription"}
+		}
+		return nil
+	}
+	res, _, err := s.executePlan(ctx, plan, supports, func(ctx context.Context, p providers.Provider, t routing.Target, _ func() bool) error {
+		in := req
+		in.Model = t.UpstreamModel
+		var err error
+		resp, err = p.(providers.Transcriber).Transcribe(ctx, in)
+		return err
+	})
+	if err != nil {
+		return audio.TranscriptionResponse{}, res, err
+	}
+	return resp, res, nil
+}
+
+// runSynthesize executes the plan for a speech synthesis (see executePlan),
+// skipping targets whose provider cannot synthesize.
+func (s *Server) runSynthesize(ctx context.Context, plan *routing.Plan, req audio.SpeechRequest) (audio.SpeechResponse, execResult, error) {
+	var resp audio.SpeechResponse
+	supports := func(p providers.Provider) error {
+		if _, ok := p.(providers.Synthesizer); !ok {
+			return &providers.Error{Status: http.StatusBadRequest, Retryable: false, Message: "provider " + p.Name() + " does not support speech synthesis"}
+		}
+		return nil
+	}
+	res, _, err := s.executePlan(ctx, plan, supports, func(ctx context.Context, p providers.Provider, t routing.Target, _ func() bool) error {
+		in := req
+		in.Model = t.UpstreamModel
+		var err error
+		resp, err = p.(providers.Synthesizer).Synthesize(ctx, in)
+		return err
+	})
+	if err != nil {
+		return audio.SpeechResponse{}, res, err
+	}
+	return resp, res, nil
 }

@@ -53,6 +53,7 @@ type Server struct {
 	dlpPtr        atomic.Pointer[dlpConfig]          // swapped on DLP config changes
 	capturePtr    atomic.Pointer[captureConfig]      // swapped on capture config changes
 	secondpassPtr atomic.Pointer[secondpassConfig]   // swapped on secondpass config changes
+	failoverPtr   atomic.Pointer[failoverConfig]     // swapped on failover config changes
 	router        *routing.Router
 	limiter       *limits.Limiter
 	pricing       *pricing.Table
@@ -103,6 +104,7 @@ func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 	s.metrics.RegisterModelEndpoints(func() float64 { return float64(s.modelPool.Size()) })
 	s.loadCapture(context.Background())
 	s.loadSecondpass(context.Background())
+	s.loadFailover(context.Background())
 	if deps.Capture != nil {
 		s.capturePl = deps.Capture
 	}
@@ -195,7 +197,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	start := time.Now()
 	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-	s.mux.ServeHTTP(rec, r)
+	s.mux.ServeHTTP(rec, r.WithContext(withClientSession(r.Context(), r)))
 	switch r.URL.Path {
 	case "/metrics", "/healthz", "/readyz":
 		// infra endpoints — don't pollute request metrics
