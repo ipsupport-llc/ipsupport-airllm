@@ -299,3 +299,108 @@ func TestStreamBudgetHoldsEmptyChunksUntilContentArrives(t *testing.T) {
 		t.Errorf("content = %q, want \"Paris\"", content)
 	}
 }
+
+func TestThinkFilterKeepsTextWhoseLowercaseChangesLength(t *testing.T) {
+	// İ and the Kelvin sign change byte length when lowercased; matching tags
+	// on a lowercased copy would cut the wrong bytes, or panic.
+	kelvin := strings.Repeat("\u212a", 8)
+	cases := map[string]string{
+		"<THINK>İİİİ</THINK>İİ answer":           "İİ answer",
+		"<think>" + kelvin + "</think>" + kelvin: kelvin,
+		kelvin:                                   kelvin,
+	}
+	for in, want := range cases {
+		if got := stripThinkBlocks(in); got != want {
+			t.Errorf("stripThinkBlocks(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestThinkFilterLeavesALaterLiteralTagInTheReply(t *testing.T) {
+	in := "Use the <think> tag to show reasoning."
+	if got := stripThinkBlocks(in); got != in {
+		t.Errorf("stripThinkBlocks(%q) = %q: only a leading thinking block is the model's thoughts", in, got)
+	}
+}
+
+func TestStreamOfOnlyEmptyChunksStillAnswersUnderABudget(t *testing.T) {
+	up := sseUpstream(t, `{"choices":[{"delta":{"role":"assistant"}}]}`, `{"choices":[{"delta":{},"finish_reason":"stop"}]}`)
+	s := newRunChatTestServer(t, providers.NewOpenAICompat("tier", "openai", up.URL, ""), providers.NewMock("mock-ok"))
+	plan := budgetPlan(routing.Target{Provider: "tier", UpstreamModel: "m", Options: routing.TargetOptions{TimeoutMS: ms(1000)}})
+
+	var chunks []llm.StreamChunk
+	sink := &recordingSink{onChunk: func(c llm.StreamChunk) { chunks = append(chunks, c) }}
+	res, _, started, err := s.runStream(context.Background(), plan, llm.ChatRequest{Stream: true}, sink)
+	if err != nil || !started || res.Provider != "tier" {
+		t.Fatalf("served=%q started=%v err=%v, want the first tier's empty answer", res.Provider, started, err)
+	}
+	if len(chunks) != 2 || chunks[0].Role != "assistant" || chunks[1].FinishReason != "stop" {
+		t.Errorf("chunks %+v, want the role chunk then the finish chunk, in order", chunks)
+	}
+}
+
+func TestThinkingOffSendsAHeldTagStartThatNeverCompleted(t *testing.T) {
+	up := sseUpstream(t, contentDelta("Paris <thi"))
+	s := newRunChatTestServer(t, providers.NewOpenAICompat("tier", "ollama", up.URL, ""))
+	plan := onePlan(routing.Target{Provider: "tier", UpstreamModel: "m", Options: thinkingOff()})
+
+	var content string
+	sink := &recordingSink{onChunk: func(c llm.StreamChunk) { content += c.Content }}
+	if _, _, _, err := s.runStream(context.Background(), plan, llm.ChatRequest{Stream: true}, sink); err != nil {
+		t.Fatalf("runStream: %v", err)
+	}
+	if content != "Paris <thi" {
+		t.Errorf("client got %q, want the whole reply once the stream ended", content)
+	}
+}
+
+func TestUnrelatedRejectionsOnAThinkingOffTierStillFailTheRequest(t *testing.T) {
+	cases := []struct{ kind, body string }{
+		// The gateway sent xai a reasoning_effort, but this 400 is about something else.
+		{"xai", `{"code":"invalid-argument","error":"max_tokens is too small for reasoning models"}`},
+		// The gateway sends groq no setting, so a reasoning complaint is the client's.
+		{"groq", `{"error":{"message":"reasoning_effort is not supported"}}`},
+	}
+	for _, c := range cases {
+		t.Run(c.kind, func(t *testing.T) {
+			up := replyingUpstream(t, 400, c.body)
+			s := newRunChatTestServer(t, providers.NewOpenAICompat("tier", c.kind, up.URL, ""), providers.NewMock("mock-ok"))
+			_, res, err := s.runChat(context.Background(), budgetPlan(routing.Target{Provider: "tier", UpstreamModel: "m", Options: thinkingOff()}), llm.ChatRequest{})
+			if err == nil {
+				t.Errorf("served by %q: a 400 that is not about the gateway's own setting must reach the client", res.Provider)
+			}
+		})
+	}
+}
+
+func TestStreamWithoutBudgetStartsOnItsFirstChunk(t *testing.T) {
+	up := thinkingThenSilentUpstream(t)
+	s := newRunChatTestServer(t, providers.NewOpenAICompat("thinker", "openai", up.URL, ""))
+	plan := onePlan(routing.Target{Provider: "thinker", UpstreamModel: "m"})
+
+	begun := make(chan struct{})
+	sink := &recordingSink{onBegin: func(routing.Target) { close(begun) }}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _, _, _, _ = s.runStream(ctx, plan, llm.ChatRequest{Stream: true}, sink) }()
+	select {
+	case <-begun:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no response begun: without a budget the role chunk must start it, as before")
+	}
+}
+
+func TestThinkingOffStripsAnUpperCaseTagCutAcrossChunks(t *testing.T) {
+	up := sseUpstream(t, contentDelta("  <THI"), contentDelta("NK>hmm</THI"), contentDelta("NK>Paris"))
+	s := newRunChatTestServer(t, providers.NewOpenAICompat("tier", "ollama", up.URL, ""))
+	plan := onePlan(routing.Target{Provider: "tier", UpstreamModel: "m", Options: thinkingOff()})
+
+	var content string
+	sink := &recordingSink{onChunk: func(c llm.StreamChunk) { content += c.Content }}
+	if _, _, _, err := s.runStream(context.Background(), plan, llm.ChatRequest{Stream: true}, sink); err != nil {
+		t.Fatalf("runStream: %v", err)
+	}
+	if content != "Paris" {
+		t.Errorf("client got %q, want \"Paris\"", content)
+	}
+}

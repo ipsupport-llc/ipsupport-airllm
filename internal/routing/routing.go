@@ -63,8 +63,11 @@ type TargetOptions struct {
 	Thinking *string `json:"thinking,omitempty"`
 }
 
+// thinkingOff is the one value TargetOptions.Thinking accepts.
+const thinkingOff = "off"
+
 // ThinkingOff reports whether the target asks its model not to think.
-func (o TargetOptions) ThinkingOff() bool { return o.Thinking != nil && *o.Thinking == "off" }
+func (o TargetOptions) ThinkingOff() bool { return o.Thinking != nil && *o.Thinking == thinkingOff }
 
 // BreakerOptions are circuit breaker knobs, as stored in a target's options
 // and in the gateway-wide failover defaults. A nil field is unset.
@@ -129,7 +132,7 @@ func ParseTargetOptions(raw []byte) (TargetOptions, error) {
 	if err := o.Breaker.Validate(); err != nil {
 		return o, fmt.Errorf("invalid options: %w", err)
 	}
-	if o.Thinking != nil && *o.Thinking != "off" {
+	if o.Thinking != nil && *o.Thinking != thinkingOff {
 		return o, fmt.Errorf(`invalid options: thinking must be "off"`)
 	}
 	return o, nil

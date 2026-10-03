@@ -53,17 +53,22 @@ func withThinkingOff(kind string, in llm.ChatRequest) llm.ChatRequest {
 // thinkingRejection turns an upstream's 400 for the reasoning setting the
 // gateway chose into a fallback-worthy error: a tier that cannot take its own
 // configured setting is no reason to fail the request when another tier can
-// serve it. Requests without ThinkingOff keep the error as it is — then the
-// setting was the client's.
-func thinkingRejection(in llm.ChatRequest, err error) error {
+// serve it. It applies only where the gateway did send a setting for kind,
+// and only to a 400 that names one of the fields it set; anything else —
+// including every error on a request without ThinkingOff, whose reasoning
+// fields were the client's — is returned as it is.
+func thinkingRejection(kind string, in llm.ChatRequest, err error) error {
+	set := thinkingOffSettings[kind]
 	var pe *Error
-	if !in.ThinkingOff || !errors.As(err, &pe) || pe.Status != 400 || pe.Code != "" {
+	if !in.ThinkingOff || len(set) == 0 || !errors.As(err, &pe) || pe.Status != 400 || pe.Code != "" {
 		return err
 	}
-	if !strings.Contains(strings.ToLower(pe.Message), "reasoning") {
-		return err
+	for field := range set {
+		if strings.Contains(pe.Message, field) {
+			cp := *pe
+			cp.Code = ErrCodeReasoningEffortUnsupported
+			return &cp
+		}
 	}
-	cp := *pe
-	cp.Code = ErrCodeReasoningEffortUnsupported
-	return &cp
+	return err
 }

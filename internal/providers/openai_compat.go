@@ -73,7 +73,7 @@ func (p *OpenAICompat) Chat(ctx context.Context, in llm.ChatRequest) (llm.ChatRe
 	}
 	resp, err := sendChatCompletions(ctx, p.hc, p.name, p.baseURL, p.apiKey, body, false)
 	if err != nil {
-		return llm.ChatResponse{}, thinkingRejection(in, err)
+		return llm.ChatResponse{}, thinkingRejection(p.kind, in, err)
 	}
 	defer resp.Body.Close()
 	return openai.DecodeChatResponse(resp.Body)
@@ -90,7 +90,7 @@ func (p *OpenAICompat) ChatStream(ctx context.Context, in llm.ChatRequest, yield
 	}
 	resp, err := sendChatCompletions(ctx, p.hc, p.name, p.baseURL, p.apiKey, body, true)
 	if err != nil {
-		return thinkingRejection(in, err)
+		return thinkingRejection(p.kind, in, err)
 	}
 	defer resp.Body.Close()
 
