@@ -1055,6 +1055,24 @@ function parseTargetOptions(text) {
   return v;
 }
 
+// affinityTTLText shows an alias's stored session pin TTL (seconds) as hours
+// for the editor; the default (0) is an empty field. Top-level so
+// web/affinityttl.test.mjs can extract it.
+function affinityTTLText(seconds) {
+  const s = Number(seconds) || 0;
+  return s > 0 ? String(Math.round((s / 3600) * 100) / 100) : "";
+}
+
+// parseAffinityTTL turns the editor's hours into the seconds the API stores:
+// empty is 0 (the gateway default), anything else must lie in (0, 168].
+function parseAffinityTTL(text) {
+  const t = (text || "").trim();
+  if (!t) return 0;
+  const h = Number(t);
+  if (!Number.isFinite(h) || h <= 0 || h > 168) throw new Error("session pin TTL must be a number of hours between 0 and 168");
+  return Math.round(h * 3600);
+}
+
 // tierHealthRows renders the breaker of each tier from the alias health
 // endpoint as table rows. An open or probing tier gets a Release button.
 // Top-level so web/tierhealth.test.mjs can extract it.
@@ -1154,6 +1172,10 @@ async function editAlias(c, a) {
       <input id="al-expose" type="checkbox" ${a.expose_backend_headers ? "checked" : ""} style="width:auto" /></label>
     <label class="field"><span class="lab">DLP scan on audio transcripts/input (STT/TTS)</span>
       <input id="al-dlpaudio" type="checkbox" ${a.dlp_audio_scan === false ? "" : "checked"} style="width:auto" /></label>
+    <label class="field"><span class="lab">Session affinity: a session (X-Session-Id) served by a fallback tier stays on it</span>
+      <input id="al-affinity" type="checkbox" ${a.session_affinity ? "checked" : ""} style="width:auto" /></label>
+    <label class="field"><span class="lab">Session pin TTL, hours (empty = 4)</span>
+      <input id="al-affinity-ttl" type="number" min="0" max="168" step="any" value="${esc(affinityTTLText(a.session_affinity_ttl_s))}" style="width:96px" /></label>
     <div class="lab" style="color:var(--muted);font-size:.82rem;margin-bottom:.3rem">Targets: same priority = load-balanced tier; higher number = fallback tier. Label is what the header shows — real provider/model names never leak. Options (JSON, optional): <span class="mono">timeout_ms</span> — time budget (first chunk for streams, whole call otherwise); <span class="mono">fallback_on_auth</span> — try the next tier on upstream auth/billing errors; <span class="mono">breaker</span> — circuit breaker for the tier, e.g. <span class="mono">{"enabled":true,"failures":3,"cooldown_ms":60000}</span>.</div>
     <div id="al-targets"></div>
     <button type="button" class="btn ghost sm" id="al-add" style="margin-top:.3rem">+ Add target</button>
@@ -1261,8 +1283,9 @@ async function editAlias(c, a) {
     if (alias !== a.alias && existingAliases.includes(alias)) {
       toast(`Alias ${alias} already exists`, "err"); return;
     }
-    let tlist;
+    let tlist, affinityTTL;
     try {
+      affinityTTL = parseAffinityTTL($("#al-affinity-ttl", bg).value);
       tlist = [...tdiv.querySelectorAll(".tgt")].map((r) => ({
         priority: Number(r.querySelector(".t-prio").value) || 0,
         provider: r.querySelector(".t-prov").value,
@@ -1274,7 +1297,8 @@ async function editAlias(c, a) {
     if (tlist.length === 0) { toast("Add at least one target with a model", "err"); return; }
     const x = await api("PUT", `/api/admin/aliases/${encodeURIComponent(alias)}`,
       { protocol: $("#al-proto", bg).value, strategy: $("#al-strategy", bg).value, targets: tlist,
-        dlp_model_scan: $("#al-bert", bg).checked, expose_backend_headers: $("#al-expose", bg).checked, dlp_audio_scan: $("#al-dlpaudio", bg).checked });
+        dlp_model_scan: $("#al-bert", bg).checked, expose_backend_headers: $("#al-expose", bg).checked, dlp_audio_scan: $("#al-dlpaudio", bg).checked,
+        session_affinity: $("#al-affinity", bg).checked, session_affinity_ttl_s: affinityTTL });
     if (!x.ok) { toast((x.data && x.data.error) || "Failed", "err"); return; }
     // Rename = save under the new name, then drop the old one. Role
     // policies and pricing that reference the old name are NOT rewritten.

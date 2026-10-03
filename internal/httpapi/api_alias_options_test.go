@@ -168,3 +168,80 @@ func TestFailoverDefaultsRoundTrip(t *testing.T) {
 		t.Errorf("get = %s, want the saved defaults", got)
 	}
 }
+
+// TestPutAliasRejectsAnOutOfRangeAffinityTTL runs with no database: the TTL
+// is checked before anything is written.
+func TestPutAliasRejectsAnOutOfRangeAffinityTTL(t *testing.T) {
+	s := &Server{}
+	for _, ttl := range []string{"-1", "604801", `"4h"`} {
+		body := `{"session_affinity":true,"session_affinity_ttl_s":` + ttl + `,"targets":[]}`
+		if rec := putAlias(s, "a", body); rec.Code != http.StatusBadRequest {
+			t.Errorf("ttl %s: status = %d, want 400 (%s)", ttl, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// TestAliasSessionAffinityRoundTrip saves an alias with affinity on, reads it
+// back through the admin list and resolves it through the router.
+func TestAliasSessionAffinityRoundTrip(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	prov := fmt.Sprintf("aff-prov-%d", time.Now().UnixNano())
+	alias, plain := "aff-alias-"+prov, "aff-plain-"+prov
+	if _, err := pool.Exec(ctx, `INSERT INTO providers (name, kind, base_url, enabled, max_concurrency) VALUES ($1, 'openai', 'http://127.0.0.1:1', true, 1)`, prov); err != nil {
+		t.Fatalf("seed provider: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM model_aliases WHERE alias = ANY($1)`, []string{alias, plain})
+		_, _ = pool.Exec(context.Background(), `DELETE FROM providers WHERE name = $1`, prov)
+	})
+	s := &Server{st: &store.Store{PG: pool}, router: routing.NewRouter(&store.Store{PG: pool}), auditHook: func(context.Context, string, string, string, any) {}}
+
+	target := fmt.Sprintf(`"targets":[{"priority":0,"provider":%q,"upstream_model":"m"}]`, prov)
+	if rec := putAlias(s, alias, `{"session_affinity":true,"session_affinity_ttl_s":7200,`+target+`}`); rec.Code != http.StatusOK {
+		t.Fatalf("put: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := putAlias(s, plain, `{`+target+`}`); rec.Code != http.StatusOK {
+		t.Fatalf("put plain: %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec := httptest.NewRecorder()
+	s.handleAdminAliases(rec, httptest.NewRequest(http.MethodGet, "/api/admin/aliases", nil))
+	var list struct {
+		Aliases []struct {
+			Alias           string `json:"alias"`
+			SessionAffinity bool   `json:"session_affinity"`
+			TTL             int    `json:"session_affinity_ttl_s"`
+		} `json:"aliases"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	for _, a := range list.Aliases {
+		switch a.Alias {
+		case alias:
+			if !a.SessionAffinity || a.TTL != 7200 {
+				t.Errorf("listed affinity=%v ttl=%d, want true and 7200", a.SessionAffinity, a.TTL)
+			}
+		case plain:
+			if a.SessionAffinity || a.TTL != 0 {
+				t.Errorf("plain alias listed affinity=%v ttl=%d, want it off by default", a.SessionAffinity, a.TTL)
+			}
+		}
+	}
+
+	plan, err := s.router.Resolve(ctx, alias, false)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if !plan.SessionAffinity || plan.SessionAffinityTTL != 2*time.Hour {
+		t.Errorf("resolved affinity=%v ttl=%v, want true and 2h", plan.SessionAffinity, plan.SessionAffinityTTL)
+	}
+	plan, err = s.router.Resolve(ctx, plain, false)
+	if err != nil {
+		t.Fatalf("resolve plain: %v", err)
+	}
+	if plan.SessionAffinity || plan.SessionAffinityTTL != routing.DefaultAffinityTTL {
+		t.Errorf("plain alias resolved affinity=%v ttl=%v, want off with the default TTL", plan.SessionAffinity, plan.SessionAffinityTTL)
+	}
+}
