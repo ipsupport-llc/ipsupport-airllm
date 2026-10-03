@@ -93,39 +93,26 @@ func (s *Server) breakerSettings(plan *routing.Plan, tier int) breaker.Settings 
 	layers = append(layers, &def)
 
 	set := breaker.Defaults()
-	pickBool := func(get func(*routing.BreakerOptions) *bool, dst *bool) {
-		for _, l := range layers {
-			if v := get(l); v != nil {
-				*dst = *v
-				return
-			}
-		}
-	}
-	pickInt := func(get func(*routing.BreakerOptions) *int, apply func(int)) {
-		for _, l := range layers {
-			if v := get(l); v != nil {
-				apply(*v)
-				return
-			}
-		}
-	}
-	ms := func(dst *time.Duration) func(int) {
-		return func(v int) { *dst = time.Duration(v) * time.Millisecond }
-	}
-	pickBool(func(o *routing.BreakerOptions) *bool { return o.Enabled }, &set.Enabled)
-	pickInt(func(o *routing.BreakerOptions) *int { return o.Failures }, func(v int) { set.Failures = v })
-	pickInt(func(o *routing.BreakerOptions) *int { return o.MinRequests }, func(v int) { set.MinRequests = v })
-	pickInt(func(o *routing.BreakerOptions) *int { return o.WindowMS }, ms(&set.Window))
-	pickInt(func(o *routing.BreakerOptions) *int { return o.CooldownMS }, ms(&set.Cooldown))
-	pickInt(func(o *routing.BreakerOptions) *int { return o.MaxCooldownMS }, ms(&set.MaxCooldown))
-	pickInt(func(o *routing.BreakerOptions) *int { return o.StableMS }, ms(&set.Stable))
-	for _, l := range layers {
-		if l.ErrorRate != nil {
-			set.ErrorRate = *l.ErrorRate
-			break
-		}
-	}
+	ms := func(v int) time.Duration { return time.Duration(v) * time.Millisecond }
+	pick(layers, func(o *routing.BreakerOptions) *bool { return o.Enabled }, func(v bool) { set.Enabled = v })
+	pick(layers, func(o *routing.BreakerOptions) *int { return o.Failures }, func(v int) { set.Failures = v })
+	pick(layers, func(o *routing.BreakerOptions) *float64 { return o.ErrorRate }, func(v float64) { set.ErrorRate = v })
+	pick(layers, func(o *routing.BreakerOptions) *int { return o.MinRequests }, func(v int) { set.MinRequests = v })
+	pick(layers, func(o *routing.BreakerOptions) *int { return o.WindowMS }, func(v int) { set.Window = ms(v) })
+	pick(layers, func(o *routing.BreakerOptions) *int { return o.CooldownMS }, func(v int) { set.Cooldown = ms(v) })
+	pick(layers, func(o *routing.BreakerOptions) *int { return o.MaxCooldownMS }, func(v int) { set.MaxCooldown = ms(v) })
+	pick(layers, func(o *routing.BreakerOptions) *int { return o.StableMS }, func(v int) { set.Stable = ms(v) })
 	return set
+}
+
+// pick applies the value of the first layer that sets the key get reads.
+func pick[T any](layers []*routing.BreakerOptions, get func(*routing.BreakerOptions) *T, apply func(T)) {
+	for _, l := range layers {
+		if v := get(l); v != nil {
+			apply(*v)
+			return
+		}
+	}
 }
 
 // countsAgainstTier reports whether a failed attempt says something about the

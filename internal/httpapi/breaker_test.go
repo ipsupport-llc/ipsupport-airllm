@@ -629,3 +629,120 @@ func grepLines(s string, prefixes ...string) string {
 	}
 	return strings.Join(out, "\n")
 }
+
+func TestBreakerProbeThatProvesNothingKeepsTheTierQuarantined(t *testing.T) {
+	var mode atomic.Value // "fail" | "ctxlen"
+	mode.Store("fail")
+	var calls atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if mode.Load() == "ctxlen" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"too long","code":"context_length_exceeded"}}`))
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(up.Close)
+	clk := newFakeClock()
+	s := newBreakerTestServer(t, clk, providers.NewOpenAICompat("flaky", "openai", up.URL, ""), providers.NewMock("mock-ok"))
+	plan := guardedPlan("voice-reply", "flaky", breakerOn())
+	for i := 0; i < 3; i++ {
+		chat(t, s, plan)
+	}
+	clk.Advance(time.Minute)
+
+	// The probe's request was too long for the model: that says nothing
+	// about the tier, so the probe goes to the next request.
+	mode.Store("ctxlen")
+	chat(t, s, plan)
+	mode.Store("fail")
+	chat(t, s, plan) // the real probe, and it fails
+	before := calls.Load()
+	chat(t, s, plan)
+	if calls.Load() != before {
+		t.Error("tier called after a failed probe — the uninformative probe before it closed the tier")
+	}
+}
+
+func TestBreakerRequestErrorsDoNotBreakTheFailureRun(t *testing.T) {
+	var ctxlen atomic.Bool
+	var calls atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if ctxlen.Load() {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"too long","code":"context_length_exceeded"}}`))
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(up.Close)
+	clk := newFakeClock()
+	s := newBreakerTestServer(t, clk, providers.NewOpenAICompat("flaky", "openai", up.URL, ""), providers.NewMock("mock-ok"))
+	plan := guardedPlan("voice-reply", "flaky", breakerOn())
+
+	for _, tooLong := range []bool{false, false, true, false} {
+		ctxlen.Store(tooLong)
+		chat(t, s, plan)
+	}
+	before := calls.Load()
+	chat(t, s, plan)
+	if calls.Load() != before {
+		t.Error("tier still called after three failures — a too-long request in between reset the run")
+	}
+}
+
+func TestBreakerReplicasRacingForTheProbeLetOneThrough(t *testing.T) {
+	rdb := testBreakerRedis(t)
+	release := make(chan struct{})
+	var calls atomic.Int32
+	var recovering atomic.Bool
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if !recovering.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	t.Cleanup(up.Close)
+	clk := newFakeClock()
+	var replicas []*Server
+	for i := 0; i < 2; i++ {
+		s := newRunChatTestServer(t, providers.NewOpenAICompat("flaky", "openai", up.URL, ""), providers.NewMock("mock-ok"))
+		s.breaker = s.newBreaker(rdb, breaker.WithClock(clk.Now))
+		replicas = append(replicas, s)
+	}
+	plan := guardedPlan(fmt.Sprintf("race-%d", time.Now().UnixNano()), "flaky", breakerOn())
+	for i := 0; i < 3; i++ {
+		chat(t, replicas[0], plan)
+	}
+	clk.Advance(time.Minute)
+	recovering.Store(true)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(s *Server) {
+			defer wg.Done()
+			_, _, _ = s.runChat(context.Background(), plan, llm.ChatRequest{Messages: []llm.Message{{Role: "user", Content: "hi"}}})
+		}(replicas[i%2])
+	}
+	// Everyone but the probe falls back to the mock and returns; the probe
+	// waits on release.
+	deadline := time.Now().Add(5 * time.Second)
+	for calls.Load() < 4 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	wg.Wait()
+	if got := calls.Load(); got != 4 {
+		t.Errorf("upstream called %d times, want 3 failures and exactly one probe across both replicas", got)
+	}
+}

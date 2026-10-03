@@ -40,6 +40,10 @@ type Settings struct {
 	Cooldown    time.Duration
 	MaxCooldown time.Duration
 	Stable      time.Duration
+	// ProbeLease is how long an admitted probe holds the tier before another
+	// one may go: long enough for the attempt to finish. Below the 30s
+	// floor, the floor applies.
+	ProbeLease time.Duration
 }
 
 // Defaults are the starting thresholds: three consecutive failures, or more
@@ -58,10 +62,26 @@ func Defaults() Settings {
 	}
 }
 
-// probeLease is how long an admitted probe holds the tier: if its outcome is
-// never recorded (the replica running it died), another probe is admitted
-// after this long.
-const probeLease = 30 * time.Second
+// minProbeLease is the shortest an admitted probe holds the tier: if its
+// outcome is never recorded (the replica running it died), another probe is
+// admitted after the lease.
+const minProbeLease = 30 * time.Second
+
+func (set Settings) probeLease() time.Duration {
+	return max(set.ProbeLease, minProbeLease)
+}
+
+// coolingDown reports whether the tier must still be skipped at now: open
+// with its cooldown running, or probing with the probe's lease running.
+func (r *record) coolingDown(now time.Time) bool {
+	switch r.state() {
+	case Open:
+		return now.UnixMilli() < r.OpenUntil
+	case HalfOpen:
+		return now.UnixMilli() < r.ProbeUntil
+	}
+	return false
+}
 
 // Key names one breaker: a tier of an alias. Tier is the configured tier
 // priority, which stays stable when other tiers are added or disabled.
@@ -157,7 +177,7 @@ type Breaker struct {
 
 	// seen is every key this replica admitted with the breaker on, with the
 	// settings it last ran under: what the state metric reports on.
-	seen sync.Map // Key -> Settings
+	seen sync.Map // Key -> seenKey
 
 	mu sync.Mutex
 	// remoteDownTill is when to try Redis again after it failed. It runs on
@@ -197,23 +217,17 @@ func (b *Breaker) Admit(ctx context.Context, k Key, set Settings) Admission {
 	if b == nil || !set.Enabled {
 		return Admission{}
 	}
-	b.seen.Store(k, set)
 	now := b.now()
+	b.seen.Store(k, seenKey{set: set, at: now})
 	cur, err := b.load(ctx, k)
 	if err != nil {
 		return Admission{}
 	}
-	switch cur.state() {
-	case Closed:
+	if cur.state() == Closed {
 		return Admission{}
-	case Open:
-		if now.UnixMilli() < cur.OpenUntil {
-			return Admission{Skip: true}
-		}
-	case HalfOpen:
-		if now.UnixMilli() < cur.ProbeUntil {
-			return Admission{Skip: true}
-		}
+	}
+	if cur.coolingDown(now) {
+		return Admission{Skip: true}
 	}
 	// The cooldown (or a lost probe's lease) has run out: race the other
 	// requests for the single probe.
@@ -221,26 +235,24 @@ func (b *Breaker) Admit(ctx context.Context, k Key, set Settings) Admission {
 	var tr *Transition
 	err = b.update(ctx, k, set, func(r *record) bool {
 		adm, tr = Admission{}, nil
-		switch r.state() {
-		case Closed:
+		if r.state() == Closed {
 			return false
-		case Open:
-			if now.UnixMilli() < r.OpenUntil {
-				adm.Skip = true
-				return false
-			}
-		case HalfOpen:
-			if now.UnixMilli() < r.ProbeUntil {
-				adm.Skip = true
-				return false
-			}
+		}
+		if r.coolingDown(now) {
+			adm.Skip = true
+			return false
 		}
 		tr = &Transition{Key: k, From: r.state(), To: HalfOpen}
 		r.State = HalfOpen
-		r.ProbeUntil = now.Add(probeLease).UnixMilli()
+		r.ProbeUntil = now.Add(set.probeLease()).UnixMilli()
 		adm.Probe = true
 		return true
 	})
+	if errors.Is(err, errContended) {
+		// Other requests kept winning the race for this record: one of
+		// them holds the probe.
+		return Admission{Skip: true}
+	}
 	if err != nil {
 		return Admission{}
 	}
@@ -252,7 +264,9 @@ func (b *Breaker) Admit(ctx context.Context, k Key, set Settings) Admission {
 
 // Record reports the outcome of an attempt Admit let through. failed is
 // whether it failed in a way that counts against the tier's health; probe is
-// the Admission's Probe.
+// the Admission's Probe. An attempt that says nothing about the tier (it
+// failed because of the request itself) is not recorded at all — a probe
+// like that is handed back with AbandonProbe.
 func (b *Breaker) Record(ctx context.Context, k Key, set Settings, failed, probe bool) {
 	if b == nil || !set.Enabled {
 		return
@@ -328,25 +342,40 @@ func (b *Breaker) Status(ctx context.Context, k Key, set Settings) (Status, erro
 		State: r.state(), Reason: r.Reason, Trips: r.Trips, CooldownMS: r.CooldownMS,
 		ConsecutiveFailures: r.Consecutive, WindowRequests: r.WindowReqs, WindowFailures: r.WindowFails,
 	}
-	if st.State == Closed {
+	switch st.State {
+	case Closed:
 		st.Reason = ""
 		if r.ClosedAt > 0 && b.now().Sub(time.UnixMilli(r.ClosedAt)) >= set.Stable {
 			st.Trips, st.CooldownMS = 0, 0
 		}
-	} else {
+	case Open:
 		st.OpenUntil = time.UnixMilli(r.OpenUntil).UTC()
 	}
 	return st, nil
 }
 
+// seenKey is when a key was last admitted, and under which settings.
+type seenKey struct {
+	set Settings
+	at  time.Time
+}
+
 // Seen calls fn for every tier this replica has admitted requests to with
-// the breaker on, with the settings it last ran under.
+// the breaker on, with the settings it last ran under. A tier not admitted
+// for as long as its state could outlive (an alias or tier since deleted,
+// say) is forgotten.
 func (b *Breaker) Seen(fn func(Key, Settings)) {
 	if b == nil {
 		return
 	}
+	now := b.now()
 	b.seen.Range(func(k, v any) bool {
-		fn(k.(Key), v.(Settings))
+		sk := v.(seenKey)
+		if now.Sub(sk.at) > ttl(sk.set) {
+			b.seen.Delete(k)
+			return true
+		}
+		fn(k.(Key), sk.set)
 		return true
 	})
 }
@@ -362,7 +391,10 @@ func (b *Breaker) Release(ctx context.Context, k Key) error {
 		return err
 	}
 	b.local.del(k)
-	if b.useRemote() {
+	// Always reach for the shared state, even while this replica is backing
+	// off from Redis: releasing only the local copy would leave every other
+	// replica skipping the tier.
+	if b.remote != nil {
 		cctx, cancel := context.WithTimeout(ctx, b.opTimeout)
 		defer cancel()
 		if err := b.remote.del(cctx, k); err != nil {
@@ -406,7 +438,7 @@ func (b *Breaker) emit(t Transition) {
 // ttl bounds how long a breaker's state outlives its last change: long enough
 // for the longest cooldown, a probe and the stable period to play out.
 func ttl(set Settings) time.Duration {
-	return set.MaxCooldown + set.Stable + set.Window + probeLease + time.Minute
+	return set.MaxCooldown + set.Stable + set.Window + set.probeLease() + time.Minute
 }
 
 func (b *Breaker) useRemote() bool {
@@ -434,6 +466,9 @@ func (b *Breaker) remoteOK() {
 	b.remoteDownTill = time.Time{}
 	b.mu.Unlock()
 	if recovered {
+		// What this replica decided alone is stale now that the shared
+		// state is back; a later outage must not resurrect it.
+		b.local.reset()
 		slog.Info("breaker: shared state reachable again")
 	}
 }
@@ -498,6 +533,12 @@ func (m *memStore) update(k Key, fn func(*record) bool) {
 	if fn(&r) {
 		m.recs[k] = r
 	}
+}
+
+func (m *memStore) reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.recs = map[Key]record{}
 }
 
 func (m *memStore) del(k Key) {

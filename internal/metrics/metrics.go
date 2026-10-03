@@ -69,7 +69,7 @@ func New() *Metrics {
 			Name: "airllm_tier_fallbacks_total", Help: "Requests that moved past a tier, by origin tier, the tier that served (none if nothing did) and reason.",
 		}, []string{"alias", "from_tier", "to_tier", "reason"}),
 		tierOutcomes: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "airllm_tier_outcomes_total", Help: "Tier attempts by alias, tier and outcome (success, failure, quarantined).",
+			Name: "airllm_tier_outcomes_total", Help: "Tier attempts by alias, tier and outcome (success, failure, request_error, quarantined).",
 		}, []string{"alias", "tier", "outcome"}),
 	}
 	m.reg.MustRegister(m.httpRequests, m.httpDuration, m.component, m.tokens, m.cost, m.rateLimited, m.dlpSkipped, m.dlpDuration,
@@ -217,8 +217,8 @@ func (m *Metrics) TierFallback(alias, from, to, reason string) {
 	m.tierFallbacks.WithLabelValues(alias, from, to, reason).Inc()
 }
 
-// TierOutcome counts one attempt at a tier: success, failure or quarantined
-// (skipped by its open breaker).
+// TierOutcome counts one attempt at a tier: success, failure, request_error
+// (no verdict on the tier) or quarantined (skipped by its open breaker).
 func (m *Metrics) TierOutcome(alias, tier, outcome string) {
 	if m == nil {
 		return

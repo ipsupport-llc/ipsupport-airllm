@@ -175,11 +175,16 @@ alias, with its own budgets, is unaffected.
   the tier count: retryable errors, timeouts, model-not-found and (with
   `fallback_on_auth`) auth refusals. A request the tier cannot serve because
   of the request itself — context too long, images or reasoning the model
-  does not take — does not count, and neither does a client hanging up.
+  does not take, or any error that fails the request outright — is no verdict
+  on the tier: it neither counts as a failure nor breaks a run of them, and
+  neither does a client hanging up. The error-rate window is fixed, not
+  sliding: it starts with the first request after the previous one ran out.
 - **Open.** Every request skips the tier at once, without a call. When every
   tier a request could use is open it fails fast with `503`.
 - **Probe.** When the cooldown runs out exactly one request — across all
-  replicas — is let through. Success closes the tier; failure re-opens it
+  replicas — is let through; a stream counts as answered at its first chunk.
+  If the probe's request turns out to be no verdict on the tier, the next
+  request probes instead. Success closes the tier; failure re-opens it
   with the cooldown doubled, up to `max_cooldown_ms`. Once the tier has stayed
   closed for `stable_ms`, the next trip starts at `cooldown_ms` again.
 - **Release.** `POST /api/admin/aliases/{alias}/tiers/{tier}/release` (or
@@ -190,8 +195,8 @@ The breaker is **off** unless switched on, so existing aliases see no change.
 Switch it on for every tier with the gateway-wide default, or per tier in a
 target's options. Every knob below can be set in both places; a tier's own
 value wins, then the gateway-wide one, then the built-in default. A tier with
-several load-balanced targets takes each key from the first of them (by
-provider, then upstream model) that sets it.
+several load-balanced targets resolves key by key: each key comes from the
+first of its targets (by provider, then upstream model) that sets it.
 
 | Key (`breaker.*`) | Default | Meaning |
 |-------------------|---------|---------|
@@ -219,10 +224,10 @@ probe` and `tier breaker closed` (with `via`: `probe` or `manual`). Metrics:
 
 | Metric | Labels | Meaning |
 |--------|--------|---------|
-| `airllm_breaker_state` | `alias`, `tier` | `0` closed, `1` open, `2` half-open (probing); read from the shared state at scrape time. |
+| `airllm_breaker_state` | `alias`, `tier` | `0` closed, `1` open, `2` half-open (probing); read from the shared state at scrape time, for the tiers this replica has served since it started. |
 | `airllm_breaker_transitions_total` | `alias`, `tier`, `to` | State changes, counted once by the replica that made them. |
 | `airllm_tier_fallbacks_total` | `alias`, `from_tier`, `to_tier`, `reason` | Requests that moved past `from_tier`, served in the end by `to_tier` (`none` if nothing served them); `reason` is a failure reason or `quarantined`. |
-| `airllm_tier_outcomes_total` | `alias`, `tier`, `outcome` | Attempts per tier: `success`, `failure` or `quarantined` (skipped while open). |
+| `airllm_tier_outcomes_total` | `alias`, `tier`, `outcome` | Attempts per tier: `success`, `failure`, `request_error` (failed because of the request, no verdict on the tier) or `quarantined` (skipped while open). |
 
 ## Provider kinds
 

@@ -243,12 +243,16 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 					continue
 				}
 			}
+			pol := s.policyFor(t)
 			key, set := breaker.Key{Alias: plan.Alias, Tier: t.Tier}, tierSettings(t.Tier)
+			// A probe holds the tier for as long as its attempt may run.
+			set.ProbeLease = pol.budget + time.Second
+			tierLabel := strconv.Itoa(t.Tier)
 			adm := s.breaker.Admit(ctx, key, set)
 			if adm.Skip {
 				quarantined = true
 				moved = append(moved, tierFallback{tier: t.Tier, reason: "quarantined"})
-				s.metrics.TierOutcome(plan.Alias, strconv.Itoa(t.Tier), "quarantined")
+				s.metrics.TierOutcome(plan.Alias, tierLabel, "quarantined")
 				continue
 			}
 			if !e.Acquire() {
@@ -258,28 +262,49 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 				anyBusy, sawBusy = true, true
 				continue
 			}
-			pol := s.policyFor(t)
 			res.Attempts++
 			began := time.Now()
+			// A stream that delivers its first chunk has answered: that is
+			// the tier's success, recorded then rather than when a long
+			// stream finally ends, so a probe resolves at once.
+			var recorded atomic.Bool
+			recordSuccess := func() {
+				if recorded.CompareAndSwap(false, true) {
+					s.breaker.Record(ctx, key, set, false, adm.Probe)
+					s.metrics.TierOutcome(plan.Alias, tierLabel, "success")
+				}
+			}
 			committed, callErr := runAttempt(ctx, t.Provider, pol.budget, func(actx context.Context, commit func() bool) error {
-				return call(actx, e.Provider, t, commit)
+				return call(actx, e.Provider, t, func() bool {
+					ok := commit()
+					if ok {
+						recordSuccess()
+					}
+					return ok
+				})
 			})
 			e.Release()
 
-			if ctx.Err() != nil && callErr != nil {
+			switch {
+			case recorded.Load():
+			case callErr == nil:
+				recordSuccess()
+			case ctx.Err() != nil:
 				// The client went away: nothing was learnt about the tier.
 				if adm.Probe {
 					s.breaker.AbandonProbe(context.WithoutCancel(ctx), key, set)
 				}
 				return res, committed, callErr
+			case countsAgainstTier(pol, callErr):
+				s.breaker.Record(ctx, key, set, true, adm.Probe)
+				s.metrics.TierOutcome(plan.Alias, tierLabel, "failure")
+			default:
+				// The request itself was the problem: no verdict on the tier.
+				if adm.Probe {
+					s.breaker.AbandonProbe(ctx, key, set)
+				}
+				s.metrics.TierOutcome(plan.Alias, tierLabel, "request_error")
 			}
-			failed := countsAgainstTier(pol, callErr)
-			s.breaker.Record(ctx, key, set, failed, adm.Probe)
-			outcome := "success"
-			if failed {
-				outcome = "failure"
-			}
-			s.metrics.TierOutcome(plan.Alias, strconv.Itoa(t.Tier), outcome)
 
 			if callErr == nil {
 				return res, committed, nil
