@@ -212,7 +212,12 @@ func (s *Server) runChat(ctx context.Context, plan *routing.Plan, req llm.ChatRe
 	var resp llm.ChatResponse
 	res, _, err := s.executePlan(ctx, plan, nil, func(ctx context.Context, p providers.Provider, t routing.Target, _ func() bool) error {
 		var err error
-		resp, err = p.Chat(ctx, upstreamRequest(req, t.UpstreamModel))
+		resp, err = p.Chat(ctx, upstreamRequest(req, t))
+		if err == nil && t.Options.ThinkingOff() {
+			for i := range resp.Choices {
+				resp.Choices[i].Message.Content = stripThinkBlocks(resp.Choices[i].Message.Content)
+			}
+		}
 		return err
 	})
 	if err != nil {
@@ -239,23 +244,66 @@ var errFirstChunkLate = errors.New("first chunk arrived after the time budget")
 // chunk is emitted the response is committed and a later error cannot be
 // recovered (returned with started=true). On total exhaustion the LAST
 // attempted target is returned, same reasoning as runChat.
+//
+// Under a budget, only a chunk carrying text or a tool call counts as the
+// first: the role-only and empty deltas a model sends while it thinks are
+// held back until real content follows, so a tier that thinks past its budget
+// falls through instead of holding the caller silent. Without a budget the
+// first chunk of any kind starts the response, as it always has.
 func (s *Server) runStream(ctx context.Context, plan *routing.Plan, req llm.ChatRequest, sink streamSink) (served execResult, usage llm.Usage, started bool, err error) {
 	served, started, err = s.executePlan(ctx, plan, nil, func(ctx context.Context, p providers.Provider, t routing.Target, commit func() bool) error {
 		attemptStarted := false
 		var attemptUsage llm.Usage
-		err := p.ChatStream(ctx, upstreamRequest(req, t.UpstreamModel), func(c llm.StreamChunk) error {
+		var held []llm.StreamChunk
+		waitForContent := s.policyFor(t).budget > 0
+		var think *thinkFilter
+		if t.Options.ThinkingOff() {
+			think = &thinkFilter{}
+		}
+		emit := func(c llm.StreamChunk) error {
 			if !attemptStarted {
 				if !commit() {
 					return errFirstChunkLate
 				}
 				sink.begin(t)
 				attemptStarted = true
+				for _, h := range held {
+					if err := sink.chunk(h); err != nil {
+						return err
+					}
+				}
+				held = nil
+			}
+			return sink.chunk(c)
+		}
+		err := p.ChatStream(ctx, upstreamRequest(req, t), func(c llm.StreamChunk) error {
+			if think != nil {
+				c.Content = think.push(c.Content)
+				if c.FinishReason != "" {
+					c.Content += think.flush()
+				}
 			}
 			if c.Usage != nil {
 				attemptUsage = *c.Usage
 			}
-			return sink.chunk(c)
+			if waitForContent && !attemptStarted && c.Content == "" && len(c.ToolCalls) == 0 {
+				held = append(held, c)
+				return nil
+			}
+			return emit(c)
 		})
+		if err == nil && think != nil {
+			if tail := think.flush(); tail != "" {
+				err = emit(llm.StreamChunk{Content: tail})
+			}
+		}
+		if err == nil && !attemptStarted && len(held) > 0 {
+			// The stream ended without any content: what it did send is the
+			// whole answer.
+			last := held[len(held)-1]
+			held = held[:len(held)-1]
+			err = emit(last)
+		}
 		usage = attemptUsage
 		return err
 	})
@@ -320,10 +368,11 @@ func writeSSEHeaders(w http.ResponseWriter, t routing.Target, exposeBackend bool
 	w.WriteHeader(http.StatusOK)
 }
 
-// upstreamRequest builds the provider-facing request with the resolved
-// upstream model substituted in.
-func upstreamRequest(req llm.ChatRequest, upstreamModel string) llm.ChatRequest {
+// upstreamRequest builds the provider-facing request for target t: its
+// upstream model substituted in, and its thinking setting applied.
+func upstreamRequest(req llm.ChatRequest, t routing.Target) llm.ChatRequest {
 	out := req
-	out.Model = upstreamModel
+	out.Model = t.UpstreamModel
+	out.ThinkingOff = t.Options.ThinkingOff()
 	return out
 }

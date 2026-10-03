@@ -56,7 +56,15 @@ type TargetOptions struct {
 	// tier. The breaker is per tier, so when the targets of one tier
 	// disagree, each key is taken from the first target that sets it.
 	Breaker *BreakerOptions `json:"breaker,omitempty"`
+	// Thinking "off" asks the target's model not to think: the client's own
+	// reasoning settings are dropped, the provider kind's lowest-thinking
+	// setting is sent instead, and <think> blocks are cut from the reply.
+	// Unset leaves the client's settings as they are.
+	Thinking *string `json:"thinking,omitempty"`
 }
+
+// ThinkingOff reports whether the target asks its model not to think.
+func (o TargetOptions) ThinkingOff() bool { return o.Thinking != nil && *o.Thinking == "off" }
 
 // BreakerOptions are circuit breaker knobs, as stored in a target's options
 // and in the gateway-wide failover defaults. A nil field is unset.
@@ -120,6 +128,9 @@ func ParseTargetOptions(raw []byte) (TargetOptions, error) {
 	}
 	if err := o.Breaker.Validate(); err != nil {
 		return o, fmt.Errorf("invalid options: %w", err)
+	}
+	if o.Thinking != nil && *o.Thinking != "off" {
+		return o, fmt.Errorf(`invalid options: thinking must be "off"`)
 	}
 	return o, nil
 }

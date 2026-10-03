@@ -189,6 +189,12 @@ type ChatRequest struct {
 	// Extra carries unmapped OpenAI request fields verbatim (OpenAI ingress →
 	// OpenAI-compatible upstream). Nil when the request had none.
 	Extra map[string]json.RawMessage
+
+	// ThinkingOff asks the upstream model not to think. The provider adapter
+	// replaces the client's own reasoning fields in Extra with its kind's
+	// lowest-thinking setting. Set by the gateway from the serving target's
+	// options, never by a client.
+	ThinkingOff bool
 }
 
 // Choice is one completion alternative.
