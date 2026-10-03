@@ -405,7 +405,7 @@
           "refId": "A"
         }
       ],
-      "description": "Share of answered synthesis requests served from the cache. Empty until a gateway with the synthesis cache serves an alias that has it switched on."
+      "description": "Share of answered synthesis requests served from the cache; a cache error counts as a miss. Empty until a gateway with the synthesis cache serves an alias that has it switched on."
     }
   ],
   "refresh": "30s",

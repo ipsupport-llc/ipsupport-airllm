@@ -223,14 +223,13 @@ func (m *Metrics) TierFallback(alias, from, to, reason string) {
 	m.tierFallbacks.WithLabelValues(alias, from, to, reason).Inc()
 }
 
-// TierOutcome counts a tier passed over without a call — quarantined
-// (skipped by its open breaker). Attempts that reach the tier go through
-// TierAttempt, which also times them.
-func (m *Metrics) TierOutcome(alias, tier, outcome string) {
+// TierQuarantined counts a tier skipped by its open breaker, without a call.
+// Attempts that reach the tier go through TierAttempt, which also times them.
+func (m *Metrics) TierQuarantined(alias, tier string) {
 	if m == nil {
 		return
 	}
-	m.tierOutcomes.WithLabelValues(alias, tier, outcome).Inc()
+	m.tierOutcomes.WithLabelValues(alias, tier, "quarantined").Inc()
 }
 
 // TierAttempt counts one attempt that reached a tier — success, failure or

@@ -282,7 +282,7 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 			if adm.Skip {
 				quarantined = true
 				moved = append(moved, tierFallback{tier: t.Tier, reason: "quarantined"})
-				s.metrics.TierOutcome(plan.Alias, tierLabel, "quarantined")
+				s.metrics.TierQuarantined(plan.Alias, tierLabel)
 				continue
 			}
 			unavailKey := unavail.Key{Provider: t.Provider, UpstreamModel: t.UpstreamModel}

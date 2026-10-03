@@ -39,13 +39,16 @@ helm-lint:
 		helm lint deploy/helm/airllm -f $$f || exit 1; \
 		helm template airllm deploy/helm/airllm -f $$f >/dev/null || exit 1; \
 	done
+	@cmp deploy/grafana/dashboards/airllm-failover.json deploy/helm/airllm/files/airllm-failover.json || \
+		{ echo "airllm-failover.json: the chart copy differs from deploy/grafana/dashboards" >&2; exit 1; }
 	@echo "helm chart OK"
 
 # Render the chart's PrometheusRule and run its promtool unit tests (Docker).
 rules-test:
 	@tmp=$$(mktemp -d) && \
 	helm template airllm deploy/helm/airllm -f deploy/helm/airllm/ci/full-values.yaml --namespace airllm \
-		-s templates/prometheusrule.yaml | sed -n '/^spec:/,$$p' | tail -n +2 | sed 's/^  //' > $$tmp/rules.yaml && \
+		-s templates/prometheusrule.yaml > $$tmp/rule.yaml && \
+	sed -n '/^spec:/,$$p' $$tmp/rule.yaml | tail -n +2 | sed 's/^  //' > $$tmp/rules.yaml && \
 	cp deploy/prometheus/airllm-rules_test.yaml $$tmp/ && \
 	docker run --rm -v $$tmp:/w -w /w --entrypoint promtool prom/prometheus:v3.5.0 test rules airllm-rules_test.yaml; \
 	rc=$$?; rm -rf $$tmp; exit $$rc
