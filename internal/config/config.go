@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/hkdf"
 )
@@ -42,6 +43,14 @@ type Config struct {
 	SessionKey   []byte // 32-byte HMAC key for signing session cookies
 
 	OIDC OIDCConfig // populated when AuthMode == "oidc"
+
+	// LookupCacheTTL is how long an API-key or alias lookup is trusted
+	// without asking the database again — the longest a revocation or an
+	// alias edit made on another replica takes to apply here.
+	// LookupCacheMaxStale is how old such an answer may get while the
+	// database cannot be reached.
+	LookupCacheTTL      time.Duration
+	LookupCacheMaxStale time.Duration
 }
 
 // Load reads configuration from the environment and validates it.
@@ -75,6 +84,10 @@ func Load() (*Config, error) {
 			return nil, err
 		}
 		c.OIDC = oidcCfg
+	}
+
+	if err := loadLookupCache(c); err != nil {
+		return nil, err
 	}
 
 	key, dev, err := loadMasterKey(c.Env)
@@ -183,6 +196,25 @@ func loadSessionKey(master []byte) ([]byte, error) {
 		return nil, fmt.Errorf("derive session key: %w", err)
 	}
 	return key, nil
+}
+
+// loadLookupCache reads LOOKUP_CACHE_TTL (default 30s) and
+// LOOKUP_CACHE_MAX_STALE (default 5m), Go duration strings.
+func loadLookupCache(c *Config) error {
+	var err error
+	if c.LookupCacheTTL, err = time.ParseDuration(env("LOOKUP_CACHE_TTL", "30s")); err != nil {
+		return fmt.Errorf("LOOKUP_CACHE_TTL: %w", err)
+	}
+	if c.LookupCacheMaxStale, err = time.ParseDuration(env("LOOKUP_CACHE_MAX_STALE", "5m")); err != nil {
+		return fmt.Errorf("LOOKUP_CACHE_MAX_STALE: %w", err)
+	}
+	if c.LookupCacheTTL <= 0 {
+		return fmt.Errorf("LOOKUP_CACHE_TTL must be positive, got %v", c.LookupCacheTTL)
+	}
+	if c.LookupCacheMaxStale < c.LookupCacheTTL {
+		return fmt.Errorf("LOOKUP_CACHE_MAX_STALE (%v) must not be below LOOKUP_CACHE_TTL (%v)", c.LookupCacheMaxStale, c.LookupCacheTTL)
+	}
+	return nil
 }
 
 func env(key, def string) string {

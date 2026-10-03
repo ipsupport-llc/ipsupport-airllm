@@ -28,7 +28,7 @@ prefix and last-4, and shown in full exactly once at creation.
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/healthz` | Liveness |
-| `GET` | `/readyz` | Readiness (datastore reachability) |
+| `GET` | `/readyz` | Readiness (datastore reachability; a Postgres outage shorter than `LOOKUP_CACHE_MAX_STALE` is tolerated) |
 | `GET` | `/` | The SPA console (static, embedded) |
 | `GET` | `/api/auth/mode` | Reports the active auth mode (`local` or `oidc`) and, in OIDC mode, the SSO start URL. The SPA uses this to decide whether to render a password form or an "Sign in with SSO" button. |
 | `POST` | `/auth/login` | Password login (local mode only) → sets an HMAC session cookie. Body: `{"username","password"}` |

@@ -16,6 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/lookupcache"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 )
 
@@ -126,12 +127,26 @@ func orderTier(tier []Target, strategy string, rr uint64, free func(string) int)
 
 // Router resolves models against the catalog and keeps round-robin counters.
 type Router struct {
-	st *store.Store
-	rr sync.Map // alias -> *atomic.Uint64
+	st      *store.Store
+	rr      sync.Map                  // alias -> *atomic.Uint64
+	aliases *lookupcache.Cache[*Plan] // nil = every Resolve asks the database
 }
 
 // NewRouter returns a Router backed by the store.
 func NewRouter(st *store.Store) *Router { return &Router{st: st} }
+
+// NewCachedRouter returns a Router that caches alias plans (see lookupcache).
+// A cached Plan is shared between requests and must not be modified.
+func NewCachedRouter(st *store.Store, opts lookupcache.Options) *Router {
+	return &Router{st: st, aliases: lookupcache.New[*Plan](opts)}
+}
+
+// PurgeCache forgets every cached alias plan.
+func (r *Router) PurgeCache() {
+	if r.aliases != nil {
+		r.aliases.Purge()
+	}
+}
 
 // NextRR returns the next round-robin tick for an alias.
 func (r *Router) NextRR(alias string) uint64 {
@@ -157,13 +172,22 @@ func (r *Router) Resolve(ctx context.Context, model string, allowPassthrough boo
 		// DLPModelScan default above.
 		return &Plan{Alias: model, Strategy: "round_robin", DLPModelScan: true, ExposeBackendHeaders: true, DLPAudioScan: true, Tiers: [][]Target{{t}}}, nil
 	}
+	if r.aliases == nil {
+		return r.resolveAlias(ctx, model)
+	}
+	return r.aliases.Get(ctx, model, func(ctx context.Context) (*Plan, error) {
+		return r.resolveAlias(ctx, model)
+	})
+}
 
+// resolveAlias expands an alias from the catalog into priority tiers.
+func (r *Router) resolveAlias(ctx context.Context, model string) (*Plan, error) {
 	var strategy string
 	var dlpModelScan, exposeBackendHeaders, dlpAudioScan bool
 	err := r.st.PG.QueryRow(ctx, `SELECT strategy, dlp_model_scan, expose_backend_headers, dlp_audio_scan FROM model_aliases WHERE alias = $1`, model).Scan(&strategy, &dlpModelScan, &exposeBackendHeaders, &dlpAudioScan)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("model %q not found", model)
+			return nil, lookupcache.Miss(fmt.Errorf("model %q not found", model))
 		}
 		return nil, err
 	}
@@ -217,7 +241,7 @@ func (r *Router) Resolve(ctx context.Context, model string, allowPassthrough boo
 		return nil, err
 	}
 	if len(tiers) == 0 {
-		return nil, fmt.Errorf("model %q has no available targets", model)
+		return nil, lookupcache.Miss(fmt.Errorf("model %q has no available targets", model))
 	}
 	return &Plan{Alias: model, Strategy: strategy, DLPModelScan: dlpModelScan, ExposeBackendHeaders: exposeBackendHeaders, DLPAudioScan: dlpAudioScan, Tiers: tiers}, nil
 }

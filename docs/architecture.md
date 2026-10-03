@@ -31,6 +31,7 @@ one listener.
 | `apikey` | Key generation, hashing, prefix/last-4 |
 | `policy` | Per-role allowed-model gate |
 | `routing` | Alias catalog → ordered targets (strategy + fallback tiers) |
+| `lookupcache` | In-memory TTL cache for the per-request key and alias lookups, serving the last good answer through a brief database outage |
 | `providers` | Provider registry; OpenAI-compatible HTTP/SSE client; the Vertex AI client and its OAuth2 token source; concurrency semaphores |
 | `openai` / `anthropic` | Protocol codecs (parse, marshal, SSE) |
 | `llm` | Protocol-neutral intermediate representation |
@@ -73,7 +74,16 @@ one listener.
 - **Data-plane** uses API keys whose role policy is snapshotted onto the key
   and automatically re-snapshotted whenever an admin edits a role or a user's
   role list (and on OIDC login, where roles come from IdP claims) — one
-  lookup on the hot path, never stale after a policy change.
+  lookup on the hot path.
+- **Key and alias lookups are cached in memory** (`LOOKUP_CACHE_TTL`, 30 s by
+  default), so a request whose key and alias were seen recently asks Postgres
+  nothing. A revocation, user disable, role edit or alias/provider edit takes
+  effect within the TTL on every replica, and at once on the replica whose
+  admin API made it (any `/api/*` write clears that replica's cache). When
+  Postgres cannot be reached, the last good answer keeps being served up to
+  `LOOKUP_CACHE_MAX_STALE` (5 min) old, so a database restart does not reject
+  every request; keys and aliases never seen by the replica are still
+  rejected. Only positive answers are cached.
 
 ## Storage
 
