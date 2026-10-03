@@ -898,10 +898,10 @@ async function adminProviders(c) {
 }
 
 // isGoogleCloud reports whether a provider record or a form's values describe
-// a Google Cloud kind — Vertex AI or Google Speech — addressed by structured
-// configuration and authenticated by a refreshing token rather than a static
-// key.
-function isGoogleCloud(p) { return p.kind === "vertex" || p.kind === "google-speech"; }
+// a Google Cloud kind — Vertex AI, Google Speech or Google Text-to-Speech —
+// addressed by structured configuration and authenticated by a refreshing
+// token rather than a static key.
+function isGoogleCloud(p) { return p.kind === "vertex" || p.kind === "google-speech" || p.kind === "google-tts"; }
 
 // credentialBadge says what a provider authenticates with. A Google Cloud provider
 // with nothing stored is not missing its key — it authenticates as the pod's
@@ -917,7 +917,7 @@ function editProvider(c, p) {
   const cfg = p.config || {};
   modalForm(p.name ? `Edit provider ${p.name}` : "New provider", [
     { name: "name", label: "Name", value: p.name || "", disabled: !!p.name },
-    { name: "kind", label: "Kind", type: "select", options: ["mock", "openai", "openrouter", "xai", "groq", "ollama", "muse", "anthropic", "vertex", "google-speech"], value: p.kind || "mock" },
+    { name: "kind", label: "Kind", type: "select", options: ["mock", "openai", "openrouter", "xai", "groq", "ollama", "muse", "anthropic", "vertex", "google-speech", "google-tts"], value: p.kind || "mock" },
     { name: "base_url", label: "Base URL (optional override)", value: p.base_url || "" },
     // Google Cloud kinds are addressed by project and location rather than by
     // a URL, and hold an OAuth2 credential rather than a key — so their fields
@@ -930,7 +930,7 @@ function editProvider(c, p) {
     // hiding the credential inputs while ticked, since the admin API rejects a
     // save that both sets and clears.
     { name: "clear_credential", type: "checkbox", value: false, showWhen: () => !!p.has_credential,
-      label: "Remove the stored credential — vertex and google-speech then authenticate as the pod's own identity; other kinds are left without a key" },
+      label: "Remove the stored credential — vertex, google-speech and google-tts then authenticate as the pod's own identity; other kinds are left without a key" },
     { name: "api_key", label: p.has_credential ? "API key (set — blank keeps current)" : "API key", type: "password", value: "", placeholder: p.has_credential ? "•••••• stored" : "", showWhen: (v) => !isGoogleCloud(v) && !v.clear_credential },
     { name: "credential_json", type: "textarea", value: "", showWhen: (v) => isGoogleCloud(v) && !v.clear_credential,
       label: p.has_credential
@@ -1177,7 +1177,7 @@ async function editAlias(c, a) {
       <input id="al-affinity" type="checkbox" ${a.session_affinity ? "checked" : ""} style="width:auto" /></label>
     <label class="field"><span class="lab">Session pin TTL, hours (empty = 4)</span>
       <input id="al-affinity-ttl" type="number" min="0" max="168" step="any" value="${esc(affinityTTLText(a.session_affinity_ttl_s))}" style="width:96px" /></label>
-    <div class="lab" style="color:var(--muted);font-size:.82rem;margin-bottom:.3rem">Targets: same priority = load-balanced tier; higher number = fallback tier. Label is what the header shows — real provider/model names never leak. Options (JSON, optional): <span class="mono">timeout_ms</span> — time budget (first chunk for streams, whole call otherwise); <span class="mono">fallback_on_auth</span> — try the next tier on upstream auth/billing errors; <span class="mono">breaker</span> — circuit breaker for the tier, e.g. <span class="mono">{"enabled":true,"failures":3,"cooldown_ms":60000}</span>; <span class="mono">recognition_models</span> — recognition model per BCP-47 language, e.g. <span class="mono">{"en-US":"telephony"}</span> (google-speech).</div>
+    <div class="lab" style="color:var(--muted);font-size:.82rem;margin-bottom:.3rem">Targets: same priority = load-balanced tier; higher number = fallback tier. Label is what the header shows — real provider/model names never leak. Options (JSON, optional): <span class="mono">timeout_ms</span> — time budget (first chunk for streams, whole call otherwise); <span class="mono">fallback_on_auth</span> — try the next tier on upstream auth/billing errors; <span class="mono">breaker</span> — circuit breaker for the tier, e.g. <span class="mono">{"enabled":true,"failures":3,"cooldown_ms":60000}</span>; <span class="mono">recognition_models</span> — recognition model per BCP-47 language, e.g. <span class="mono">{"en-US":"telephony"}</span> (google-speech); <span class="mono">voices</span> — canonical voice → <span class="mono">{"voice","model"}</span> this target speaks it with; <span class="mono">default_voices</span> — voice per BCP-47 language for unmapped voices, e.g. <span class="mono">{"en":{"voice":"onyx"}}</span>.</div>
     <div id="al-targets"></div>
     <button type="button" class="btn ghost sm" id="al-add" style="margin-top:.3rem">+ Add target</button>
     <div class="row" style="justify-content:flex-end;margin-top:1rem">

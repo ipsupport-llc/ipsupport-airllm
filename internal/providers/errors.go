@@ -19,6 +19,9 @@ const (
 	ErrCodeModelNotFound              = "model_not_found"
 	ErrCodeMultimodalNotSupported     = "multimodal_not_supported"
 	ErrCodeReasoningEffortUnsupported = "reasoning_effort_unsupported"
+	// ErrCodeVoiceNotSupported: the target cannot speak the requested
+	// voice — it has no mapping for it, or its upstream refused the name.
+	ErrCodeVoiceNotSupported = "voice_not_supported"
 )
 
 // ErrCodeProviderAuth marks an upstream that refused the gateway's own
@@ -70,13 +73,20 @@ func IsRetryable(err error) bool {
 // request" (e.g. its context window is too small, or its model was
 // removed) rather than "this request is malformed."
 func IsFallbackWorthy(err error) bool {
-	if IsRetryable(err) {
-		return true
-	}
+	return IsRetryable(err) || IsTargetMismatch(err)
+}
+
+// IsTargetMismatch reports whether err carries one of the known codes that
+// mean "this target cannot serve this request" — its context window is too
+// small, its model was removed, it cannot speak the voice — rather than
+// "this request is malformed". When every target fails that way, the
+// request is one nothing behind the alias can serve: a client error, not
+// an upstream one.
+func IsTargetMismatch(err error) bool {
 	var pe *Error
 	if errors.As(err, &pe) {
 		switch pe.Code {
-		case ErrCodeContextLengthExceeded, ErrCodeModelNotFound, ErrCodeMultimodalNotSupported, ErrCodeReasoningEffortUnsupported:
+		case ErrCodeContextLengthExceeded, ErrCodeModelNotFound, ErrCodeMultimodalNotSupported, ErrCodeReasoningEffortUnsupported, ErrCodeVoiceNotSupported:
 			return true
 		}
 	}
@@ -293,4 +303,29 @@ func httpError(name string, status int, body []byte, header http.Header) error {
 		RetryAfter: retryAfter,
 		Message:    fmt.Sprintf("upstream %s returned %d: %s", name, status, strings.TrimSpace(string(body))),
 	}
+}
+
+// voiceRejection marks a synthesis upstream refusing the voice it was
+// asked for. No vendor gives it a code of its own — OpenAI names the field
+// in error.param, Google says so in an INVALID_ARGUMENT message, speech
+// servers answer 404 for a voice they have not loaded — so the body is
+// searched for the word, and only on the statuses a refused name comes with.
+var voiceRejection = regexp.MustCompile(`(?i)\bvoice`)
+
+// classifyVoiceRejection marks err, an upstream synthesis failure, as
+// ErrCodeVoiceNotSupported when it is the voice that was refused, so the
+// next tier speaks instead of the request failing on a name one provider
+// does not know. The upstream body is in the error's message.
+func classifyVoiceRejection(err error) error {
+	var pe *Error
+	if !errors.As(err, &pe) || pe.Code != "" {
+		return err
+	}
+	switch pe.Status {
+	case http.StatusBadRequest, http.StatusNotFound, http.StatusUnprocessableEntity:
+		if voiceRejection.MatchString(pe.Message) {
+			pe.Code = ErrCodeVoiceNotSupported
+		}
+	}
+	return err
 }

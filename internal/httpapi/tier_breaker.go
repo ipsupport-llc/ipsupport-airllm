@@ -117,8 +117,9 @@ func pick[T any](layers []*routing.BreakerOptions, get func(*routing.BreakerOpti
 
 // countsAgainstTier reports whether a failed attempt says something about the
 // tier's health. A failure the request itself caused — its context is too
-// long for this model, it carries images the model cannot read — does not:
-// the tier would serve the next request fine.
+// long for this model, it carries images the model cannot read, it asks for a
+// voice the provider does not have — does not: the tier would serve the next
+// request fine.
 func countsAgainstTier(pol attemptPolicy, err error) bool {
 	if err == nil || !pol.fallsThrough(err) {
 		return false
@@ -126,7 +127,7 @@ func countsAgainstTier(pol attemptPolicy, err error) bool {
 	var pe *providers.Error
 	if errors.As(err, &pe) {
 		switch pe.Code {
-		case providers.ErrCodeContextLengthExceeded, providers.ErrCodeMultimodalNotSupported, providers.ErrCodeReasoningEffortUnsupported:
+		case providers.ErrCodeContextLengthExceeded, providers.ErrCodeMultimodalNotSupported, providers.ErrCodeReasoningEffortUnsupported, providers.ErrCodeVoiceNotSupported:
 			return false
 		}
 	}

@@ -13,9 +13,9 @@ import (
 )
 
 // defaultBaseURL returns the public base URL for a provider kind; an explicit
-// per-provider base_url overrides it. Vertex and Google Speech are absent on
-// purpose: their addresses are assembled from the provider's configuration,
-// see vertexBaseURL and googleSpeechBaseURL.
+// per-provider base_url overrides it. Vertex and the Google speech kinds are
+// absent on purpose: their addresses are assembled from the provider's
+// configuration, see vertexBaseURL, googleSpeechBaseURL and googleTTSBaseURL.
 func defaultBaseURL(kind string) string {
 	switch kind {
 	case "openai":
@@ -90,6 +90,16 @@ func Build(ctx context.Context, rows []store.ProviderRow, sealer *secrets.Sealer
 			if credErr == nil {
 				liveTokenFingerprints[googleTokenFingerprint(cred)] = true
 			}
+		case KindGoogleTTS:
+			g, err := newGoogleTTSFromRow(ctx, p, cred, credErr)
+			if err != nil {
+				slog.Error("google-tts provider disabled", "provider", p.Name, "err", err)
+				continue
+			}
+			prov = g
+			if credErr == nil {
+				liveTokenFingerprints[googleTokenFingerprint(cred)] = true
+			}
 		default:
 			slog.Warn("provider kind has no client yet; skipping", "provider", p.Name, "kind", p.Kind)
 			continue
@@ -156,6 +166,16 @@ func newGoogleSpeechFromRow(ctx context.Context, p store.ProviderRow, cred []byt
 		return nil, err
 	}
 	return NewGoogleSpeech(p.Name, googleSpeechBaseURL(cfg, p.BaseURL), cfg.Project, cfg.location(), tokens), nil
+}
+
+// newGoogleTTSFromRow builds a Google Text-to-Speech provider from its
+// stored row, with the same refusals as newVertexFromRow.
+func newGoogleTTSFromRow(ctx context.Context, p store.ProviderRow, cred []byte, credErr error) (*GoogleTTS, error) {
+	cfg, tokens, err := googleCloudFromRow(ctx, p, cred, credErr, validateGoogleTTSConfig)
+	if err != nil {
+		return nil, err
+	}
+	return NewGoogleTTS(p.Name, googleTTSBaseURL(cfg, p.BaseURL), cfg.Project, tokens), nil
 }
 
 // googleCloudFromRow is what every Google Cloud kind needs from its row: the

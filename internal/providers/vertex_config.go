@@ -29,13 +29,19 @@ func ValidateProviderConfig(kind string, raw []byte, baseURL string) error {
 			return err
 		}
 		return validateGoogleSpeechConfig(cfg)
+	case KindGoogleTTS:
+		cfg, err := parseGoogleCloudConfig(raw)
+		if err != nil {
+			return err
+		}
+		return validateGoogleTTSConfig(cfg)
 	}
 	return nil
 }
 
-// googleCloudConfig is what a Google Cloud provider — Vertex AI or Google
-// Speech — needs beyond its credential: which cloud project is billed, and
-// which location serves the request.
+// googleCloudConfig is what a Google Cloud provider — Vertex AI, Google
+// Speech or Google Text-to-Speech — needs beyond its credential: which
+// cloud project is billed, and which location serves the request.
 //
 // It is stored as structured configuration rather than folded into base_url
 // because an assembled endpoint URL cannot be taken apart again — the same

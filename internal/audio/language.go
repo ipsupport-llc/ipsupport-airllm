@@ -48,12 +48,12 @@ func PrimaryLanguage(tag string) string {
 // tag first, then its primary language, so a key "en" covers every English
 // region and a key "en-US" wins over it for that region. Keys match in any
 // case.
-func ForLanguage(m map[string]string, tag string) (string, bool) {
+func ForLanguage[V any](m map[string]V, tag string) (V, bool) {
+	var fallback V
 	if len(m) == 0 || tag == "" {
-		return "", false
+		return fallback, false
 	}
 	want, primary := CanonicalLanguage(tag), PrimaryLanguage(tag)
-	var fallback string
 	var found bool
 	for k, v := range m {
 		switch CanonicalLanguage(k) {
@@ -64,6 +64,19 @@ func ForLanguage(m map[string]string, tag string) (string, bool) {
 		}
 	}
 	return fallback, found
+}
+
+// VoiceLanguage reads the language a voice's name starts with: Google
+// names ("en-US-Neural2-F", "cmn-CN-Wavenet-A") and Piper names
+// ("en_US-lessac-medium") both lead with a language and a region. A name
+// that does not ("alloy") has none, and the result is empty.
+func VoiceLanguage(id string) string {
+	parts := strings.SplitN(strings.ReplaceAll(id, "_", "-"), "-", 3)
+	if len(parts) < 3 || len(parts[0]) < 2 || len(parts[0]) > 3 || !isLetters(parts[0]) ||
+		len(parts[1]) != 2 || !isLetters(parts[1]) {
+		return ""
+	}
+	return CanonicalLanguage(parts[0] + "-" + parts[1])
 }
 
 // LanguageFromName turns the language a Whisper-family provider reports —
