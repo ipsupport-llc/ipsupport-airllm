@@ -173,7 +173,7 @@ func (p *Vertex) Chat(ctx context.Context, in llm.ChatRequest) (llm.ChatResponse
 	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
-	body, err := openai.EncodeChatRequest(vertexRequest(in), false)
+	body, err := openai.EncodeChatRequest(vertexRequest(withThinkingOff(p.Kind(), in)), false)
 	if err != nil {
 		return llm.ChatResponse{}, err
 	}
@@ -183,7 +183,7 @@ func (p *Vertex) Chat(ctx context.Context, in llm.ChatRequest) (llm.ChatResponse
 	}
 	resp, err := sendChatCompletions(ctx, p.hc, p.name, p.baseURL, token, body, false)
 	if err != nil {
-		return llm.ChatResponse{}, err
+		return llm.ChatResponse{}, thinkingRejection(p.Kind(), in, err)
 	}
 	defer resp.Body.Close()
 	return openai.DecodeChatResponse(resp.Body)
@@ -193,7 +193,7 @@ func (p *Vertex) Chat(ctx context.Context, in llm.ChatRequest) (llm.ChatResponse
 // cumulative totals on many chunks, and forwarding each one would end an
 // Anthropic-shaped stream early and then repeatedly.
 func (p *Vertex) ChatStream(ctx context.Context, in llm.ChatRequest, yield func(llm.StreamChunk) error) error {
-	body, err := openai.EncodeChatRequest(vertexRequest(in), true)
+	body, err := openai.EncodeChatRequest(vertexRequest(withThinkingOff(p.Kind(), in)), true)
 	if err != nil {
 		return err
 	}
@@ -206,7 +206,7 @@ func (p *Vertex) ChatStream(ctx context.Context, in llm.ChatRequest, yield func(
 	}
 	resp, err := sendChatCompletions(ctx, p.hc, p.name, p.baseURL, token, body, true)
 	if err != nil {
-		return err
+		return thinkingRejection(p.Kind(), in, err)
 	}
 	defer resp.Body.Close()
 

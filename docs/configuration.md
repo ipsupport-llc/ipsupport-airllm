@@ -140,7 +140,7 @@ nothing changes until an operator opts in.
 
 | Field | Default | Meaning |
 |-------|---------|---------|
-| `timeout_ms` | `0` | Time budget per target attempt; `0` means none. For a **streamed** chat it bounds the wait for the **first chunk** (a slow stream that has started is never cut); for a unary chat, a transcription or a speech request it bounds the **whole call**. A breach abandons the attempt and moves to the next target, exactly like a retryable error; the client sees one clean response from whichever target answers. |
+| `timeout_ms` | `0` | Time budget per target attempt; `0` means none. For a **streamed** chat it bounds the wait for the **first chunk carrying text or a tool call** — the role-only and empty deltas a model sends while it thinks do not count, so a tier that thinks past its budget falls through instead of holding the client silent (a slow stream that has started is never cut); for a unary chat, a transcription or a speech request it bounds the **whole call**. A breach abandons the attempt and moves to the next target, exactly like a retryable error; the client sees one clean response from whichever target answers. |
 | `fallback_on_auth` | `false` | Also move on when the upstream refuses the gateway's own credentials or account: HTTP `401`/`403`, and Google `PERMISSION_DENIED`, `UNAUTHENTICATED`, `FAILED_PRECONDITION` or a `BILLING_DISABLED` reason. Off, such an error fails the request as before. |
 
 Per-target `options` is a free-form JSON object: the keys above are the ones
@@ -152,6 +152,38 @@ answer within two seconds and may fail over on an expired credential:
 ```json
 {"priority": 0, "provider": "vertex", "upstream_model": "gemini-flash",
  "options": {"timeout_ms": 2000, "fallback_on_auth": true}}
+```
+
+#### Thinking off (`options.thinking`)
+
+A target's `"thinking": "off"` asks its model not to think: useful where the
+first words matter more than deliberation, such as a voice reply. There is no
+gateway-wide default; only `"off"` is accepted. The gateway then:
+
+- drops the client's own `reasoning_effort`, `reasoning` and `think` fields
+  for that target, so the client never needs to know which tier answers;
+- sends the provider kind's lowest-thinking setting instead:
+
+  | Kind | Sent |
+  |------|------|
+  | `ollama` | `reasoning_effort: "none"` |
+  | `vertex` | `reasoning_effort: "minimal"` (Gemini 3 rejects `"none"`) |
+  | `openrouter` | `reasoning: {"effort": "none"}` |
+  | `xai` | `reasoning_effort: "minimal"` (rejects `"none"`) |
+  | any other | nothing — the client's fields are only dropped |
+
+- cuts leading `<think>…</think>` blocks out of the reply text, streamed or
+  not, for models that write their thoughts inline anyway. A `<think>` after
+  the answer has started is part of the answer and is left alone.
+
+If the upstream still refuses the setting the gateway chose (a `400` naming
+the field it set), that is the tier's configuration, not the client's request:
+the attempt falls through to the next tier. Without the option, the same refusal
+of a client-chosen setting fails the request as before.
+
+```json
+{"priority": 0, "provider": "ollama", "upstream_model": "gemma4:12b",
+ "options": {"timeout_ms": 3000, "thinking": "off"}}
 ```
 
 Every failed attempt logs a `tier attempt failed` line with `alias`, `tier`

@@ -27,15 +27,17 @@ func putAlias(s *Server, alias, body string) *httptest.ResponseRecorder {
 func TestPutAliasRejectsInvalidTargetOptions(t *testing.T) {
 	s := &Server{}
 	cases := map[string]string{
-		"not an object":         `"fast"`,
-		"array":                 `[1]`,
-		"negative budget":       `{"timeout_ms":-1}`,
-		"budget of wrong type":  `{"timeout_ms":"2s"}`,
-		"flag of wrong type":    `{"fallback_on_auth":"yes"}`,
-		"breaker not an object": `{"breaker":"on"}`,
-		"breaker zero failures": `{"breaker":{"failures":0}}`,
-		"breaker rate over one": `{"breaker":{"error_rate":1.5}}`,
-		"breaker zero cooldown": `{"breaker":{"cooldown_ms":0}}`,
+		"not an object":           `"fast"`,
+		"array":                   `[1]`,
+		"negative budget":         `{"timeout_ms":-1}`,
+		"budget of wrong type":    `{"timeout_ms":"2s"}`,
+		"flag of wrong type":      `{"fallback_on_auth":"yes"}`,
+		"breaker not an object":   `{"breaker":"on"}`,
+		"breaker zero failures":   `{"breaker":{"failures":0}}`,
+		"breaker rate over one":   `{"breaker":{"error_rate":1.5}}`,
+		"breaker zero cooldown":   `{"breaker":{"cooldown_ms":0}}`,
+		"thinking other than off": `{"thinking":"on"}`,
+		"thinking of wrong type":  `{"thinking":false}`,
 	}
 	for name, opts := range cases {
 		t.Run(name, func(t *testing.T) {

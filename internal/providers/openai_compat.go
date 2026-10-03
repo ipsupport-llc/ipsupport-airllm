@@ -67,13 +67,13 @@ func (p *OpenAICompat) Chat(ctx context.Context, in llm.ChatRequest) (llm.ChatRe
 	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
-	body, err := openai.EncodeChatRequest(withoutToolCallExtras(in), false)
+	body, err := openai.EncodeChatRequest(withoutToolCallExtras(withThinkingOff(p.kind, in)), false)
 	if err != nil {
 		return llm.ChatResponse{}, err
 	}
 	resp, err := sendChatCompletions(ctx, p.hc, p.name, p.baseURL, p.apiKey, body, false)
 	if err != nil {
-		return llm.ChatResponse{}, err
+		return llm.ChatResponse{}, thinkingRejection(p.kind, in, err)
 	}
 	defer resp.Body.Close()
 	return openai.DecodeChatResponse(resp.Body)
@@ -81,7 +81,7 @@ func (p *OpenAICompat) Chat(ctx context.Context, in llm.ChatRequest) (llm.ChatRe
 
 // ChatStream streams an upstream call, translating SSE chunks into the IR.
 func (p *OpenAICompat) ChatStream(ctx context.Context, in llm.ChatRequest, yield func(llm.StreamChunk) error) error {
-	body, err := openai.EncodeChatRequest(withoutToolCallExtras(in), true)
+	body, err := openai.EncodeChatRequest(withoutToolCallExtras(withThinkingOff(p.kind, in)), true)
 	if err != nil {
 		return err
 	}
@@ -90,7 +90,7 @@ func (p *OpenAICompat) ChatStream(ctx context.Context, in llm.ChatRequest, yield
 	}
 	resp, err := sendChatCompletions(ctx, p.hc, p.name, p.baseURL, p.apiKey, body, true)
 	if err != nil {
-		return err
+		return thinkingRejection(p.kind, in, err)
 	}
 	defer resp.Body.Close()
 
