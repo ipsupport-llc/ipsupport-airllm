@@ -113,6 +113,12 @@ Schema migrations are embedded and applied automatically on boot, in order.
   its options say so — on an upstream auth or billing refusal. A client that
   hangs up ends the request; it is never counted as a target failure. See
   [Failover policy](configuration.md#failover-policy-getput-apiadminfailover).
+- Each tier of an alias can sit behind a circuit breaker keyed by (alias,
+  tier). A tier that keeps failing is opened for a growing cooldown and
+  skipped without a call; one probe after the cooldown closes or re-opens it.
+  Breaker state lives in Redis so every replica agrees, with per-replica
+  in-memory state as the fallback while Redis is unreachable. See
+  [Circuit breaker](configuration.md#circuit-breaker).
 
 ## Hot-reload
 
@@ -130,7 +136,9 @@ Two surfaces, one source of truth each:
   histograms (`airllm_component_duration_seconds{component=routing|limits|dlp|provider}`)
   give per-stage latency breakdowns. `airllm_dlp_model_requests_inflight` tracks
   in-flight BERT scans — the primary saturation indicator when the DLP sidecar
-  is the bottleneck.
+  is the bottleneck. Tier failover is covered by `airllm_breaker_state`,
+  `airllm_breaker_transitions_total`, `airllm_tier_fallbacks_total` and
+  `airllm_tier_outcomes_total` (see [Circuit breaker](configuration.md#circuit-breaker)).
 
 - **Grafana dashboards** — JSON in `deploy/grafana/dashboards/`, datasource
   wired via a `${DS_PROMETHEUS}` template variable (no hardcoded UID). Bring up

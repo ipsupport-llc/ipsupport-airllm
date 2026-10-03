@@ -162,6 +162,68 @@ request header). The usage ledger records the serving `tier` (again the
 configured priority, so it stays meaningful when another tier is disabled) and
 the number of upstream `attempts` per request.
 
+#### Circuit breaker
+
+A tier that keeps failing can be quarantined so requests stop paying its
+timeout. The breaker is keyed by **(alias, tier)** — the tier being the
+configured priority — not by provider: the same provider behind another
+alias, with its own budgets, is unaffected.
+
+- **Opening.** A tier opens after `failures` consecutive failures, or when
+  more than `error_rate` of the requests in the current `window_ms` failed
+  once `min_requests` were seen in it. Only failures that say something about
+  the tier count: retryable errors, timeouts, model-not-found and (with
+  `fallback_on_auth`) auth refusals. A request the tier cannot serve because
+  of the request itself — context too long, images or reasoning the model
+  does not take — does not count, and neither does a client hanging up.
+- **Open.** Every request skips the tier at once, without a call. When every
+  tier a request could use is open it fails fast with `503`.
+- **Probe.** When the cooldown runs out exactly one request — across all
+  replicas — is let through. Success closes the tier; failure re-opens it
+  with the cooldown doubled, up to `max_cooldown_ms`. Once the tier has stayed
+  closed for `stable_ms`, the next trip starts at `cooldown_ms` again.
+- **Release.** `POST /api/admin/aliases/{alias}/tiers/{tier}/release` (or
+  **Release** in the console's tier-health view, **Admin → Aliases → Health**)
+  closes a tier by hand and forgets its history.
+
+The breaker is **off** unless switched on, so existing aliases see no change.
+Switch it on for every tier with the gateway-wide default, or per tier in a
+target's options. Every knob below can be set in both places; a tier's own
+value wins, then the gateway-wide one, then the built-in default. A tier with
+several load-balanced targets takes each key from the first of them (by
+provider, then upstream model) that sets it.
+
+| Key (`breaker.*`) | Default | Meaning |
+|-------------------|---------|---------|
+| `enabled` | `false` | Guard the tier with the breaker. |
+| `failures` | `3` | Consecutive failures that open the tier. |
+| `error_rate` | `0.5` | Open when more than this fraction of the window's requests failed. |
+| `window_ms` | `30000` | Length of the error-rate window. |
+| `min_requests` | `5` | Requests the window needs before `error_rate` applies. |
+| `cooldown_ms` | `60000` | Cooldown of the first trip. |
+| `max_cooldown_ms` | `1800000` | Ceiling the doubling cooldown stops at. |
+| `stable_ms` | `600000` | Closed this long, the cooldown resets to `cooldown_ms`. |
+
+```json
+{"priority": 0, "provider": "vertex", "upstream_model": "gemini-flash",
+ "options": {"timeout_ms": 2000, "breaker": {"enabled": true}}}
+```
+
+State is shared by every replica through Redis. If Redis cannot be reached a
+replica keeps serving on its own in-memory breaker state and goes back to the
+shared state when Redis answers again.
+
+Transitions log `tier breaker opened` (with `reason`: `consecutive_failures`,
+`error_rate` or `probe_failed`, `cooldown_ms` and `open_until`), `tier breaker
+probe` and `tier breaker closed` (with `via`: `probe` or `manual`). Metrics:
+
+| Metric | Labels | Meaning |
+|--------|--------|---------|
+| `airllm_breaker_state` | `alias`, `tier` | `0` closed, `1` open, `2` half-open (probing); read from the shared state at scrape time. |
+| `airllm_breaker_transitions_total` | `alias`, `tier`, `to` | State changes, counted once by the replica that made them. |
+| `airllm_tier_fallbacks_total` | `alias`, `from_tier`, `to_tier`, `reason` | Requests that moved past `from_tier`, served in the end by `to_tier` (`none` if nothing served them); `reason` is a failure reason or `quarantined`. |
+| `airllm_tier_outcomes_total` | `alias`, `tier`, `outcome` | Attempts per tier: `success`, `failure` or `quarantined` (skipped while open). |
+
 ## Provider kinds
 
 Providers live in the `providers` table and are edited from the admin console

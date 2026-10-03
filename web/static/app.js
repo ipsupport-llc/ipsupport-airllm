@@ -1055,6 +1055,47 @@ function parseTargetOptions(text) {
   return v;
 }
 
+// tierHealthRows renders the breaker of each tier from the alias health
+// endpoint as table rows. An open or probing tier gets a Release button.
+// Top-level so web/tierhealth.test.mjs can extract it.
+function tierHealthRows(tiers) {
+  const badge = { closed: "active", open: "revoked", half_open: "admin" };
+  const fmt = (s) => (s ? new Date(s).toLocaleString() : "—");
+  return (tiers || []).map((t) => {
+    const state = t.breaker_enabled ? t.state : "off";
+    const quarantined = t.state === "open" || t.state === "half_open";
+    return `<tr><td class="mono">p${Number(t.tier)}</td>
+      <td class="mono">${(t.targets || []).map((x) => `${esc(x.provider)}/${esc(x.upstream_model)}`).join(", ") || "—"}</td>
+      <td><span class="badge ${badge[state] || "neutral"}">${esc(state === "half_open" ? "probing" : state)}</span></td>
+      <td>${esc(quarantined ? t.reason || "" : "") || "—"}</td>
+      <td>${quarantined ? esc(fmt(t.open_until)) : "—"}</td>
+      <td>${t.cooldown_ms ? `${Math.round(Number(t.cooldown_ms) / 1000)}s` : "—"}</td>
+      <td style="text-align:right">${quarantined ? `<button class="btn ghost sm" data-release="${Number(t.tier)}">Release</button>` : ""}</td></tr>`;
+  });
+}
+
+async function showTierHealth(alias) {
+  const r = await api("GET", `/api/admin/aliases/${encodeURIComponent(alias)}/health`);
+  if (!r.ok) { toast("Failed to load tier health", "err"); return; }
+  const bg = document.createElement("div");
+  bg.className = "modal-bg";
+  bg.innerHTML = `<div class="modal" style="max-width:820px">
+    ${panelTable("Tier health — " + alias, ["Tier", "Targets", "Breaker", "Reason", "Open until", "Cooldown", ""], tierHealthRows(r.data.tiers))}
+    <div class="row" style="justify-content:flex-end;margin-top:1rem">
+      <button type="button" class="btn ghost" id="th-refresh">Refresh</button>
+      <button type="button" class="btn" id="th-close">Close</button></div></div>`;
+  document.body.appendChild(bg);
+  const close = () => bg.remove();
+  $("#th-close", bg).addEventListener("click", close);
+  $("#th-refresh", bg).addEventListener("click", () => { close(); showTierHealth(alias); });
+  bg.querySelectorAll("[data-release]").forEach((b) => b.addEventListener("click", async () => {
+    const tier = b.getAttribute("data-release");
+    if (!confirm(`Release tier p${tier} of ${alias}? Requests will reach it again at once.`)) return;
+    const x = await api("POST", `/api/admin/aliases/${encodeURIComponent(alias)}/tiers/${tier}/release`);
+    if (x.ok) { toast("Released"); close(); showTierHealth(alias); } else toast("Release failed", "err");
+  }));
+}
+
 async function adminAliases(c) {
   const r = await api("GET", "/api/admin/aliases");
   const al = (r.data && r.data.aliases) || [];
@@ -1064,9 +1105,12 @@ async function adminAliases(c) {
         <td>${esc(a.strategy || "round_robin")}</td>
         <td>${a.dlp_model_scan ? `<span class="badge neutral">on</span>` : `<span class="badge revoked">off</span>`}</td>
         <td class="mono">${(a.targets || []).map((t) => `${esc(t.provider)}/${esc(t.upstream_model)} (p${t.priority}${t.options && t.options.timeout_ms ? `, ${Number(t.options.timeout_ms)}ms` : ""})`).join(", ") || "—"}</td>
-        <td style="text-align:right"><button class="btn ghost sm" data-edit='${esc(JSON.stringify(a))}'>Edit</button>
+        <td style="text-align:right"><button class="btn ghost sm" data-health="${esc(a.alias)}">Health</button>
+          <button class="btn ghost sm" data-edit='${esc(JSON.stringify(a))}'>Edit</button>
           <button class="btn danger sm" data-del="${esc(a.alias)}">Delete</button></td></tr>`));
   $("#new-alias").addEventListener("click", () => editAlias(c, {}));
+  document.querySelectorAll("[data-health]").forEach((b) =>
+    b.addEventListener("click", () => showTierHealth(b.getAttribute("data-health"))));
   document.querySelectorAll("[data-edit]").forEach((b) =>
     b.addEventListener("click", () => editAlias(c, JSON.parse(b.getAttribute("data-edit")))));
   document.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", async () => {
@@ -1110,7 +1154,7 @@ async function editAlias(c, a) {
       <input id="al-expose" type="checkbox" ${a.expose_backend_headers ? "checked" : ""} style="width:auto" /></label>
     <label class="field"><span class="lab">DLP scan on audio transcripts/input (STT/TTS)</span>
       <input id="al-dlpaudio" type="checkbox" ${a.dlp_audio_scan === false ? "" : "checked"} style="width:auto" /></label>
-    <div class="lab" style="color:var(--muted);font-size:.82rem;margin-bottom:.3rem">Targets: same priority = load-balanced tier; higher number = fallback tier. Label is what the header shows — real provider/model names never leak. Options (JSON, optional): <span class="mono">timeout_ms</span> — time budget (first chunk for streams, whole call otherwise); <span class="mono">fallback_on_auth</span> — try the next tier on upstream auth/billing errors.</div>
+    <div class="lab" style="color:var(--muted);font-size:.82rem;margin-bottom:.3rem">Targets: same priority = load-balanced tier; higher number = fallback tier. Label is what the header shows — real provider/model names never leak. Options (JSON, optional): <span class="mono">timeout_ms</span> — time budget (first chunk for streams, whole call otherwise); <span class="mono">fallback_on_auth</span> — try the next tier on upstream auth/billing errors; <span class="mono">breaker</span> — circuit breaker for the tier, e.g. <span class="mono">{"enabled":true,"failures":3,"cooldown_ms":60000}</span>.</div>
     <div id="al-targets"></div>
     <button type="button" class="btn ghost sm" id="al-add" style="margin-top:.3rem">+ Add target</button>
     <div class="row" style="justify-content:flex-end;margin-top:1rem">
