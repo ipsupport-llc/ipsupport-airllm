@@ -23,6 +23,8 @@ Read by `internal/config` at startup. Invalid values fail fast.
 | `AIRLLM_ADMIN_USERNAME` | `admin` | no | Username for the bootstrap admin account created on first run. |
 | `AIRLLM_ADMIN_PASSWORD` | — | no | Password for the bootstrap admin. If unset, a random password is generated on first boot, written to `/tmp/airllm-bootstrap-admin-password` inside the container (never logged, since this process's logs are shipped to centralized storage), and then permanently stored — it is never regenerated. If set, the value is hashed and stored silently and **never logged**. Has no effect once an admin account already exists. |
 | `AIRLLM_MASTER_KEY` | — | in `prod` | Base64-encoded **32-byte** AES key that seals provider credentials at rest. **Required when `ENV=prod`.** In `dev`, a random key is generated on first boot and persisted in the `settings` table (per install, not a shared hardcoded value) so sealed credentials survive restarts without configuration. |
+| `LOOKUP_CACHE_TTL` | `30s` | no | How long an API-key or alias lookup is trusted without asking Postgres again (Go duration). The longest a revocation or alias edit made on another replica takes to apply. Must be positive. |
+| `LOOKUP_CACHE_MAX_STALE` | `5m` | no | How old a cached key or alias may get while Postgres is unreachable before it stops being served (Go duration, not below `LOOKUP_CACHE_TTL`). `/readyz` also stays ready through a Postgres outage this long. |
 | `CAPTURE_BLOB_DIR` | `capture-blobs` | no | Filesystem directory for the capture blob store (relative to the working directory by default). The process runs as a non-root user, so point this at a writable path (compose uses `/tmp/airllm-captures`). Back it with a volume or object store on deploy. |
 
 ### Compose-only

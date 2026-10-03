@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 )
 
 // setBase sets a minimal valid environment (only DATABASE_URL is required).
@@ -31,6 +32,8 @@ func setBase(t *testing.T) {
 	t.Setenv("OIDC_ROLES_CLAIM", "")
 	t.Setenv("OIDC_SCOPES", "")
 	t.Setenv("OIDC_ROLE_MAP", "")
+	t.Setenv("LOOKUP_CACHE_TTL", "")
+	t.Setenv("LOOKUP_CACHE_MAX_STALE", "")
 }
 
 func TestLoadDefaults(t *testing.T) {
@@ -329,5 +332,45 @@ func TestParseRoleMapLogsDuplicateKey(t *testing.T) {
 	logged := buf.String()
 	if !strings.Contains(logged, "admin") || !strings.Contains(logged, "airllm_admin") || !strings.Contains(logged, "airllm_user") {
 		t.Errorf("expected a warning naming the idp_role and both values, got log output: %s", logged)
+	}
+}
+
+func TestLookupCacheDefaults(t *testing.T) {
+	setBase(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.LookupCacheTTL != 30*time.Second || c.LookupCacheMaxStale != 5*time.Minute {
+		t.Errorf("lookup cache = %v/%v, want 30s/5m", c.LookupCacheTTL, c.LookupCacheMaxStale)
+	}
+}
+
+func TestLookupCacheFromEnv(t *testing.T) {
+	setBase(t)
+	t.Setenv("LOOKUP_CACHE_TTL", "10s")
+	t.Setenv("LOOKUP_CACHE_MAX_STALE", "2m")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.LookupCacheTTL != 10*time.Second || c.LookupCacheMaxStale != 2*time.Minute {
+		t.Errorf("lookup cache = %v/%v, want 10s/2m", c.LookupCacheTTL, c.LookupCacheMaxStale)
+	}
+}
+
+func TestLookupCacheRejectsBadValues(t *testing.T) {
+	for _, tc := range []struct{ ttl, stale string }{
+		{"soon", ""},    // not a duration
+		{"0s", ""},      // TTL must be positive
+		{"1m", "30s"},   // MaxStale below TTL
+		{"", "forever"}, // not a duration
+	} {
+		setBase(t)
+		t.Setenv("LOOKUP_CACHE_TTL", tc.ttl)
+		t.Setenv("LOOKUP_CACHE_MAX_STALE", tc.stale)
+		if _, err := Load(); err == nil {
+			t.Errorf("TTL=%q MAX_STALE=%q: want an error", tc.ttl, tc.stale)
+		}
 	}
 }

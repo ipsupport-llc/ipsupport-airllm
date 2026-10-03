@@ -2,10 +2,14 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/apikey"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/lookupcache"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/policy"
 )
 
@@ -39,7 +43,17 @@ func (s *Server) requireAPIKey(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// lookupKey resolves a bearer token through the key cache (see
+// internal/lookupcache): a hit asks the database nothing, a revoked or
+// unknown key is a definitive miss.
 func (s *Server) lookupKey(ctx context.Context, token string) (authedKey, error) {
+	hash := apikey.Hash(token)
+	return s.keyCache.Get(ctx, hash, func(ctx context.Context) (authedKey, error) {
+		return s.loadKey(ctx, hash)
+	})
+}
+
+func (s *Server) loadKey(ctx context.Context, hash string) (authedKey, error) {
 	var ak authedKey
 	var raw []byte
 	// Joined against users so a disabled owner's key stops authenticating
@@ -51,13 +65,17 @@ func (s *Server) lookupKey(ctx context.Context, token string) (authedKey, error)
 		FROM api_keys k
 		JOIN users u ON u.id = k.user_id
 		WHERE k.hash = $1 AND k.status = 'active' AND NOT u.disabled`,
-		apikey.Hash(token),
+		hash,
 	).Scan(&ak.KeyID, &ak.UserID, &raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return authedKey{}, lookupcache.Miss(err)
+	}
 	if err != nil {
 		return authedKey{}, err
 	}
 	ak.Policy = policy.Parse(raw)
-	// Best-effort last-used stamp; ignore failures.
+	// Best-effort last-used stamp; ignore failures. Stamped when the key is
+	// (re)loaded, so with the cache it is accurate to the cache TTL.
 	_, _ = s.st.PG.Exec(ctx, `UPDATE api_keys SET last_used_at = now() WHERE id = $1`, ak.KeyID)
 	return ak, nil
 }

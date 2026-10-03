@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/config"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/ledger"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/limits"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/lookupcache"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/metrics"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/modelpool"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/pricing"
@@ -42,6 +44,7 @@ type Deps struct {
 	OIDC      oidcHandler        // nil when not using OIDC
 	Capture   *capture.Pipeline  // nil disables capture
 	Blob      blob.Store         // for audit transcript reads; nil disables body fetch
+	Now       func() time.Time   // clock for the lookup caches; nil = time.Now (tests inject)
 }
 
 // Server is the top-level HTTP handler.
@@ -55,6 +58,10 @@ type Server struct {
 	secondpassPtr atomic.Pointer[secondpassConfig]   // swapped on secondpass config changes
 	failoverPtr   atomic.Pointer[failoverConfig]     // swapped on failover config changes
 	router        *routing.Router
+	keyCache      *lookupcache.Cache[authedKey] // API keys by hash; nil = uncached
+	now           func() time.Time
+	pgSeenUp      atomic.Bool  // a /readyz ping has reached Postgres at least once
+	pgDownSince   atomic.Int64 // unix nanos of the first failed /readyz ping; 0 = up
 	limiter       *limits.Limiter
 	pricing       *pricing.Table
 	sealer        *secrets.Sealer
@@ -78,11 +85,20 @@ type Server struct {
 
 // NewServer builds the routed handler.
 func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
+	now := deps.Now
+	if now == nil {
+		now = time.Now
+	}
+	cacheOpts := func(name string) lookupcache.Options {
+		return lookupcache.Options{Name: name, TTL: cfg.LookupCacheTTL, MaxStale: cfg.LookupCacheMaxStale, Now: now}
+	}
 	s := &Server{
 		cfg:          cfg,
 		st:           st,
 		mux:          http.NewServeMux(),
-		router:       routing.NewRouter(st),
+		router:       routing.NewCachedRouter(st, cacheOpts("aliases")),
+		keyCache:     lookupcache.New[authedKey](cacheOpts("api keys")),
+		now:          now,
 		limiter:      deps.Limiter,
 		pricing:      deps.Pricing,
 		sealer:       deps.Sealer,
@@ -198,6 +214,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 	s.mux.ServeHTTP(rec, r.WithContext(withClientSession(r.Context(), r)))
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && strings.HasPrefix(r.URL.Path, "/api/") && rec.status/100 == 2 {
+		// Any successful control-plane write may have revoked a key, disabled
+		// a user, changed a role's policy, or edited an alias or a provider.
+		// Rather than track which, forget every cached lookup so the change
+		// applies on this instance at once; other instances catch up within
+		// the TTL. Only successes count: a write that failed changed nothing,
+		// and during an outage every write fails, so the cache the outage is
+		// being served from is never thrown away by one.
+		s.purgeLookupCaches()
+	}
 	switch r.URL.Path {
 	case "/metrics", "/healthz", "/readyz":
 		// infra endpoints — don't pollute request metrics
@@ -250,10 +276,30 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// purgeLookupCaches forgets every cached API key and alias plan.
+func (s *Server) purgeLookupCaches() {
+	s.keyCache.Purge()
+	if s.router != nil {
+		s.router.PurgeCache()
+	}
+}
+
+// handleReady reports the pod ready while it can serve. A Postgres outage
+// shorter than the lookup caches' max staleness does not count: known keys
+// and aliases are still served from memory, and taking every replica out of
+// the Service would turn a database restart into a full outage. A pod that
+// has never reached Postgres has nothing cached and gets no such grace.
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	if err := s.st.PG.Ping(r.Context()); err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "postgres unavailable"})
-		return
+		now := s.now().UnixNano()
+		s.pgDownSince.CompareAndSwap(0, now)
+		if !s.pgSeenUp.Load() || time.Duration(now-s.pgDownSince.Load()) >= s.cfg.LookupCacheMaxStale {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "postgres unavailable"})
+			return
+		}
+	} else {
+		s.pgSeenUp.Store(true)
+		s.pgDownSince.Store(0)
 	}
 	if err := s.st.RDB.Ping(r.Context()).Err(); err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "redis unavailable"})
