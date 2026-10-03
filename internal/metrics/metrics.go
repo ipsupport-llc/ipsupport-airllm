@@ -25,6 +25,10 @@ type Metrics struct {
 	rateLimited  *prometheus.CounterVec
 	dlpSkipped   *prometheus.CounterVec
 	dlpDuration  prometheus.Histogram
+
+	breakerTransitions *prometheus.CounterVec
+	tierFallbacks      *prometheus.CounterVec
+	tierOutcomes       *prometheus.CounterVec
 }
 
 // New builds and registers the collectors on a fresh registry.
@@ -58,8 +62,18 @@ func New() *Metrics {
 			Name: "airllm_dlp_model_duration_seconds", Help: "DLP model (BERT) scan duration.",
 			Buckets: prometheus.DefBuckets,
 		}),
+		breakerTransitions: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "airllm_breaker_transitions_total", Help: "Tier circuit breaker state changes by alias, tier and new state.",
+		}, []string{"alias", "tier", "to"}),
+		tierFallbacks: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "airllm_tier_fallbacks_total", Help: "Requests that moved past a tier, by origin tier, the tier that served (none if nothing did) and reason.",
+		}, []string{"alias", "from_tier", "to_tier", "reason"}),
+		tierOutcomes: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "airllm_tier_outcomes_total", Help: "Tier attempts by alias, tier and outcome (success, failure, request_error, quarantined).",
+		}, []string{"alias", "tier", "outcome"}),
 	}
-	m.reg.MustRegister(m.httpRequests, m.httpDuration, m.component, m.tokens, m.cost, m.rateLimited, m.dlpSkipped, m.dlpDuration)
+	m.reg.MustRegister(m.httpRequests, m.httpDuration, m.component, m.tokens, m.cost, m.rateLimited, m.dlpSkipped, m.dlpDuration,
+		m.breakerTransitions, m.tierFallbacks, m.tierOutcomes)
 	return m
 }
 
@@ -184,4 +198,62 @@ func (m *Metrics) RegisterWebhookDropped(fn func() float64) {
 	m.reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 		Name: "airllm_webhook_dropped", Help: "Webhook deliveries dropped due to a full buffer.",
 	}, fn))
+}
+
+// BreakerTransition counts a tier breaker moving to state to.
+func (m *Metrics) BreakerTransition(alias, tier, to string) {
+	if m == nil {
+		return
+	}
+	m.breakerTransitions.WithLabelValues(alias, tier, to).Inc()
+}
+
+// TierFallback counts a request moving past tier from, served in the end by
+// tier to ("none" when no tier served it), for reason.
+func (m *Metrics) TierFallback(alias, from, to, reason string) {
+	if m == nil {
+		return
+	}
+	m.tierFallbacks.WithLabelValues(alias, from, to, reason).Inc()
+}
+
+// TierOutcome counts one attempt at a tier: success, failure, request_error
+// (no verdict on the tier) or quarantined (skipped by its open breaker).
+func (m *Metrics) TierOutcome(alias, tier, outcome string) {
+	if m == nil {
+		return
+	}
+	m.tierOutcomes.WithLabelValues(alias, tier, outcome).Inc()
+}
+
+// BreakerState is one tier breaker's state as read at scrape time.
+type BreakerState struct {
+	Alias, Tier string
+	// Value is 0 closed, 1 open, 2 half-open (probing).
+	Value float64
+}
+
+// RegisterBreakerStates registers the airllm_breaker_state gauge, read from
+// fn on every scrape. Reading the shared state then, rather than tracking
+// transitions, keeps every replica's answer current whichever replica made
+// the change.
+func (m *Metrics) RegisterBreakerStates(fn func() []BreakerState) {
+	if m == nil {
+		return
+	}
+	m.reg.MustRegister(&breakerStateCollector{fn: fn, desc: prometheus.NewDesc(
+		"airllm_breaker_state", "Tier circuit breaker state: 0 closed, 1 open, 2 half-open.", []string{"alias", "tier"}, nil)})
+}
+
+type breakerStateCollector struct {
+	fn   func() []BreakerState
+	desc *prometheus.Desc
+}
+
+func (c *breakerStateCollector) Describe(ch chan<- *prometheus.Desc) { ch <- c.desc }
+
+func (c *breakerStateCollector) Collect(ch chan<- prometheus.Metric) {
+	for _, st := range c.fn() {
+		ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, st.Value, st.Alias, st.Tier)
+	}
 }

@@ -29,11 +29,14 @@ const (
 // classifyUpstreamErr maps an executor error to an HTTP status: all-busy is a
 // 429 (back off and retry); a recognized context-length/model-not-found/
 // multimodal-not-supported/reasoning-effort-unsupported error that still
-// failed on every fallback tier is a 400 the client can act on; anything
-// else is a 502 upstream error.
+// failed on every fallback tier is a 400 the client can act on; every tier
+// quarantined by its breaker is a 503; anything else is a 502 upstream error.
 func classifyUpstreamErr(err error) (int, string) {
 	if errors.Is(err, errAllBusy) {
 		return http.StatusTooManyRequests, "rate_limit_error"
+	}
+	if errors.Is(err, errAllQuarantined) {
+		return http.StatusServiceUnavailable, "upstream_error"
 	}
 	var pe *providers.Error
 	if errors.As(err, &pe) {
