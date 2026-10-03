@@ -79,11 +79,13 @@ one listener.
   default), so a request whose key and alias were seen recently asks Postgres
   nothing. A revocation, user disable, role edit or alias/provider edit takes
   effect within the TTL on every replica, and at once on the replica whose
-  admin API made it (any `/api/*` write clears that replica's cache). When
-  Postgres cannot be reached, the last good answer keeps being served up to
-  `LOOKUP_CACHE_MAX_STALE` (5 min) old, so a database restart does not reject
-  every request; keys and aliases never seen by the replica are still
-  rejected. Only positive answers are cached.
+  admin API made it (any successful `/api/*` write clears that replica's
+  cache). When Postgres cannot be reached, the last good answer keeps being
+  served up to `LOOKUP_CACHE_MAX_STALE` (5 min) old, so a database restart
+  does not reject every request; keys and aliases never seen by the replica
+  are still rejected. Only positive answers are cached. One edge: a change
+  made on another replica less than a TTL before Postgres goes down reaches
+  this replica only once Postgres is back (or the answer passes max stale).
 
 ## Storage
 

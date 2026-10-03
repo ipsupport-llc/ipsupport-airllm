@@ -58,8 +58,9 @@ type Server struct {
 	secondpassPtr atomic.Pointer[secondpassConfig]   // swapped on secondpass config changes
 	failoverPtr   atomic.Pointer[failoverConfig]     // swapped on failover config changes
 	router        *routing.Router
-	keys          *lookupcache.Cache[authedKey] // API keys by hash; nil = uncached
+	keyCache      *lookupcache.Cache[authedKey] // API keys by hash; nil = uncached
 	now           func() time.Time
+	pgSeenUp      atomic.Bool  // a /readyz ping has reached Postgres at least once
 	pgDownSince   atomic.Int64 // unix nanos of the first failed /readyz ping; 0 = up
 	limiter       *limits.Limiter
 	pricing       *pricing.Table
@@ -96,7 +97,7 @@ func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 		st:           st,
 		mux:          http.NewServeMux(),
 		router:       routing.NewCachedRouter(st, cacheOpts("aliases")),
-		keys:         lookupcache.New[authedKey](cacheOpts("api keys")),
+		keyCache:     lookupcache.New[authedKey](cacheOpts("api keys")),
 		now:          now,
 		limiter:      deps.Limiter,
 		pricing:      deps.Pricing,
@@ -213,11 +214,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 	s.mux.ServeHTTP(rec, r.WithContext(withClientSession(r.Context(), r)))
-	if r.Method != http.MethodGet && r.Method != http.MethodHead && strings.HasPrefix(r.URL.Path, "/api/") {
-		// Any control-plane write may have revoked a key, disabled a user,
-		// changed a role's policy, or edited an alias or a provider. Rather
-		// than track which, forget every cached lookup so the change applies
-		// on this instance at once; other instances catch up within the TTL.
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && strings.HasPrefix(r.URL.Path, "/api/") && rec.status/100 == 2 {
+		// Any successful control-plane write may have revoked a key, disabled
+		// a user, changed a role's policy, or edited an alias or a provider.
+		// Rather than track which, forget every cached lookup so the change
+		// applies on this instance at once; other instances catch up within
+		// the TTL. Only successes count: a write that failed changed nothing,
+		// and during an outage every write fails, so the cache the outage is
+		// being served from is never thrown away by one.
 		s.purgeLookupCaches()
 	}
 	switch r.URL.Path {
@@ -274,9 +278,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 
 // purgeLookupCaches forgets every cached API key and alias plan.
 func (s *Server) purgeLookupCaches() {
-	if s.keys != nil {
-		s.keys.Purge()
-	}
+	s.keyCache.Purge()
 	if s.router != nil {
 		s.router.PurgeCache()
 	}
@@ -285,16 +287,18 @@ func (s *Server) purgeLookupCaches() {
 // handleReady reports the pod ready while it can serve. A Postgres outage
 // shorter than the lookup caches' max staleness does not count: known keys
 // and aliases are still served from memory, and taking every replica out of
-// the Service would turn a database restart into a full outage.
+// the Service would turn a database restart into a full outage. A pod that
+// has never reached Postgres has nothing cached and gets no such grace.
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	if err := s.st.PG.Ping(r.Context()); err != nil {
 		now := s.now().UnixNano()
 		s.pgDownSince.CompareAndSwap(0, now)
-		if time.Duration(now-s.pgDownSince.Load()) >= s.cfg.LookupCacheMaxStale {
+		if !s.pgSeenUp.Load() || time.Duration(now-s.pgDownSince.Load()) >= s.cfg.LookupCacheMaxStale {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "postgres unavailable"})
 			return
 		}
 	} else {
+		s.pgSeenUp.Store(true)
 		s.pgDownSince.Store(0)
 	}
 	if err := s.st.RDB.Ping(r.Context()).Err(); err != nil {

@@ -18,11 +18,17 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // refreshTimeout bounds a refresh that has a stale answer to fall back on, so
 // a database that hangs instead of refusing does not hold the request.
-const refreshTimeout = 2 * time.Second
+// loadTimeout bounds one with nothing to fall back on.
+const (
+	refreshTimeout = 2 * time.Second
+	loadTimeout    = 10 * time.Second
+)
 
 // backoff is how long, after a failed refresh, stale answers are served
 // without asking the database again — during an outage only one request per
@@ -37,9 +43,11 @@ type Options struct {
 	Now      func() time.Time // nil = time.Now; tests inject a fake clock
 }
 
-// Cache maps a string key to the last good answer of a database lookup.
+// Cache maps a string key to the last good answer of a database lookup. A
+// nil *Cache caches nothing: Get calls load every time.
 type Cache[V any] struct {
-	opts Options
+	opts   Options
+	flight singleflight.Group // concurrent loads of one key share one query
 
 	mu         sync.Mutex
 	entries    map[string]entry[V]
@@ -73,6 +81,9 @@ func Miss(err error) error { return missErr{err} }
 // Get returns the answer for key, calling load when the cached one is missing
 // or older than TTL. load's errors are returned as is.
 func (c *Cache[V]) Get(ctx context.Context, key string, load func(context.Context) (V, error)) (V, error) {
+	if c == nil {
+		return load(ctx)
+	}
 	now := c.opts.Now()
 	c.mu.Lock()
 	e, ok := c.entries[key]
@@ -88,40 +99,61 @@ func (c *Cache[V]) Get(ctx context.Context, key string, load func(context.Contex
 		return e.v, nil
 	}
 
-	loadCtx := ctx
+	// The shared load must not die with whichever request started it, so it
+	// runs detached from the caller and bounded by its own timeout; each
+	// caller still stops waiting when its own request ends.
+	timeout := loadTimeout
 	if usable {
-		var cancel context.CancelFunc
-		loadCtx, cancel = context.WithTimeout(ctx, refreshTimeout)
-		defer cancel()
+		timeout = refreshTimeout
 	}
-	v, err := load(loadCtx)
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	var miss missErr
-	switch {
-	case err == nil:
-		if c.gen == gen {
+	ch := c.flight.DoChan(key, func() (any, error) {
+		loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+		defer cancel()
+		v, err := load(loadCtx)
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if err == nil && c.gen == gen {
 			c.entries[key] = entry[V]{v: v, at: now}
 		}
-		return v, nil
-	case errors.As(err, &miss):
-		delete(c.entries, key)
+		var miss missErr
+		if errors.As(err, &miss) {
+			delete(c.entries, key)
+		}
 		return v, err
-	case usable && ctx.Err() == nil:
-		c.quietUntil = c.opts.Now().Add(backoff)
-		slog.Warn("lookup cache: database unavailable, serving the last known answer",
-			"cache", c.opts.Name, "age_s", int(now.Sub(e.at).Seconds()), "err", err)
-		return e.v, nil
-	default:
+	})
+	var res singleflight.Result
+	select {
+	case res = <-ch:
+	case <-ctx.Done():
+		var zero V
+		return zero, ctx.Err()
+	}
+	v, _ := res.Val.(V)
+	err := res.Err
+
+	var miss missErr
+	if err == nil || errors.As(err, &miss) || !usable {
 		return v, err
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.gen != gen {
+		// Purged while the refresh was failing: the old answer was meant to go.
+		return v, err
+	}
+	c.quietUntil = c.opts.Now().Add(backoff)
+	slog.Warn("lookup cache: database unavailable, serving the last known answer",
+		"cache", c.opts.Name, "age_s", int(now.Sub(e.at).Seconds()), "err", err)
+	return e.v, nil
 }
 
 // Purge drops every entry, so the next Get of each key asks the database.
 // Called after a change made through this instance's admin API, which then
 // takes effect here immediately instead of within TTL.
 func (c *Cache[V]) Purge() {
+	if c == nil {
+		return
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.entries = map[string]entry[V]{}

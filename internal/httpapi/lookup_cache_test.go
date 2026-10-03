@@ -81,6 +81,12 @@ func (p *dbProxy) pipe(c net.Conn) {
 		return
 	}
 	p.mu.Lock()
+	if p.down.Load() { // cut while this one was dialling
+		p.mu.Unlock()
+		_ = c.Close()
+		_ = u.Close()
+		return
+	}
 	p.conns = append(p.conns, c, u)
 	p.mu.Unlock()
 	go func() {
@@ -93,9 +99,9 @@ func (p *dbProxy) pipe(c net.Conn) {
 
 // cut drops every open connection and refuses new ones until restore.
 func (p *dbProxy) cut() {
-	p.down.Store(true)
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.down.Store(true)
 	for _, c := range p.conns {
 		_ = c.Close()
 	}
@@ -113,6 +119,13 @@ func (c countingWriter) Write(b []byte) (int, error) {
 	n, err := c.w.Write(b)
 	c.n.Add(int64(n))
 	return n, err
+}
+
+// noSession rejects every control-plane request as unauthenticated.
+type noSession struct{}
+
+func (noSession) Authenticate(*http.Request) (auth.Principal, error) {
+	return auth.Principal{}, fmt.Errorf("no session")
 }
 
 type fakeClock struct {
@@ -219,6 +232,7 @@ func newCacheFixture(t *testing.T, principal *auth.Principal) *cacheFixture {
 		Pricing:   pricing.New(),
 		Now:       f.clock.Now,
 	}
+	deps.Auth = noSession{}
 	if principal != nil {
 		deps.Auth = &fakeAuth{principal: *principal}
 	}
@@ -380,5 +394,30 @@ func TestReadyThroughABriefDatabaseOutage(t *testing.T) {
 	f.proxy.restore()
 	if got := ready(); got != http.StatusOK {
 		t.Errorf("readyz with the database back = %d, want 200", got)
+	}
+}
+
+func TestFailedControlPlaneWriteKeepsTheCache(t *testing.T) {
+	f := newCacheFixture(t, nil)
+	wantStatus(t, f.chat(t, f.token), http.StatusOK, "warm-up")
+	f.proxy.cut()
+
+	// An unauthenticated write fails; it must not throw away what the
+	// gateway is serving the outage from.
+	rec := httptest.NewRecorder()
+	f.srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/keys", strings.NewReader(`{}`)))
+	if rec.Code/100 == 2 {
+		t.Fatalf("unauthenticated POST /api/keys: status %d, want a failure", rec.Code)
+	}
+	wantStatus(t, f.chat(t, f.token), http.StatusOK, "database down, after a failed control-plane write")
+}
+
+func TestNotReadyWhenTheDatabaseWasNeverReached(t *testing.T) {
+	f := newCacheFixture(t, nil)
+	f.proxy.cut()
+	rec := httptest.NewRecorder()
+	f.srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("readyz on a pod that never reached Postgres = %d, want 503 — it has nothing cached to serve", rec.Code)
 	}
 }

@@ -257,7 +257,8 @@ template rendering, no cluster contact.
 
 - `GET /healthz` — liveness. `GET /readyz` — readiness (datastore reachability). A Postgres
   outage stays "ready" for up to `LOOKUP_CACHE_MAX_STALE` (5 min), while
-  cached keys and aliases keep serving; Redis is checked strictly.
+  cached keys and aliases keep serving, unless the pod has never reached
+  Postgres; Redis is checked strictly.
 - Logs are structured JSON (`slog`). Bootstrap and demo-user passwords (when not
   supplied via env vars) are logged once at `WARN` on first boot; treat any log
   containing credentials as dev-only. Env-provided passwords are never logged.

@@ -48,10 +48,7 @@ func (s *Server) requireAPIKey(next http.HandlerFunc) http.HandlerFunc {
 // unknown key is a definitive miss.
 func (s *Server) lookupKey(ctx context.Context, token string) (authedKey, error) {
 	hash := apikey.Hash(token)
-	if s.keys == nil {
-		return s.loadKey(ctx, hash)
-	}
-	return s.keys.Get(ctx, hash, func(ctx context.Context) (authedKey, error) {
+	return s.keyCache.Get(ctx, hash, func(ctx context.Context) (authedKey, error) {
 		return s.loadKey(ctx, hash)
 	})
 }

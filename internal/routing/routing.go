@@ -142,11 +142,7 @@ func NewCachedRouter(st *store.Store, opts lookupcache.Options) *Router {
 }
 
 // PurgeCache forgets every cached alias plan.
-func (r *Router) PurgeCache() {
-	if r.aliases != nil {
-		r.aliases.Purge()
-	}
-}
+func (r *Router) PurgeCache() { r.aliases.Purge() }
 
 // NextRR returns the next round-robin tick for an alias.
 func (r *Router) NextRR(alias string) uint64 {
@@ -171,9 +167,6 @@ func (r *Router) Resolve(ctx context.Context, model string, allowPassthrough boo
 		// it back in headers reveals nothing new — same reasoning as the
 		// DLPModelScan default above.
 		return &Plan{Alias: model, Strategy: "round_robin", DLPModelScan: true, ExposeBackendHeaders: true, DLPAudioScan: true, Tiers: [][]Target{{t}}}, nil
-	}
-	if r.aliases == nil {
-		return r.resolveAlias(ctx, model)
 	}
 	return r.aliases.Get(ctx, model, func(ctx context.Context) (*Plan, error) {
 		return r.resolveAlias(ctx, model)

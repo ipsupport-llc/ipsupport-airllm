@@ -86,9 +86,11 @@ func Load() (*Config, error) {
 		c.OIDC = oidcCfg
 	}
 
-	if err := loadLookupCache(c); err != nil {
+	ttl, maxStale, err := loadLookupCache()
+	if err != nil {
 		return nil, err
 	}
+	c.LookupCacheTTL, c.LookupCacheMaxStale = ttl, maxStale
 
 	key, dev, err := loadMasterKey(c.Env)
 	if err != nil {
@@ -200,21 +202,20 @@ func loadSessionKey(master []byte) ([]byte, error) {
 
 // loadLookupCache reads LOOKUP_CACHE_TTL (default 30s) and
 // LOOKUP_CACHE_MAX_STALE (default 5m), Go duration strings.
-func loadLookupCache(c *Config) error {
-	var err error
-	if c.LookupCacheTTL, err = time.ParseDuration(env("LOOKUP_CACHE_TTL", "30s")); err != nil {
-		return fmt.Errorf("LOOKUP_CACHE_TTL: %w", err)
+func loadLookupCache() (ttl, maxStale time.Duration, err error) {
+	if ttl, err = time.ParseDuration(env("LOOKUP_CACHE_TTL", "30s")); err != nil {
+		return 0, 0, fmt.Errorf("LOOKUP_CACHE_TTL: %w", err)
 	}
-	if c.LookupCacheMaxStale, err = time.ParseDuration(env("LOOKUP_CACHE_MAX_STALE", "5m")); err != nil {
-		return fmt.Errorf("LOOKUP_CACHE_MAX_STALE: %w", err)
+	if maxStale, err = time.ParseDuration(env("LOOKUP_CACHE_MAX_STALE", "5m")); err != nil {
+		return 0, 0, fmt.Errorf("LOOKUP_CACHE_MAX_STALE: %w", err)
 	}
-	if c.LookupCacheTTL <= 0 {
-		return fmt.Errorf("LOOKUP_CACHE_TTL must be positive, got %v", c.LookupCacheTTL)
+	if ttl <= 0 {
+		return 0, 0, fmt.Errorf("LOOKUP_CACHE_TTL must be positive, got %v", ttl)
 	}
-	if c.LookupCacheMaxStale < c.LookupCacheTTL {
-		return fmt.Errorf("LOOKUP_CACHE_MAX_STALE (%v) must not be below LOOKUP_CACHE_TTL (%v)", c.LookupCacheMaxStale, c.LookupCacheTTL)
+	if maxStale < ttl {
+		return 0, 0, fmt.Errorf("LOOKUP_CACHE_MAX_STALE (%v) must not be below LOOKUP_CACHE_TTL (%v)", maxStale, ttl)
 	}
-	return nil
+	return ttl, maxStale, nil
 }
 
 func env(key, def string) string {
