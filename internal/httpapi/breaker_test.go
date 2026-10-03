@@ -377,7 +377,10 @@ func TestBreakerIsOffUnlessEnabled(t *testing.T) {
 	}
 }
 
-// testBreakerRedis connects to TEST_REDIS_URL or skips.
+// testBreakerRedis connects to TEST_REDIS_URL or skips. It logs in as a user
+// whose ACL grants only the gateway's own `air:` keyspace, as a deployment's
+// Redis identity does, so a key outside it fails the test instead of quietly
+// sending the breaker to local state.
 func testBreakerRedis(t *testing.T) *redis.Client {
 	t.Helper()
 	dsn := os.Getenv("TEST_REDIS_URL")
@@ -388,7 +391,17 @@ func testBreakerRedis(t *testing.T) *redis.Client {
 	if err != nil {
 		t.Fatalf("parse redis url: %v", err)
 	}
-	rdb := redis.NewClient(opt)
+	admin := redis.NewClient(opt)
+	t.Cleanup(func() { _ = admin.Close() })
+	user, pass := fmt.Sprintf("breaker-test-%d", time.Now().UnixNano()), "breaker-test-pass"
+	ctx := context.Background()
+	if err := admin.Do(ctx, "ACL", "SETUSER", user, "on", ">"+pass, "~air:*", "&air:*", "+@all", "-@dangerous", "+info").Err(); err != nil {
+		t.Fatalf("create the scoped redis user: %v", err)
+	}
+	t.Cleanup(func() { _ = admin.Do(context.Background(), "ACL", "DELUSER", user).Err() })
+	scoped := *opt
+	scoped.Username, scoped.Password = user, pass
+	rdb := redis.NewClient(&scoped)
 	t.Cleanup(func() { _ = rdb.Close() })
 	return rdb
 }
