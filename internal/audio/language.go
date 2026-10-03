@@ -118,3 +118,13 @@ var whisperLanguageNames = map[string]string{
 	"ukrainian": "uk", "urdu": "ur", "uzbek": "uz", "valencian": "ca",
 	"vietnamese": "vi", "welsh": "cy", "yiddish": "yi", "yoruba": "yo",
 }
+
+// TelephonyLanguages are the languages offered for recognition on phone
+// audio, as BCP-47 primary subtags: the ones the Whisper family handles well
+// at 8 kHz, and the same set for Google, so the choices a pipeline offers do
+// not change with the recogniser behind an alias.
+var TelephonyLanguages = []string{
+	"en", "ru", "uk", "es", "de", "fr", "it", "pt", "pl", "nl",
+	"tr", "ar", "zh", "ja", "ko", "hi", "cs", "sv", "da", "fi",
+	"el", "ro", "hu", "id", "vi",
+}

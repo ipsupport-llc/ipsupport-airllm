@@ -158,7 +158,8 @@ no gateway-wide default:
 
 Any other key is stored and returned untouched. A known key with the wrong
 type, a negative `timeout_ms`, a `recognition_models` entry with an empty
-language or model, or a non-object is rejected on save with `400`. For example, a voice alias whose first tier must
+language or model or one language listed twice (in any case), or a non-object
+is rejected on save with `400`. For example, a voice alias whose first tier must
 answer within two seconds and may fail over on an expired credential:
 
 ```json
@@ -562,11 +563,13 @@ disable the provider, never fall back to the ambient identity.
 **What a request becomes:**
 
 - **Language.** Google wants a locale, so a bare language gets its usual
-  region (`uk` → `uk-UA`, `en` → `en-US`, `zh` → `cmn-Hans-CN`); a request
-  with none is recognised as `en-US`. Alternative languages follow the primary
+  region (`uk` → `uk-UA`, `en` → `en-US`, `zh` → `cmn-Hans-CN`, `ar` →
+  `ar-EG`); a request with none is recognised as `en-US`. Alternative languages follow the primary
   in the same list, up to Google's four in all.
-- **Model.** The target's `recognition_models` entry for the primary language,
-  else the target's `upstream_model` (see [Failover policy](#failover-policy-getput-apiadminfailover)).
+- **Model.** The target's `recognition_models` entry for the primary language
+  — matched against Google's locale first, then against the language as the
+  client sent it, so a `"zh"` entry still applies — else the target's
+  `upstream_model` (see [Failover policy](#failover-policy-getput-apiadminfailover)).
   The alias editor offers `chirp_3`, `long`, `short`, `telephony` and
   `telephony_short`; any other model can be typed in.
 - **Audio** is sent as is, and Google reads the format from its header — send
@@ -578,6 +581,8 @@ disable the provider, never fall back to the ambient identity.
 **What comes back:** the results' transcripts joined, the language Google
 detected, the mean of the confidences it reported, and its **billed** duration
 — which is what prices the request and counts against `audio_seconds` caps.
+Should a reply carry no billed duration, a WAV upload is metered by its own
+length, rounded up to the second as Google bills, rather than going free.
 
 **Prices are entered by hand**, one `audio_second` row per model an alias can
 run, under the provider's name; see

@@ -3,12 +3,14 @@ package httpapi
 import (
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -216,8 +218,8 @@ func TestTranscriptionFailsOverFromGoogleToAWhisperTierWithTheSameRequest(t *tes
 	if got.format != "verbose_json" {
 		t.Errorf("whisper got response_format %q, want verbose_json", got.format)
 	}
-	if tr.Text != "hi there" || tr.Language != "en" || tr.DurationSeconds != 2.5 {
-		t.Errorf("text=%q language=%q duration=%v, want the whisper answer with the language as a code", tr.Text, tr.Language, tr.DurationSeconds)
+	if tr.Text != "hi there" || tr.Language != "en-US" || tr.DurationSeconds != 2.5 {
+		t.Errorf("text=%q language=%q duration=%v, want the whisper answer in the requested en-US — the tag must not change form on failover", tr.Text, tr.Language, tr.DurationSeconds)
 	}
 	if math.Abs(tr.Confidence-0.8) > 1e-9 {
 		t.Errorf("confidence = %v, want 0.8 from the segments' mean log-probability", tr.Confidence)
@@ -259,5 +261,79 @@ func TestGoogleSpeechDropsPunctuationARecognizerRejects(t *testing.T) {
 	}
 	if n := len(calls()); n != 3 {
 		t.Errorf("upstream called %d times, want 3 — one rejected attempt, then the feature stays off for that model and language", n)
+	}
+}
+
+func TestADetectedLanguageOtherThanTheRequestedOneIsReported(t *testing.T) {
+	whisper, _ := fakeWhisper(t, `{"text":"привіт","language":"ukrainian","duration":1}`)
+	s := newRunChatTestServer(t, providers.NewOpenAICompat("whisper", "openai", whisper.URL, ""))
+	tr, _, err := s.runTranscribe(context.Background(), googleSpeechPlan(routing.Target{Provider: "whisper", UpstreamModel: "w"}),
+		audio.TranscriptionRequest{Audio: []byte("wav"), Language: "ru-RU"})
+	if err != nil || tr.Language != "uk" {
+		t.Errorf("language = %q (err %v), want uk — what was heard, not what was asked", tr.Language, err)
+	}
+}
+
+func TestGoogleSpeechFindsTheModelForALanguageGoogleSpellsDifferently(t *testing.T) {
+	up, calls := fakeGoogleSpeech(t, func(speechCall) (int, string) { return http.StatusOK, `{"results":[]}` })
+	s := newRunChatTestServer(t, newGoogleSpeech("gstt", up.URL))
+	plan := googleSpeechPlan(routing.Target{Provider: "gstt", UpstreamModel: "long", Options: routing.TargetOptions{
+		RecognitionModels: map[string]string{"zh": "chirp_3"},
+	}})
+	if _, _, err := s.runTranscribe(context.Background(), plan, audio.TranscriptionRequest{Audio: []byte("wav"), Language: "zh"}); err != nil {
+		t.Fatalf("runTranscribe: %v", err)
+	}
+	if c := calls()[0]; c.body.Config.Model != "chirp_3" || !slices.Equal(c.body.Config.LanguageCodes, []string{"cmn-Hans-CN"}) {
+		t.Errorf("sent model %q for %v, want chirp_3 for cmn-Hans-CN — the entry is keyed by the language the client asked for", c.body.Config.Model, c.body.Config.LanguageCodes)
+	}
+}
+
+func TestGoogleSpeechGivesEveryOfferedLanguageALocale(t *testing.T) {
+	up, calls := fakeGoogleSpeech(t, func(speechCall) (int, string) { return http.StatusOK, `{"results":[]}` })
+	g := newGoogleSpeech("gstt", up.URL)
+	s := newRunChatTestServer(t, g)
+	plan := googleSpeechPlan(routing.Target{Provider: "gstt", UpstreamModel: "long"})
+	for _, lang := range g.RecognitionLanguages() {
+		if _, _, err := s.runTranscribe(context.Background(), plan, audio.TranscriptionRequest{Audio: []byte("wav"), Language: lang}); err != nil {
+			t.Fatalf("%s: %v", lang, err)
+		}
+		got := calls()
+		if sent := got[len(got)-1].body.Config.LanguageCodes[0]; !strings.Contains(sent, "-") {
+			t.Errorf("offered language %q went to Google as %q, want a locale with a region", lang, sent)
+		}
+	}
+}
+
+// pcmWAV is a minimal 16-bit mono WAV header followed by seconds of silence.
+func pcmWAV(rate, seconds int) []byte {
+	data := rate * 2 * seconds
+	b := make([]byte, 44+data)
+	copy(b[0:], "RIFF")
+	binary.LittleEndian.PutUint32(b[4:], uint32(36+data))
+	copy(b[8:], "WAVEfmt ")
+	binary.LittleEndian.PutUint32(b[16:], 16)
+	binary.LittleEndian.PutUint16(b[20:], 1)
+	binary.LittleEndian.PutUint16(b[22:], 1)
+	binary.LittleEndian.PutUint32(b[24:], uint32(rate))
+	binary.LittleEndian.PutUint32(b[28:], uint32(rate*2))
+	binary.LittleEndian.PutUint16(b[32:], 2)
+	binary.LittleEndian.PutUint16(b[34:], 16)
+	copy(b[36:], "data")
+	binary.LittleEndian.PutUint32(b[40:], uint32(data))
+	return b
+}
+
+// TestGoogleSpeechWithoutABilledDurationStillMetersTheAudio: a reply
+// without metadata must not make the utterance free and invisible to the
+// audio-second caps.
+func TestGoogleSpeechWithoutABilledDurationStillMetersTheAudio(t *testing.T) {
+	up, _ := fakeGoogleSpeech(t, func(speechCall) (int, string) {
+		return http.StatusOK, `{"results":[{"alternatives":[{"transcript":"ok"}],"languageCode":"en-us"}]}`
+	})
+	s := newRunChatTestServer(t, newGoogleSpeech("gstt", up.URL))
+	tr, _, err := s.runTranscribe(context.Background(), googleSpeechPlan(routing.Target{Provider: "gstt", UpstreamModel: "long"}),
+		audio.TranscriptionRequest{Audio: pcmWAV(16000, 2), Language: "en-US"})
+	if err != nil || tr.DurationSeconds != 2 {
+		t.Errorf("duration = %v (err %v), want the WAV's own 2s", tr.DurationSeconds, err)
 	}
 }

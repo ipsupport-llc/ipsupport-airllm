@@ -303,7 +303,7 @@ func (p *OpenAICompat) Transcribe(ctx context.Context, in audio.TranscriptionReq
 // every OpenAI-compatible transcription route serves, recognises well at
 // phone bandwidth.
 func (p *OpenAICompat) RecognitionLanguages() []string {
-	return append([]string(nil), telephonyLanguages...)
+	return append([]string(nil), audio.TelephonyLanguages...)
 }
 
 // Synthesize requests text-to-speech audio. The response is read whole —

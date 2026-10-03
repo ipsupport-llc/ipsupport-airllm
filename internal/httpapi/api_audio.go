@@ -315,7 +315,10 @@ func (s *Server) handleAudioSpeech(w http.ResponseWriter, r *http.Request) {
 // Every tier answers with the same shape: a provider that chose its own
 // model by language reports it, and the result names that model so the
 // ledger prices what actually ran; a provider silent on the language is
-// taken to have recognised the one requested.
+// taken to have recognised the one requested, and one that heard the
+// requested language but names it without a region (the Whisper family
+// does) reports the requested tag, so the language keeps its form when a
+// request fails over.
 func (s *Server) runTranscribe(ctx context.Context, plan *routing.Plan, req audio.TranscriptionRequest) (audio.TranscriptionResponse, execResult, error) {
 	var resp audio.TranscriptionResponse
 	supports := func(p providers.Provider) error {
@@ -338,7 +341,7 @@ func (s *Server) runTranscribe(ctx context.Context, plan *routing.Plan, req audi
 	if resp.Model != "" {
 		res.UpstreamModel = resp.Model
 	}
-	if resp.Language == "" {
+	if resp.Language == "" || resp.Language == audio.PrimaryLanguage(req.Language) {
 		resp.Language = audio.CanonicalLanguage(req.Language)
 	}
 	return resp, res, nil

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -92,7 +93,7 @@ func (p *GoogleSpeech) ListModels(context.Context) ([]string, error) {
 // the Whisper one so a pipeline's choices stay the same whichever recogniser
 // leads an alias.
 func (p *GoogleSpeech) RecognitionLanguages() []string {
-	return append([]string(nil), telephonyLanguages...)
+	return append([]string(nil), audio.TelephonyLanguages...)
 }
 
 // googleSpeechMaxLanguages is Google's cap on languageCodes per request.
@@ -103,7 +104,9 @@ const googleSpeechMaxLanguages = 4
 // The language is Google's locale form, so a bare language gets its usual
 // region ("uk" → "uk-UA"); alternatives follow the primary in the same list.
 // The model is the target's per-language choice when it has one for the
-// primary language, and the target's model otherwise.
+// primary language — looked up by Google's locale, then by the language as
+// the client spelled it, since "zh" becomes "cmn-Hans-CN" — and the target's
+// model otherwise.
 //
 // Punctuation is requested because it makes transcripts readable, but some
 // recognizers refuse it for some languages and fail the whole request. It is
@@ -125,6 +128,8 @@ func (p *GoogleSpeech) Transcribe(ctx context.Context, in audio.TranscriptionReq
 	model := in.Model
 	if m, ok := audio.ForLanguage(in.ModelByLanguage, lang); ok {
 		model = m
+	} else if m, ok := audio.ForLanguage(in.ModelByLanguage, in.Language); ok {
+		model = m
 	}
 
 	pair := model + "\x00" + lang
@@ -139,6 +144,15 @@ func (p *GoogleSpeech) Transcribe(ctx context.Context, in audio.TranscriptionReq
 	}
 	out := resp.transcription()
 	out.Model = model
+	// Google names the billed duration in metadata. Without it the
+	// utterance would be free and invisible to audio-second caps, so it is
+	// metered by the WAV's own length, rounded up to the second as Google
+	// bills.
+	if out.DurationSeconds == 0 {
+		if d, ok := audio.WAVDuration(in.Audio); ok {
+			out.DurationSeconds = math.Ceil(d)
+		}
+	}
 	return out, nil
 }
 
@@ -262,7 +276,7 @@ func (p *GoogleSpeech) recognize(ctx context.Context, model string, langs []stri
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return googleRecognizeResponse{}, httpError(p.name, resp.StatusCode, b)
+		return googleRecognizeResponse{}, httpError(p.name, resp.StatusCode, b, resp.Header)
 	}
 	var out googleRecognizeResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
@@ -285,24 +299,15 @@ func googleLocale(tag string) string {
 	return tag
 }
 
-// googleDefaultLocales gives each offered language the locale a bare
-// language code most likely means on a phone line.
+// googleDefaultLocales gives each offered language (audio.TelephonyLanguages)
+// the locale a bare language code most likely means on a phone line. Arabic
+// has no single one; Egyptian Arabic is the most widely spoken.
 var googleDefaultLocales = map[string]string{
-	"cs": "cs-CZ", "da": "da-DK", "de": "de-DE", "el": "el-GR", "en": "en-US",
+	"ar": "ar-EG", "cs": "cs-CZ", "da": "da-DK", "de": "de-DE", "el": "el-GR", "en": "en-US",
 	"es": "es-ES", "fi": "fi-FI", "fr": "fr-FR", "hi": "hi-IN", "hu": "hu-HU",
 	"id": "id-ID", "it": "it-IT", "ja": "ja-JP", "ko": "ko-KR", "nl": "nl-NL",
 	"pl": "pl-PL", "pt": "pt-BR", "ro": "ro-RO", "ru": "ru-RU", "sv": "sv-SE",
 	"tr": "tr-TR", "uk": "uk-UA", "vi": "vi-VN", "zh": "cmn-Hans-CN",
-}
-
-// telephonyLanguages are the languages offered for recognition on phone
-// audio, as BCP-47 primary subtags: the ones the Whisper family handles well
-// at 8 kHz, and the same set for Google, so the choices a pipeline offers do
-// not change with the recogniser behind an alias.
-var telephonyLanguages = []string{
-	"en", "ru", "uk", "es", "de", "fr", "it", "pt", "pl", "nl",
-	"tr", "ar", "zh", "ja", "ko", "hi", "cs", "sv", "da", "fi",
-	"el", "ro", "hu", "id", "vi",
 }
 
 // googleSpeechBaseURL resolves the API root: an explicit address verbatim

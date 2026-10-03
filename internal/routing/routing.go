@@ -17,6 +17,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/audio"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/lookupcache"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 )
@@ -141,10 +142,18 @@ func ParseTargetOptions(raw []byte) (TargetOptions, error) {
 	if o.Thinking != nil && *o.Thinking != thinkingOff {
 		return o, fmt.Errorf(`invalid options: thinking must be "off"`)
 	}
+	seen := map[string]bool{}
 	for lang, model := range o.RecognitionModels {
 		if strings.TrimSpace(lang) == "" || strings.TrimSpace(model) == "" {
 			return o, fmt.Errorf("invalid options: recognition_models needs a language and a model in every entry")
 		}
+		// Keys match in any case, so two spellings of one language would
+		// leave the choice between them to map order.
+		tag := audio.CanonicalLanguage(lang)
+		if seen[tag] {
+			return o, fmt.Errorf("invalid options: recognition_models lists %s twice", tag)
+		}
+		seen[tag] = true
 	}
 	return o, nil
 }
