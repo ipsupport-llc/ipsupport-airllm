@@ -69,7 +69,7 @@ func (s *Server) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reques
 	entry := ledger.Entry{
 		KeyID: ak.KeyID, UserID: ak.UserID, Alias: model, ProviderName: target, UpstreamModel: upstreamModel,
 		IngressProtocol: "openai", UpstreamProtocol: "openai", Tier: res.Tier, Attempts: res.Attempts,
-		LatencyMS: time.Since(start).Milliseconds(),
+		Session: res.Session, LatencyMS: time.Since(start).Milliseconds(),
 	}
 
 	if callErr != nil {
@@ -174,7 +174,7 @@ func (s *Server) handleAudioSpeech(w http.ResponseWriter, r *http.Request) {
 	entry := ledger.Entry{
 		KeyID: ak.KeyID, UserID: ak.UserID, Alias: body.Model, ProviderName: target, UpstreamModel: upstreamModel,
 		IngressProtocol: "openai", UpstreamProtocol: "openai", Tier: res.Tier, Attempts: res.Attempts,
-		LatencyMS: time.Since(start).Milliseconds(),
+		Session: res.Session, LatencyMS: time.Since(start).Milliseconds(),
 	}
 
 	if callErr != nil {

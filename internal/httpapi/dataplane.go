@@ -193,6 +193,7 @@ func chatEntry(ak authedKey, alias string, res execResult, ingress string, start
 		UpstreamProtocol: res.UpstreamProtocol,
 		Tier:             res.Tier,
 		Attempts:         res.Attempts,
+		Session:          res.Session,
 		LatencyMS:        time.Since(start).Milliseconds(),
 	}
 }

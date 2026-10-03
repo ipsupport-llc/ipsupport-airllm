@@ -30,7 +30,9 @@ type Entry struct {
 	// (or of the last one attempted, on failure). See routing.Target.Tier.
 	Tier int
 	// Attempts is how many upstream calls the request made across targets.
-	Attempts  int
+	Attempts int
+	// Session is the client's X-Session-Id header; empty -> NULL.
+	Session   string
 	CostUSD   float64
 	Status    int
 	LatencyMS int64
@@ -135,12 +137,12 @@ func (l *Ledger) write(e Entry) {
 			key_id, user_id, alias, provider_name, upstream_model,
 			ingress_protocol, upstream_protocol,
 			prompt_tokens, completion_tokens, reasoning_tokens, cost_usd,
-			status, latency_ms, error, tier, attempts
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+			status, latency_ms, error, tier, attempts, session
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
 		nullUUID(e.KeyID), nullUUID(e.UserID), e.Alias, e.ProviderName, e.UpstreamModel,
 		e.IngressProtocol, e.UpstreamProtocol,
 		e.PromptTokens, e.CompletionTokens, e.ReasoningTokens, e.CostUSD,
-		e.Status, e.LatencyMS, e.ErrorMsg, e.Tier, e.Attempts,
+		e.Status, e.LatencyMS, e.ErrorMsg, e.Tier, e.Attempts, nullString(e.Session),
 	)
 	if err != nil {
 		slog.Error("ledger record failed", "err", err, "provider", e.ProviderName, "model", e.UpstreamModel)
@@ -148,6 +150,13 @@ func (l *Ledger) write(e Entry) {
 }
 
 func nullUUID(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func nullString(s string) any {
 	if s == "" {
 		return nil
 	}
