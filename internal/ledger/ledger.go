@@ -26,10 +26,15 @@ type Entry struct {
 	// ReasoningTokens is the share of CompletionTokens spent thinking — a
 	// breakdown of that number, not an addition to it. See llm.Usage.
 	ReasoningTokens int
-	CostUSD         float64
-	Status          int
-	LatencyMS       int64
-	ErrorMsg        string
+	// Tier is the configured priority of the target that served the request
+	// (or of the last one attempted, on failure). See routing.Target.Tier.
+	Tier int
+	// Attempts is how many upstream calls the request made across targets.
+	Attempts  int
+	CostUSD   float64
+	Status    int
+	LatencyMS int64
+	ErrorMsg  string
 }
 
 // chanSize is the capacity of the internal work queue, sized the same way
@@ -130,12 +135,12 @@ func (l *Ledger) write(e Entry) {
 			key_id, user_id, alias, provider_name, upstream_model,
 			ingress_protocol, upstream_protocol,
 			prompt_tokens, completion_tokens, reasoning_tokens, cost_usd,
-			status, latency_ms, error
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+			status, latency_ms, error, tier, attempts
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
 		nullUUID(e.KeyID), nullUUID(e.UserID), e.Alias, e.ProviderName, e.UpstreamModel,
 		e.IngressProtocol, e.UpstreamProtocol,
 		e.PromptTokens, e.CompletionTokens, e.ReasoningTokens, e.CostUSD,
-		e.Status, e.LatencyMS, e.ErrorMsg,
+		e.Status, e.LatencyMS, e.ErrorMsg, e.Tier, e.Attempts,
 	)
 	if err != nil {
 		slog.Error("ledger record failed", "err", err, "provider", e.ProviderName, "model", e.UpstreamModel)

@@ -19,6 +19,19 @@ const (
 	ErrCodeReasoningEffortUnsupported = "reasoning_effort_unsupported"
 )
 
+// ErrCodeProviderAuth marks an upstream that refused the gateway's own
+// credentials or account: a 401/403, or a Google permission, billing or
+// failed-precondition error. Not fallback-worthy by itself — whether another
+// tier should be tried is a per-target choice (see IsAuthFailure).
+const ErrCodeProviderAuth = "provider_auth"
+
+// IsAuthFailure reports whether err is an upstream authorisation or billing
+// failure (ErrCodeProviderAuth).
+func IsAuthFailure(err error) bool {
+	var pe *Error
+	return errors.As(err, &pe) && pe.Code == ErrCodeProviderAuth
+}
+
 // Error is a provider call failure. Retryable failures (e.g. upstream 429 or
 // 5xx) let the router fall back to the next target; non-retryable failures
 // (e.g. a bad request) abort — UNLESS Code names a known fallback-worthy
@@ -106,6 +119,9 @@ type googleErrorBody struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
 		Status  string `json:"status"`
+		Details []struct {
+			Reason string `json:"reason"`
+		} `json:"details"`
 	} `json:"error"`
 }
 
@@ -172,7 +188,17 @@ func classifyErrorBody(body []byte) string {
 	}
 	var g googleErrorBody
 	if err := json.Unmarshal(body, &g); err == nil {
+		for _, d := range g.Error.Details {
+			if d.Reason == "BILLING_DISABLED" {
+				return ErrCodeProviderAuth
+			}
+		}
 		switch g.Error.Status {
+		case "PERMISSION_DENIED", "UNAUTHENTICATED", "FAILED_PRECONDITION":
+			// The gateway's project or identity was refused — a disabled
+			// API, a missing role, an account in the wrong state — not the
+			// request. Another tier may well have working credentials.
+			return ErrCodeProviderAuth
 		case "NOT_FOUND":
 			// An unknown publisher model. Fallback-worthy: another tier may
 			// well have the model this one doesn't.
@@ -202,12 +228,29 @@ func transportError(err error) *Error {
 	return &Error{Status: http.StatusBadGateway, Retryable: true, Message: err.Error()}
 }
 
+// ollamaModelNotFoundPattern matches Ollama's reply for a model it has not
+// pulled, e.g. `model "gemma3:27b" not found, try pulling it first`. Like
+// the multimodal rejection above, the English text is the only signal: the
+// OpenAI-compatible envelope carries code:null, and the native one is a bare
+// string. Matched against the raw body of a 404 only, so the quoting style
+// of either envelope does not matter.
+var ollamaModelNotFoundPattern = regexp.MustCompile(`(?i)\bmodel\b.{0,200}?\bnot found\b`)
+
 // httpError builds a provider Error from a non-2xx upstream response.
 func httpError(name string, status int, body []byte) error {
+	code := classifyErrorBody(body)
+	if code == "" {
+		switch {
+		case status == http.StatusUnauthorized || status == http.StatusForbidden:
+			code = ErrCodeProviderAuth
+		case status == http.StatusNotFound && ollamaModelNotFoundPattern.Match(body):
+			code = ErrCodeModelNotFound
+		}
+	}
 	return &Error{
 		Status:    status,
 		Retryable: status == http.StatusTooManyRequests || status >= 500,
-		Code:      classifyErrorBody(body),
+		Code:      code,
 		Message:   fmt.Sprintf("upstream %s returned %d: %s", name, status, strings.TrimSpace(string(body))),
 	}
 }

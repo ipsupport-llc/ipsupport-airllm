@@ -94,3 +94,26 @@ func TestStopDrainsBufferedEntries(t *testing.T) {
 		t.Errorf("rows persisted after Stop = %d, want 5 (Stop must drain the queue before returning)", n)
 	}
 }
+
+// TestTierAndAttemptsArePersisted proves the failover bookkeeping reaches
+// the usage row.
+func TestTierAndAttemptsArePersisted(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	const provider = "ledger-test-tier-attempts"
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM usage_ledger WHERE provider_name = $1`, provider)
+	})
+	l := New(&store.Store{PG: pool})
+	l.Start()
+	l.Record(ctx, Entry{ProviderName: provider, Alias: "voice-reply", Status: 200, Tier: 2, Attempts: 3})
+	l.Stop()
+
+	var tier, attempts int
+	if err := pool.QueryRow(ctx, `SELECT tier, attempts FROM usage_ledger WHERE provider_name = $1`, provider).Scan(&tier, &attempts); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if tier != 2 || attempts != 3 {
+		t.Errorf("tier=%d attempts=%d, want 2 and 3", tier, attempts)
+	}
+}

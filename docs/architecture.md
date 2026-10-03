@@ -94,10 +94,17 @@ Schema migrations are embedded and applied automatically on boot, in order.
   is `round_robin` or `least_busy`. Lower tiers are the fallback chain.
 - When every eligible target is saturated the gateway returns `429` instead of
   failing — back-pressure, not a crash.
+- Chat, streamed chat, transcription and speech share one attempt loop. A
+  target moves on to the next one on a retryable error (`429`, `5xx`, a
+  transport failure), on a known "this target can't serve it" code (context
+  too long, model not found, …), on a breach of its time budget, and — when
+  its options say so — on an upstream auth or billing refusal. A client that
+  hangs up ends the request; it is never counted as a target failure. See
+  [Failover policy](configuration.md#failover-policy-getput-apiadminfailover).
 
 ## Hot-reload
 
-DLP, capture, and second-pass policy are cached behind atomic pointers and
+DLP, capture, second-pass and failover policy are cached behind atomic pointers and
 reloaded when saved via the admin API, so policy changes take effect on the
 next request or job without a restart. Provider edits rebuild the registry the
 same way.

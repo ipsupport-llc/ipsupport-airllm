@@ -5,8 +5,10 @@ package routing
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -27,6 +29,49 @@ type Target struct {
 	// instead of Provider/UpstreamModel — those stay internal. Empty means
 	// no label was configured for this target.
 	DisplayLabel string
+	// Options is the target's own failover policy (alias_targets.options).
+	Options TargetOptions
+	// Tier identifies the priority tier this target belongs to: the
+	// configured alias_targets.priority, not its position in Plan.Tiers, so
+	// it stays the same when a provider in another tier is disabled or
+	// added. Lower is tried first; a passthrough target is tier 0.
+	Tier int
+}
+
+// TargetOptions are the per-target knobs stored in alias_targets.options.
+// The stored object is free-form so later behaviours can add keys without a
+// migration; only the keys below are read here, and an unknown key is kept
+// and ignored. A nil field means "not set on this target": the gateway-wide
+// default from settings applies.
+type TargetOptions struct {
+	// TimeoutMS is the target's time budget. For a streamed chat it bounds
+	// the wait for the first chunk; for a unary chat or an audio request it
+	// bounds the whole call. 0 means no budget.
+	TimeoutMS *int `json:"timeout_ms,omitempty"`
+	// FallbackOnAuth makes an upstream authorisation or billing failure a
+	// reason to try the next target instead of failing the request.
+	FallbackOnAuth *bool `json:"fallback_on_auth,omitempty"`
+}
+
+// ParseTargetOptions decodes a stored or submitted options object. Empty
+// input and JSON null are the empty object. Anything that is not an object,
+// or a known key of the wrong type or out of range, is an error.
+func ParseTargetOptions(raw []byte) (TargetOptions, error) {
+	var o TargetOptions
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return o, nil
+	}
+	if !strings.HasPrefix(trimmed, "{") {
+		return o, fmt.Errorf("options must be a JSON object")
+	}
+	if err := json.Unmarshal(raw, &o); err != nil {
+		return o, fmt.Errorf("invalid options: %w", err)
+	}
+	if o.TimeoutMS != nil && *o.TimeoutMS < 0 {
+		return o, fmt.Errorf("invalid options: timeout_ms must not be negative")
+	}
+	return o, nil
 }
 
 // Plan is the ordered set of priority tiers for a request, plus the within-
@@ -124,7 +169,7 @@ func (r *Router) Resolve(ctx context.Context, model string, allowPassthrough boo
 	}
 
 	rows, err := r.st.PG.Query(ctx, `
-		SELECT t.priority, t.provider_name, t.upstream_model, p.kind, t.display_label
+		SELECT t.priority, t.provider_name, t.upstream_model, p.kind, t.display_label, t.options
 		FROM alias_targets t
 		JOIN providers p ON p.name = t.provider_name AND p.enabled = true
 		WHERE t.alias = $1
@@ -140,8 +185,16 @@ func (r *Router) Resolve(ctx context.Context, model string, allowPassthrough boo
 		var priority int
 		var kind string
 		var t Target
-		if err := rows.Scan(&priority, &t.Provider, &t.UpstreamModel, &kind, &t.DisplayLabel); err != nil {
+		var options []byte
+		if err := rows.Scan(&priority, &t.Provider, &t.UpstreamModel, &kind, &t.DisplayLabel, &options); err != nil {
 			return nil, err
+		}
+		// The admin API validates options on save, so a parse failure here
+		// means a hand-edited row. Serving the target under the gateway
+		// defaults beats failing every request for the alias.
+		if t.Options, err = ParseTargetOptions(options); err != nil {
+			slog.Warn("routing: ignoring invalid target options", "alias", model, "provider", t.Provider, "err", err)
+			t.Options = TargetOptions{}
 		}
 		// UpstreamProtocol is derived from the provider's own kind, the same
 		// way passthroughTarget below does it — never operator-chosen. Every
@@ -153,6 +206,7 @@ func (r *Router) Resolve(ctx context.Context, model string, allowPassthrough boo
 		if kind == "anthropic" {
 			t.UpstreamProtocol = "anthropic"
 		}
+		t.Tier = priority
 		if len(tiers) == 0 || priority != lastPriority {
 			tiers = append(tiers, []Target{})
 			lastPriority = priority

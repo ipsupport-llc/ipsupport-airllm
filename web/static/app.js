@@ -1036,6 +1036,25 @@ async function editPrice(c, p) {
   });
 }
 
+// targetOptionsText renders a target's free-form options object for the
+// alias editor: empty when there is nothing set, so the placeholder shows.
+// Top-level so web/targetoptions.test.mjs can extract it.
+function targetOptionsText(o) {
+  return o && typeof o === "object" && Object.keys(o).length ? JSON.stringify(o) : "";
+}
+
+// parseTargetOptions reads the alias editor's options field back: empty is
+// the empty object, anything else must be a JSON object. The server checks
+// the keys it knows; this only catches a typo before the round trip.
+function parseTargetOptions(text) {
+  const t = (text || "").trim();
+  if (!t) return {};
+  let v;
+  try { v = JSON.parse(t); } catch (e) { throw new Error("options must be valid JSON"); }
+  if (v === null || typeof v !== "object" || Array.isArray(v)) throw new Error("options must be a JSON object");
+  return v;
+}
+
 async function adminAliases(c) {
   const r = await api("GET", "/api/admin/aliases");
   const al = (r.data && r.data.aliases) || [];
@@ -1044,7 +1063,7 @@ async function adminAliases(c) {
       al.map((a) => `<tr><td class="mono">${esc(a.alias)}</td><td>${esc(a.protocol)}</td>
         <td>${esc(a.strategy || "round_robin")}</td>
         <td>${a.dlp_model_scan ? `<span class="badge neutral">on</span>` : `<span class="badge revoked">off</span>`}</td>
-        <td class="mono">${(a.targets || []).map((t) => `${esc(t.provider)}/${esc(t.upstream_model)} (p${t.priority})`).join(", ") || "—"}</td>
+        <td class="mono">${(a.targets || []).map((t) => `${esc(t.provider)}/${esc(t.upstream_model)} (p${t.priority}${t.options && t.options.timeout_ms ? `, ${Number(t.options.timeout_ms)}ms` : ""})`).join(", ") || "—"}</td>
         <td style="text-align:right"><button class="btn ghost sm" data-edit='${esc(JSON.stringify(a))}'>Edit</button>
           <button class="btn danger sm" data-del="${esc(a.alias)}">Delete</button></td></tr>`));
   $("#new-alias").addEventListener("click", () => editAlias(c, {}));
@@ -1091,7 +1110,7 @@ async function editAlias(c, a) {
       <input id="al-expose" type="checkbox" ${a.expose_backend_headers ? "checked" : ""} style="width:auto" /></label>
     <label class="field"><span class="lab">DLP scan on audio transcripts/input (STT/TTS)</span>
       <input id="al-dlpaudio" type="checkbox" ${a.dlp_audio_scan === false ? "" : "checked"} style="width:auto" /></label>
-    <div class="lab" style="color:var(--muted);font-size:.82rem;margin-bottom:.3rem">Targets: same priority = load-balanced tier; higher number = fallback tier. Label is what the header shows — real provider/model names never leak.</div>
+    <div class="lab" style="color:var(--muted);font-size:.82rem;margin-bottom:.3rem">Targets: same priority = load-balanced tier; higher number = fallback tier. Label is what the header shows — real provider/model names never leak. Options (JSON, optional): <span class="mono">timeout_ms</span> — time budget (first chunk for streams, whole call otherwise); <span class="mono">fallback_on_auth</span> — try the next tier on upstream auth/billing errors.</div>
     <div id="al-targets"></div>
     <button type="button" class="btn ghost sm" id="al-add" style="margin-top:.3rem">+ Add target</button>
     <div class="row" style="justify-content:flex-end;margin-top:1rem">
@@ -1156,7 +1175,8 @@ async function editAlias(c, a) {
       <select class="t-prov" style="width:auto">${provOpts(t.provider)}</select>
       <span class="t-model-slot" style="flex:1;min-width:120px;display:inline-flex"></span>
       <input class="t-label" placeholder="label (X-Backend-Model)" value="${esc(t.display_label || "")}" style="width:150px" />
-      <button type="button" class="btn danger sm t-del" title="remove">×</button>`;
+      <button type="button" class="btn danger sm t-del" title="remove">×</button>
+      <input class="t-opts mono" placeholder='options, e.g. {"timeout_ms":2000,"fallback_on_auth":true}' value="${esc(targetOptionsText(t.options))}" style="flex-basis:100%" />`;
     row.querySelector(".t-del").addEventListener("click", () => row.remove());
     const slot = row.querySelector(".t-model-slot");
     const provSel = row.querySelector(".t-prov");
@@ -1197,12 +1217,16 @@ async function editAlias(c, a) {
     if (alias !== a.alias && existingAliases.includes(alias)) {
       toast(`Alias ${alias} already exists`, "err"); return;
     }
-    const tlist = [...tdiv.querySelectorAll(".tgt")].map((r) => ({
-      priority: Number(r.querySelector(".t-prio").value) || 0,
-      provider: r.querySelector(".t-prov").value,
-      upstream_model: r.querySelector(".t-model").value.trim(),
-      display_label: r.querySelector(".t-label").value.trim(),
-    })).filter((t) => t.upstream_model);
+    let tlist;
+    try {
+      tlist = [...tdiv.querySelectorAll(".tgt")].map((r) => ({
+        priority: Number(r.querySelector(".t-prio").value) || 0,
+        provider: r.querySelector(".t-prov").value,
+        upstream_model: r.querySelector(".t-model").value.trim(),
+        display_label: r.querySelector(".t-label").value.trim(),
+        options: parseTargetOptions(r.querySelector(".t-opts").value),
+      })).filter((t) => t.upstream_model);
+    } catch (e) { toast(e.message, "err"); return; }
     if (tlist.length === 0) { toast("Add at least one target with a model", "err"); return; }
     const x = await api("PUT", `/api/admin/aliases/${encodeURIComponent(alias)}`,
       { protocol: $("#al-proto", bg).value, strategy: $("#al-strategy", bg).value, targets: tlist,
