@@ -172,12 +172,13 @@ gateway-wide default; only `"off"` is accepted. The gateway then:
   | `xai` | `reasoning_effort: "minimal"` (rejects `"none"`) |
   | any other | nothing — the client's fields are only dropped |
 
-- cuts `<think>…</think>` blocks out of the reply text, streamed or not, for
-  models that write their thoughts inline anyway.
+- cuts leading `<think>…</think>` blocks out of the reply text, streamed or
+  not, for models that write their thoughts inline anyway. A `<think>` after
+  the answer has started is part of the answer and is left alone.
 
-If the upstream still refuses the setting the gateway chose (a `400` about
-reasoning), that is the tier's configuration, not the client's request: the
-attempt falls through to the next tier. Without the option, the same refusal
+If the upstream still refuses the setting the gateway chose (a `400` naming
+the field it set), that is the tier's configuration, not the client's request:
+the attempt falls through to the next tier. Without the option, the same refusal
 of a client-chosen setting fails the request as before.
 
 ```json
