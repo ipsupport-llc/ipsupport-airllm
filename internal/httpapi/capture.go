@@ -53,9 +53,12 @@ func clampCaptureConfig(cfg captureConfig) captureConfig {
 }
 
 // loadCapture reads the capture config from settings into the atomic cache.
-func (s *Server) loadCapture(ctx context.Context) {
+func (s *Server) loadCapture(ctx context.Context) { s.loadSetting(ctx, "capture") }
+
+// applyCapture installs the capture config from a raw settings value (nil = defaults).
+func (s *Server) applyCapture(raw []byte) {
 	cfg := defaultCaptureConfig()
-	if raw, err := s.st.GetSetting(ctx, "capture"); err == nil && len(raw) > 0 {
+	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &cfg)
 	}
 	cfg = clampCaptureConfig(cfg)

@@ -18,6 +18,26 @@ func (s *Store) GetSetting(ctx context.Context, name string) ([]byte, error) {
 	return v, err
 }
 
+// GetSettings returns the named settings in one query; an absent name is
+// absent from the map.
+func (s *Store) GetSettings(ctx context.Context, names []string) (map[string][]byte, error) {
+	rows, err := s.PG.Query(ctx, `SELECT name, value FROM settings WHERE name = ANY($1)`, names)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string][]byte{}
+	for rows.Next() {
+		var name string
+		var v []byte
+		if err := rows.Scan(&name, &v); err != nil {
+			return nil, err
+		}
+		out[name] = v
+	}
+	return out, rows.Err()
+}
+
 // PutSetting upserts a settings key.
 func (s *Store) PutSetting(ctx context.Context, name string, value []byte) error {
 	_, err := s.PG.Exec(ctx, `

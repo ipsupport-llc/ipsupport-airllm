@@ -51,6 +51,17 @@ type Config struct {
 	// database cannot be reached.
 	LookupCacheTTL      time.Duration
 	LookupCacheMaxStale time.Duration
+
+	// ConfigRefreshInterval is how often the provider registry and the
+	// in-memory settings are re-read from the database — the longest a save
+	// made through another replica's admin API takes to apply here.
+	ConfigRefreshInterval time.Duration
+
+	// ShutdownDrain is how long the server keeps accepting requests after
+	// SIGTERM, while the load balancer stops sending it new ones.
+	// ShutdownTimeout is how long in-flight requests may then take to finish.
+	ShutdownDrain   time.Duration
+	ShutdownTimeout time.Duration
 }
 
 // Load reads configuration from the environment and validates it.
@@ -91,6 +102,16 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	c.LookupCacheTTL, c.LookupCacheMaxStale = ttl, maxStale
+
+	if c.ConfigRefreshInterval, err = duration("CONFIG_REFRESH_INTERVAL", "10s", true); err != nil {
+		return nil, err
+	}
+	if c.ShutdownDrain, err = duration("SHUTDOWN_DRAIN", "0s", false); err != nil {
+		return nil, err
+	}
+	if c.ShutdownTimeout, err = duration("SHUTDOWN_TIMEOUT", "10s", true); err != nil {
+		return nil, err
+	}
 
 	key, dev, err := loadMasterKey(c.Env)
 	if err != nil {
@@ -216,6 +237,22 @@ func loadLookupCache() (ttl, maxStale time.Duration, err error) {
 		return 0, 0, fmt.Errorf("LOOKUP_CACHE_MAX_STALE (%v) must not be below LOOKUP_CACHE_TTL (%v)", maxStale, ttl)
 	}
 	return ttl, maxStale, nil
+}
+
+// duration reads a duration from the environment. It must not be negative,
+// nor zero when positive is set.
+func duration(key, def string, positive bool) (time.Duration, error) {
+	d, err := time.ParseDuration(env(key, def))
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", key, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("%s must not be negative, got %v", key, d)
+	}
+	if positive && d == 0 {
+		return 0, fmt.Errorf("%s must be positive, got %v", key, d)
+	}
+	return d, nil
 }
 
 func env(key, def string) string {

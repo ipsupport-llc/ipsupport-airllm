@@ -2,8 +2,11 @@ package providers
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"log/slog"
+	"strconv"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/secrets"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
@@ -43,6 +46,12 @@ func LoadFromStore(ctx context.Context, st *store.Store, sealer *secrets.Sealer)
 	if err != nil {
 		return nil, err
 	}
+	return Build(ctx, rows, sealer), nil
+}
+
+// Build builds a registry from provider rows already read from the store; see
+// LoadFromStore.
+func Build(ctx context.Context, rows []store.ProviderRow, sealer *secrets.Sealer) *Registry {
 	reg := NewRegistry()
 	// Fingerprints of every vertex credential this load actually resolved a
 	// token source for — reconciled against the token cache at the end, so
@@ -91,7 +100,33 @@ func LoadFromStore(ctx context.Context, st *store.Store, sealer *secrets.Sealer)
 	if _, ok := reg.Get("mock"); !ok {
 		reg.Register(NewMock("mock"), 0)
 	}
-	return reg, nil
+	return reg
+}
+
+// Fingerprint identifies a set of provider rows: rows with equal fingerprints
+// build the same registry, so a caller polling the store can skip a rebuild —
+// which would hand every provider a fresh set of concurrency slots — when
+// nothing changed. A re-saved credential counts as a change, since sealing
+// never produces the same ciphertext twice.
+func Fingerprint(rows []store.ProviderRow) [sha256.Size]byte {
+	h := sha256.New()
+	field := func(b []byte) {
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(b)))
+		h.Write(n[:])
+		h.Write(b)
+	}
+	for _, p := range rows {
+		field([]byte(p.Name))
+		field([]byte(p.Kind))
+		field([]byte(p.BaseURL))
+		field(p.CredEnc)
+		field([]byte(strconv.Itoa(p.MaxConcurrency)))
+		field(p.Config)
+	}
+	var out [sha256.Size]byte
+	h.Sum(out[:0])
+	return out
 }
 
 // newVertexFromRow builds a Vertex provider from its stored row.

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -189,6 +190,7 @@ func run() error {
 	apiSrv.Metrics().RegisterLedgerDropped(func() float64 { return float64(apiSrv.Ledger().Dropped()) })
 	apiSrv.Metrics().RegisterWebhookDropped(func() float64 { return float64(webhook.Dropped()) })
 	apiSrv.StartModelPool(ctx)
+	apiSrv.StartConfigRefresh(ctx, cfg.ConfigRefreshInterval)
 
 	// Build and start the second-pass background job. It uses an atomic
 	// pointer for the config (same pattern as capturePipeline) so model /
@@ -259,10 +261,24 @@ func run() error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	ln, err := net.Listen("tcp", cfg.HTTPAddr)
+	if err != nil {
+		return err
+	}
+	slog.Info("listening", "addr", cfg.HTTPAddr)
+	return serve(ctx, srv, ln, cfg.ShutdownDrain, cfg.ShutdownTimeout, apiSrv.SetDraining)
+}
+
+// serve runs srv on ln until ctx is cancelled, then shuts down in two steps.
+// For drain it keeps accepting requests — a load balancer takes a moment to
+// stop routing to a pod that is going away, and a connection refused in that
+// window fails a request a healthy replica would have served. draining is
+// called as the drain starts (readiness reports it). Then it stops accepting
+// and gives in-flight requests, streams included, up to timeout to finish.
+func serve(ctx context.Context, srv *http.Server, ln net.Listener, drain, timeout time.Duration, draining func()) error {
 	errCh := make(chan error, 1)
 	go func() {
-		slog.Info("listening", "addr", cfg.HTTPAddr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()
@@ -271,11 +287,17 @@ func run() error {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
-		slog.Info("shutting down")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		return srv.Shutdown(shutdownCtx)
 	}
+	slog.Info("shutting down", "drain", drain, "timeout", timeout)
+	draining()
+	select {
+	case err := <-errCh:
+		return err
+	case <-time.After(drain):
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return srv.Shutdown(shutdownCtx)
 }
 
 // bootstrapPasswordFile is where a generated bootstrap-admin password is

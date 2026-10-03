@@ -216,9 +216,12 @@ func validDLPAction(a string) bool {
 }
 
 // loadDLP reads the DLP config from settings into the atomic cache.
-func (s *Server) loadDLP(ctx context.Context) {
+func (s *Server) loadDLP(ctx context.Context) { s.loadSetting(ctx, "dlp") }
+
+// applyDLP installs the DLP config from a raw settings value (nil = defaults).
+func (s *Server) applyDLP(raw []byte) {
 	cfg := defaultDLPConfig()
-	if raw, err := s.st.GetSetting(ctx, "dlp"); err == nil && len(raw) > 0 {
+	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &cfg)
 	}
 	if !validDLPAction(cfg.Action) {
