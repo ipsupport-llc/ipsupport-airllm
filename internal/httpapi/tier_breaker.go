@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
 	"sort"
 	"strconv"
 	"time"
@@ -166,4 +167,68 @@ func (s *Server) recordTierFallbacks(alias string, moved []tierFallback, served 
 		seen[f] = true
 		s.metrics.TierFallback(alias, strconv.Itoa(f.tier), to, f.reason)
 	}
+}
+
+// tierHealth is one tier of an alias as the health view shows it.
+type tierHealth struct {
+	Tier    int  `json:"tier"`
+	Enabled bool `json:"breaker_enabled"`
+	breaker.Status
+	Targets []tierHealthTarget `json:"targets"`
+}
+
+type tierHealthTarget struct {
+	Provider      string `json:"provider"`
+	UpstreamModel string `json:"upstream_model"`
+	DisplayLabel  string `json:"display_label,omitempty"`
+}
+
+// handleAdminAliasHealth reports the breaker of every tier of an alias.
+func (s *Server) handleAdminAliasHealth(w http.ResponseWriter, r *http.Request) {
+	alias := r.PathValue("alias")
+	plan, err := s.router.Resolve(r.Context(), alias, false)
+	if err != nil {
+		if errors.Is(err, routing.ErrModelNotFound) {
+			writeControlError(w, http.StatusNotFound, "alias not found")
+			return
+		}
+		writeControlError(w, http.StatusInternalServerError, "failed to resolve alias")
+		return
+	}
+	tiers := make([]tierHealth, 0, len(plan.Tiers))
+	for _, ts := range plan.Tiers {
+		if len(ts) == 0 {
+			continue
+		}
+		tier := ts[0].Tier
+		set := s.breakerSettings(plan, tier)
+		st, err := s.breaker.Status(r.Context(), breaker.Key{Alias: alias, Tier: tier}, set)
+		if err != nil {
+			writeControlError(w, http.StatusInternalServerError, "failed to read breaker state")
+			return
+		}
+		h := tierHealth{Tier: tier, Enabled: set.Enabled, Status: st}
+		for _, t := range ts {
+			h.Targets = append(h.Targets, tierHealthTarget{Provider: t.Provider, UpstreamModel: t.UpstreamModel, DisplayLabel: t.DisplayLabel})
+		}
+		tiers = append(tiers, h)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"alias": alias, "tiers": tiers})
+}
+
+// handleAdminReleaseTier closes a tier's breaker by hand.
+func (s *Server) handleAdminReleaseTier(w http.ResponseWriter, r *http.Request) {
+	sess, _ := sessionFrom(r.Context())
+	alias := r.PathValue("alias")
+	tier, err := strconv.Atoi(r.PathValue("tier"))
+	if err != nil || tier < 0 {
+		writeControlError(w, http.StatusBadRequest, "tier must be a non-negative integer")
+		return
+	}
+	if err := s.breaker.Release(r.Context(), breaker.Key{Alias: alias, Tier: tier}); err != nil {
+		writeControlError(w, http.StatusServiceUnavailable, "failed to release the tier")
+		return
+	}
+	s.audit(r.Context(), sess.principal.Subject, "alias.tier.release", alias, map[string]int{"tier": tier})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "released"})
 }

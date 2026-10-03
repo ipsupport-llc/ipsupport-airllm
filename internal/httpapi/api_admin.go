@@ -40,6 +40,8 @@ func (s *Server) adminRoutes() {
 	s.mux.HandleFunc("GET /api/admin/aliases", a(s.handleAdminAliases))
 	s.mux.HandleFunc("PUT /api/admin/aliases/{alias}", a(s.handleAdminPutAlias))
 	s.mux.HandleFunc("DELETE /api/admin/aliases/{alias}", a(s.handleAdminDeleteAlias))
+	s.mux.HandleFunc("GET /api/admin/aliases/{alias}/health", a(s.handleAdminAliasHealth))
+	s.mux.HandleFunc("POST /api/admin/aliases/{alias}/tiers/{tier}/release", a(s.handleAdminReleaseTier))
 	s.mux.HandleFunc("GET /api/admin/pricing", a(s.handleAdminPricing))
 	s.mux.HandleFunc("PUT /api/admin/pricing/{model}", a(s.handleAdminPutPricing))
 	s.mux.HandleFunc("POST /api/admin/pricing/import/{provider}", a(s.handleAdminPricingImport))

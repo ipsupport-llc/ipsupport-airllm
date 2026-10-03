@@ -124,6 +124,15 @@ func ParseTargetOptions(raw []byte) (TargetOptions, error) {
 	return o, nil
 }
 
+// ErrModelNotFound is what Resolve's error wraps when the requested model
+// is not an alias.
+var ErrModelNotFound = errors.New("model not found")
+
+type modelNotFoundError struct{ model string }
+
+func (e modelNotFoundError) Error() string { return fmt.Sprintf("model %q not found", e.model) }
+func (e modelNotFoundError) Unwrap() error { return ErrModelNotFound }
+
 // Plan is the ordered set of priority tiers for a request, plus the within-
 // tier balancing strategy.
 type Plan struct {
@@ -229,7 +238,7 @@ func (r *Router) resolveAlias(ctx context.Context, model string) (*Plan, error) 
 	err := r.st.PG.QueryRow(ctx, `SELECT strategy, dlp_model_scan, expose_backend_headers, dlp_audio_scan FROM model_aliases WHERE alias = $1`, model).Scan(&strategy, &dlpModelScan, &exposeBackendHeaders, &dlpAudioScan)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, lookupcache.Miss(fmt.Errorf("model %q not found", model))
+			return nil, lookupcache.Miss(modelNotFoundError{model})
 		}
 		return nil, err
 	}

@@ -2,17 +2,24 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/breaker"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 )
 
 // These are the seam tests for the per-tier circuit breaker. Requests go
@@ -384,4 +391,241 @@ func TestBreakerIsOffUnlessEnabled(t *testing.T) {
 	if servedByGuarded(t, s, plan, up) {
 		t.Error("tier still called with the breaker enabled gateway-wide")
 	}
+}
+
+// testBreakerRedis connects to TEST_REDIS_URL or skips.
+func testBreakerRedis(t *testing.T) *redis.Client {
+	t.Helper()
+	dsn := os.Getenv("TEST_REDIS_URL")
+	if dsn == "" {
+		t.Skip("TEST_REDIS_URL not set; skipping shared breaker state test")
+	}
+	opt, err := redis.ParseURL(dsn)
+	if err != nil {
+		t.Fatalf("parse redis url: %v", err)
+	}
+	rdb := redis.NewClient(opt)
+	t.Cleanup(func() { _ = rdb.Close() })
+	return rdb
+}
+
+func TestBreakerStateIsSharedThroughRedis(t *testing.T) {
+	rdb := testBreakerRedis(t)
+	up := newSwitchableUpstream(t, true)
+	clk := newFakeClock()
+	newReplica := func() *Server {
+		s := newRunChatTestServer(t, providers.NewOpenAICompat("flaky", "openai", up.URL, ""), providers.NewMock("mock-ok"))
+		s.breaker = s.newBreaker(rdb, breaker.WithClock(clk.Now))
+		return s
+	}
+	a, b := newReplica(), newReplica()
+	plan := guardedPlan(fmt.Sprintf("shared-%d", time.Now().UnixNano()), "flaky", breakerOn())
+
+	tripTier(t, a, plan, up)
+	if servedByGuarded(t, b, plan, up) {
+		t.Fatal("replica b still calls a tier replica a opened")
+	}
+
+	// After the cooldown exactly one of the two replicas gets the probe.
+	clk.Advance(time.Minute)
+	up.failing.Store(false)
+	before := up.calls.Load()
+	chat(t, b, plan)
+	chat(t, a, plan)
+	if got := up.calls.Load() - before; got != 2 {
+		t.Fatalf("upstream called %d times after the cooldown, want b's probe and then a's normal request", got)
+	}
+}
+
+func TestBreakerKeepsWorkingWithoutRedis(t *testing.T) {
+	// Nothing listens on this address: every Redis call fails at once.
+	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", DialTimeout: 50 * time.Millisecond, MaxRetries: -1})
+	t.Cleanup(func() { _ = rdb.Close() })
+	up := newSwitchableUpstream(t, true)
+	clk := newFakeClock()
+	s := newRunChatTestServer(t, providers.NewOpenAICompat("flaky", "openai", up.URL, ""), providers.NewMock("mock-ok"))
+	s.breaker = s.newBreaker(rdb, breaker.WithClock(clk.Now))
+	plan := guardedPlan("voice-reply", "flaky", breakerOn())
+
+	tripTier(t, s, plan, up)
+	start := time.Now()
+	if servedByGuarded(t, s, plan, up) {
+		t.Fatal("tier still called — the local fallback state did not open it")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("a request with Redis down took %v", elapsed)
+	}
+}
+
+type aliasHealthBody struct {
+	Alias string `json:"alias"`
+	Tiers []struct {
+		Tier                int       `json:"tier"`
+		BreakerEnabled      bool      `json:"breaker_enabled"`
+		State               string    `json:"state"`
+		Reason              string    `json:"reason"`
+		OpenUntil           time.Time `json:"open_until"`
+		CooldownMS          int64     `json:"cooldown_ms"`
+		ConsecutiveFailures int       `json:"consecutive_failures"`
+		Targets             []struct {
+			Provider string `json:"provider"`
+		} `json:"targets"`
+	} `json:"tiers"`
+}
+
+func getAliasHealth(t *testing.T, s *Server, alias string) (int, aliasHealthBody) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/aliases/"+alias+"/health", nil)
+	req.SetPathValue("alias", alias)
+	rec := httptest.NewRecorder()
+	s.handleAdminAliasHealth(rec, req)
+	var body aliasHealthBody
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	return rec.Code, body
+}
+
+// TestAdminAliasHealthAndRelease opens a tier through real traffic, reads it
+// back through the admin health view and releases it by hand.
+func TestAdminAliasHealthAndRelease(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	suffix := time.Now().UnixNano()
+	prov, okProv := fmt.Sprintf("health-flaky-%d", suffix), fmt.Sprintf("health-ok-%d", suffix)
+	alias := fmt.Sprintf("health-alias-%d", suffix)
+	for _, p := range []string{prov, okProv} {
+		if _, err := pool.Exec(ctx, `INSERT INTO providers (name, kind, base_url, enabled, max_concurrency) VALUES ($1, 'openai', 'http://127.0.0.1:1', true, 1)`, p); err != nil {
+			t.Fatalf("seed provider: %v", err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM model_aliases WHERE alias = $1`, alias)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM providers WHERE name = ANY($1)`, []string{prov, okProv})
+	})
+	up := newSwitchableUpstream(t, true)
+	clk := newFakeClock()
+	s := newBreakerTestServer(t, clk, providers.NewOpenAICompat(prov, "openai", up.URL, ""), providers.NewMock(okProv))
+	s.st = &store.Store{PG: pool}
+	s.router = routing.NewRouter(s.st)
+	var audited []string
+	s.auditHook = func(_ context.Context, _, action, _ string, _ any) { audited = append(audited, action) }
+
+	body := fmt.Sprintf(`{"targets":[
+		{"priority":0,"provider":%q,"upstream_model":"m","options":{"breaker":{"enabled":true}}},
+		{"priority":10,"provider":%q,"upstream_model":"mock-ok-model"}]}`, prov, okProv)
+	if rec := putAlias(s, alias, body); rec.Code != http.StatusOK {
+		t.Fatalf("put alias: %d %s", rec.Code, rec.Body.String())
+	}
+	plan, err := s.router.Resolve(ctx, alias, false)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	tripTier(t, s, plan, up)
+
+	code, h := getAliasHealth(t, s, alias)
+	if code != http.StatusOK || len(h.Tiers) != 2 {
+		t.Fatalf("health: %d %+v", code, h)
+	}
+	t0, t1 := h.Tiers[0], h.Tiers[1]
+	if t0.Tier != 0 || !t0.BreakerEnabled || t0.State != "open" || t0.Reason != "consecutive_failures" || t0.CooldownMS != 60000 {
+		t.Errorf("tier 0 = %+v, want an enabled breaker open on consecutive failures with a 60s cooldown", t0)
+	}
+	if want := clk.Now().Add(time.Minute); !t0.OpenUntil.Equal(want) {
+		t.Errorf("open_until = %v, want %v", t0.OpenUntil, want)
+	}
+	if len(t0.Targets) != 1 || t0.Targets[0].Provider != prov {
+		t.Errorf("tier 0 targets = %+v, want the flaky provider", t0.Targets)
+	}
+	if t1.Tier != 10 || t1.BreakerEnabled || t1.State != "closed" {
+		t.Errorf("tier 10 = %+v, want a closed tier without a breaker", t1)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/aliases/"+alias+"/tiers/0/release", nil)
+	req.SetPathValue("alias", alias)
+	req.SetPathValue("tier", "0")
+	rec := httptest.NewRecorder()
+	s.handleAdminReleaseTier(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("release: %d %s", rec.Code, rec.Body.String())
+	}
+	if len(audited) == 0 || audited[len(audited)-1] != "alias.tier.release" {
+		t.Errorf("audit actions = %v, want the release recorded", audited)
+	}
+	if _, h := getAliasHealth(t, s, alias); h.Tiers[0].State != "closed" {
+		t.Errorf("tier 0 after release = %+v, want closed", h.Tiers[0])
+	}
+	up.failing.Store(false)
+	if res := chat(t, s, plan); res.Provider != prov {
+		t.Errorf("after release served by %q, want the released tier", res.Provider)
+	}
+
+	if code, _ := getAliasHealth(t, s, "no-such-alias-"+alias); code != http.StatusNotFound {
+		t.Errorf("health of a missing alias = %d, want 404", code)
+	}
+}
+
+// scrapeMetrics renders the server's metrics in the Prometheus text format.
+func scrapeMetrics(t *testing.T, s *Server) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	s.metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	return rec.Body.String()
+}
+
+func TestBreakerTransitionsAreLoggedAndExported(t *testing.T) {
+	logs := captureLogs(t)
+	up := newSwitchableUpstream(t, true)
+	clk := newFakeClock()
+	s := newBreakerTestServer(t, clk, providers.NewOpenAICompat("flaky", "openai", up.URL, ""), providers.NewMock("mock-ok"))
+	s.metrics.RegisterBreakerStates(s.breakerStates)
+	plan := guardedPlan("voice-reply", "flaky", breakerOn())
+
+	tripTier(t, s, plan, up)
+	chat(t, s, plan) // skipped while open
+	if m := scrapeMetrics(t, s); !strings.Contains(m, `airllm_breaker_state{alias="voice-reply",tier="0"} 1`) {
+		t.Errorf("state gauge does not show tier 0 open:\n%s", grepLines(m, "airllm_breaker_state"))
+	}
+	clk.Advance(time.Minute)
+	up.failing.Store(false)
+	chat(t, s, plan) // the probe closes it
+
+	for _, line := range []string{"tier breaker opened", "tier breaker probe", "tier breaker closed"} {
+		if !strings.Contains(logs.String(), `"msg":"`+line+`"`) {
+			t.Errorf("no %q log line in:\n%s", line, logs.String())
+		}
+	}
+	if !strings.Contains(logs.String(), `"reason":"consecutive_failures"`) {
+		t.Error("the opened line does not carry the trip reason")
+	}
+
+	m := scrapeMetrics(t, s)
+	for _, want := range []string{
+		`airllm_breaker_state{alias="voice-reply",tier="0"} 0`,
+		`airllm_breaker_transitions_total{alias="voice-reply",tier="0",to="open"} 1`,
+		`airllm_breaker_transitions_total{alias="voice-reply",tier="0",to="half_open"} 1`,
+		`airllm_breaker_transitions_total{alias="voice-reply",tier="0",to="closed"} 1`,
+		`airllm_tier_fallbacks_total{alias="voice-reply",from_tier="0",reason="http_503",to_tier="1"} 3`,
+		`airllm_tier_fallbacks_total{alias="voice-reply",from_tier="0",reason="quarantined",to_tier="1"} 1`,
+		`airllm_tier_outcomes_total{alias="voice-reply",outcome="failure",tier="0"} 3`,
+		`airllm_tier_outcomes_total{alias="voice-reply",outcome="quarantined",tier="0"} 1`,
+		`airllm_tier_outcomes_total{alias="voice-reply",outcome="success",tier="0"} 1`,
+		`airllm_tier_outcomes_total{alias="voice-reply",outcome="success",tier="1"} 4`,
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("metrics lack %s\n%s", want, grepLines(m, "airllm_breaker", "airllm_tier"))
+		}
+	}
+}
+
+// grepLines keeps the lines of s that start with one of the prefixes.
+func grepLines(s string, prefixes ...string) string {
+	var out []string
+	for _, l := range strings.Split(s, "\n") {
+		for _, p := range prefixes {
+			if strings.HasPrefix(l, p) {
+				out = append(out, l)
+				break
+			}
+		}
+	}
+	return strings.Join(out, "\n")
 }

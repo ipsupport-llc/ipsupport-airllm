@@ -27,11 +27,15 @@ func putAlias(s *Server, alias, body string) *httptest.ResponseRecorder {
 func TestPutAliasRejectsInvalidTargetOptions(t *testing.T) {
 	s := &Server{}
 	cases := map[string]string{
-		"not an object":        `"fast"`,
-		"array":                `[1]`,
-		"negative budget":      `{"timeout_ms":-1}`,
-		"budget of wrong type": `{"timeout_ms":"2s"}`,
-		"flag of wrong type":   `{"fallback_on_auth":"yes"}`,
+		"not an object":         `"fast"`,
+		"array":                 `[1]`,
+		"negative budget":       `{"timeout_ms":-1}`,
+		"budget of wrong type":  `{"timeout_ms":"2s"}`,
+		"flag of wrong type":    `{"fallback_on_auth":"yes"}`,
+		"breaker not an object": `{"breaker":"on"}`,
+		"breaker zero failures": `{"breaker":{"failures":0}}`,
+		"breaker rate over one": `{"breaker":{"error_rate":1.5}}`,
+		"breaker zero cooldown": `{"breaker":{"cooldown_ms":0}}`,
 	}
 	for name, opts := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -125,6 +129,11 @@ func TestFailoverDefaultsRoundTrip(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("negative default budget: status = %d, want 400 before anything is saved", rec.Code)
 	}
+	rec = httptest.NewRecorder()
+	s.handleAdminPutFailover(rec, httptest.NewRequest(http.MethodPut, "/api/admin/failover", strings.NewReader(`{"breaker":{"min_requests":-1}}`)))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("negative breaker volume: status = %d, want 400 before anything is saved", rec.Code)
+	}
 
 	pool := testPool(t)
 	ctx := context.Background()
@@ -140,7 +149,7 @@ func TestFailoverDefaultsRoundTrip(t *testing.T) {
 	s.st = &store.Store{PG: pool}
 
 	rec = httptest.NewRecorder()
-	s.handleAdminPutFailover(rec, httptest.NewRequest(http.MethodPut, "/api/admin/failover", strings.NewReader(`{"timeout_ms":2500,"fallback_on_auth":true}`)))
+	s.handleAdminPutFailover(rec, httptest.NewRequest(http.MethodPut, "/api/admin/failover", strings.NewReader(`{"timeout_ms":2500,"fallback_on_auth":true,"breaker":{"enabled":true,"cooldown_ms":5000}}`)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("put: %d %s", rec.Code, rec.Body.String())
 	}
@@ -150,7 +159,7 @@ func TestFailoverDefaultsRoundTrip(t *testing.T) {
 	fresh.loadFailover(ctx)
 	rec = httptest.NewRecorder()
 	fresh.handleAdminGetFailover(rec, httptest.NewRequest(http.MethodGet, "/api/admin/failover", nil))
-	if got := strings.TrimSpace(rec.Body.String()); got != `{"timeout_ms":2500,"fallback_on_auth":true}` {
+	if got := strings.TrimSpace(rec.Body.String()); got != `{"timeout_ms":2500,"fallback_on_auth":true,"breaker":{"enabled":true,"cooldown_ms":5000}}` {
 		t.Errorf("get = %s, want the saved defaults", got)
 	}
 }
