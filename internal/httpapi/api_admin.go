@@ -531,9 +531,9 @@ func (s *Server) handleAdminAliases(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var alias, protocol, strategy, provider, upModel, label string
 		var options []byte
-		var priority, affinityTTLS, cacheTTLS int
+		var priority, affinityTTLS, synthesisCacheTTLS int
 		var dlpModelScan, exposeBackendHeaders, dlpAudioScan, sessionAffinity, synthesisCache bool
-		if err := rows.Scan(&alias, &protocol, &strategy, &dlpModelScan, &exposeBackendHeaders, &dlpAudioScan, &sessionAffinity, &affinityTTLS, &synthesisCache, &cacheTTLS, &priority, &provider, &upModel, &label, &options); err != nil {
+		if err := rows.Scan(&alias, &protocol, &strategy, &dlpModelScan, &exposeBackendHeaders, &dlpAudioScan, &sessionAffinity, &affinityTTLS, &synthesisCache, &synthesisCacheTTLS, &priority, &provider, &upModel, &label, &options); err != nil {
 			writeControlError(w, http.StatusInternalServerError, "failed to read aliases")
 			return
 		}
@@ -541,7 +541,7 @@ func (s *Server) handleAdminAliases(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			av = &aliasView{Alias: alias, Protocol: protocol, Strategy: strategy, DLPModelScan: dlpModelScan, ExposeBackendHeaders: exposeBackendHeaders, DLPAudioScan: dlpAudioScan,
 				SessionAffinity: sessionAffinity, SessionAffinityTTLS: affinityTTLS,
-				SynthesisCache: synthesisCache, SynthesisCacheTTLS: cacheTTLS, Targets: []aliasTarget{}}
+				SynthesisCache: synthesisCache, SynthesisCacheTTLS: synthesisCacheTTLS, Targets: []aliasTarget{}}
 			byAlias[alias] = av
 			order = append(order, alias)
 		}

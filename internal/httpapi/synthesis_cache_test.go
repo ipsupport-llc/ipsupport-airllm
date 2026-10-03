@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/audio"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/metrics"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
@@ -178,8 +180,12 @@ func TestBackupVoiceClipsAreCachedUnderTheBackupAndNeverServedForThePrimary(t *t
 		if rate != 22050 || res.Provider != "piper" {
 			t.Fatalf("request %d: rate=%d served by %s, want the backup's voice during the outage", i, rate, res.Provider)
 		}
-		if want := map[bool]string{true: cacheMiss, false: cacheHit}[i == 0]; res.Cache != want {
+		if want := map[bool]cacheOutcome{true: cacheMiss, false: cacheHit}[i == 0]; res.Cache != want {
 			t.Errorf("request %d: cache=%q, want %q", i, res.Cache, want)
+		}
+		// Every request paid the failing primary; a hit adds no call of its own.
+		if res.Attempts != 2-min(i, 1) {
+			t.Errorf("request %d: attempts=%d, want %d", i, res.Attempts, 2-min(i, 1))
 		}
 	}
 	if n := len(backup.asked()); n != 1 {
@@ -288,11 +294,30 @@ func TestSynthesisCacheOutcomesAreCounted(t *testing.T) {
 	s.metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body, _ := io.ReadAll(rec.Body)
 	for _, want := range []string{
-		`airllm_synthesis_cache_total{alias="voice-tts",outcome="hit"} 2`,
-		`airllm_synthesis_cache_total{alias="voice-tts",outcome="miss"} 1`,
+		`airllm_synthesis_cache_total{alias="voice-tts",outcome="hit",provider="piper"} 2`,
+		`airllm_synthesis_cache_total{alias="voice-tts",outcome="miss",provider="piper"} 1`,
 	} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("metrics missing %s", want)
 		}
+	}
+}
+
+func TestAnUnreadableCacheLeavesTheProviderToAnswer(t *testing.T) {
+	up := newVoiceUpstream(t, 22050)
+	s := newCacheTestServer(t, &testClock{t: time.Now()}, map[string]*voiceUpstream{"piper": up})
+	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", MaxRetries: -1})
+	t.Cleanup(func() { _ = rdb.Close() })
+	s.speechCache = speechcache.New(rdb)
+	plan := cachedPlan(routing.Target{Provider: "piper", UpstreamModel: "tts-1"})
+
+	for i := range 2 {
+		rate, res := speak(t, s, plan, "Hello", "en_US-amy-medium")
+		if rate != 22050 || res.Cache != cacheError || res.Attempts != 1 {
+			t.Errorf("request %d: rate=%d cache=%q attempts=%d, want the provider's clip with outcome error", i, rate, res.Cache, res.Attempts)
+		}
+	}
+	if n := len(up.asked()); n != 2 {
+		t.Errorf("upstream asked %d times, want every request answered by it", n)
 	}
 }

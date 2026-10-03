@@ -311,7 +311,7 @@ All metrics are prefixed `airllm_`.
 | `airllm_capture_dropped` | gauge | — | Capture records dropped due to a full async buffer |
 | `airllm_ledger_dropped` | gauge | — | Usage ledger rows dropped due to a full async buffer (that request's cost/tokens never reached `usage_ledger`) |
 | `airllm_webhook_dropped` | gauge | — | Alert webhook deliveries dropped due to a full async buffer under sustained fan-out |
-| `airllm_synthesis_cache_total` | counter | `alias`, `outcome` | Speech requests on aliases with the [synthesis cache](configuration.md#synthesis-cache): `hit` (answered from a clip), `miss` (a provider rendered it), `error` (the cache could not be read; a provider answered) |
+| `airllm_synthesis_cache_total` | counter | `alias`, `provider`, `outcome` | Answered speech requests on aliases with the [synthesis cache](configuration.md#synthesis-cache), by the provider whose voice answered: `hit` (answered from a clip), `miss` (the provider rendered it), `error` (the cache could not be read; the provider answered) |
 
 ### Grafana dashboards
 

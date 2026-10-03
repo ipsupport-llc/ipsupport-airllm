@@ -373,7 +373,9 @@ provider that served the request, the voice and model that provider was sent
 after the target's [`voices` / `default_voices`](#failover-policy-getput-apiadminfailover)
 mapping, the request's `language`, the `response_format` and the text. The
 cache is asked once the attempt loop has picked a tier, inside that tier's
-attempt, so it only ever offers the clip that tier rendered:
+attempt, so it only ever offers the clip that tier rendered — and a tier the
+loop passes over (busy at its `max_concurrency`, or failing) does not serve
+its clips either:
 
 - While the primary tier is out, the backup voice renders a phrase once and
   serves it from the cache after that. Those clips are kept under the backup
@@ -390,9 +392,11 @@ sample rate — and costs nothing: the ledger row has `cached = true`,
 `attempts` count of only the tiers that failed before it (so a plain hit is
 `0`). Its characters still count against the key's `tts_chars` limit, which
 exists to stop a runaway client. The `request completed` log line of every
-speech request on such an alias carries `cache` (`hit`, `miss`, or `error`
-when the cache could not be read), and `airllm_synthesis_cache_total` counts
-the same outcomes per alias.
+answered speech request on such an alias carries `cache` (`hit`, `miss`, or
+`error` when the cache could not be read), and `airllm_synthesis_cache_total`
+counts the same outcomes per alias and serving provider — so during an outage
+the backup provider's hits show apart from the primary's. A request every
+tier failed has no outcome.
 
 | Alias field | Default | Meaning |
 |-------------|---------|---------|

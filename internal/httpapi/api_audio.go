@@ -429,7 +429,8 @@ func (s *Server) runTranscribe(ctx context.Context, plan *routing.Plan, req audi
 // is stored for the next request.
 func (s *Server) runSynthesize(ctx context.Context, plan *routing.Plan, req audio.SpeechRequest) (audio.SpeechResponse, execResult, error) {
 	var resp audio.SpeechResponse
-	var served, cache string
+	var served string
+	var cache cacheOutcome
 	var key speechcache.Key
 	supports := func(p providers.Provider) error {
 		if _, ok := p.(providers.Synthesizer); !ok {
@@ -490,6 +491,8 @@ func (s *Server) runSynthesize(ctx context.Context, plan *routing.Plan, req audi
 	res.UpstreamModel, res.Cache = served, cache
 	switch cache {
 	case cacheHit:
+		// executePlan counted the attempt that found the clip, but no
+		// upstream call was made for it.
 		res.Attempts--
 	case cacheMiss:
 		// Stored even if the client has gone: the clip is already paid for.
@@ -499,7 +502,7 @@ func (s *Server) runSynthesize(ctx context.Context, plan *routing.Plan, req audi
 		}
 	}
 	if cache != "" {
-		s.metrics.SynthesisCache(plan.Alias, cache)
+		s.metrics.SynthesisCache(plan.Alias, res.Provider, string(cache))
 	}
 	return resp, res, nil
 }
