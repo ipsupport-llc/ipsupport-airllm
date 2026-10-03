@@ -34,6 +34,9 @@ spec:
         app.kubernetes.io/component: gateway
     spec:
       serviceAccountName: {{ include "airllm.serviceAccountName" . }}
+      # Covers config.shutdownDrain + config.shutdownTimeout, so the kubelet
+      # does not kill a pod that is still finishing its in-flight requests.
+      terminationGracePeriodSeconds: {{ .Values.app.terminationGracePeriodSeconds }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}

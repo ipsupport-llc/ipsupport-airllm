@@ -22,6 +22,15 @@ config:                                         # non-secret env (rendered into 
   authMode: local                               # local | oidc
   adminUsername: admin
   captureBlobDir: /var/lib/airllm/captures
+  # Every replica keeps providers and a few settings in memory; a save through the
+  # admin console reaches the OTHER replicas on their next refresh.
+  configRefreshInterval: 10s
+  # On SIGTERM the pod keeps accepting requests for shutdownDrain (the load balancer
+  # needs a moment to stop routing to it), then gives in-flight requests — streams
+  # included — up to shutdownTimeout. Keep their sum below
+  # app.terminationGracePeriodSeconds.
+  shutdownDrain: 5s
+  shutdownTimeout: 20s
   oidc:                                         # used only when authMode: oidc (non-secret parts)
     issuer: ""
     clientId: ""
@@ -60,6 +69,10 @@ app:
     tls:
       enabled: false
       secretName: ""
+  terminationGracePeriodSeconds: 30           # > config.shutdownDrain + config.shutdownTimeout
+  podDisruptionBudget:                          # caps voluntary disruptions (node drains, upgrades)
+    enabled: true
+    maxUnavailable: 1
   autoscaling:
     enabled: true
     minReplicas: 2

@@ -23,7 +23,10 @@
         "httpAddr": { "type": "string" },
         "authMode": { "type": "string", "enum": ["local", "oidc"] },
         "adminUsername": { "type": "string" },
-        "captureBlobDir": { "type": "string" }
+        "captureBlobDir": { "type": "string" },
+        "configRefreshInterval": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(ms|s|m|h)$" },
+        "shutdownDrain": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(ms|s|m|h)$" },
+        "shutdownTimeout": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(ms|s|m|h)$" }
       }
     },
     "googleWorkloadIdentity": {
@@ -41,6 +44,14 @@
       "type": "object",
       "properties": {
         "replicaCount": { "type": "integer", "minimum": 0 },
+        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 1 },
+        "podDisruptionBudget": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "maxUnavailable": { "type": ["integer", "string"] }
+          }
+        },
         "autoscaling": {
           "type": "object",
           "properties": {
