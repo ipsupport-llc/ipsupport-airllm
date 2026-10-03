@@ -28,25 +28,9 @@ import (
 // client got. Cooldowns and windows run on an injected clock, so no test
 // sleeps for anything like a production duration.
 
-// fakeClock is a settable clock for the breaker.
-type fakeClock struct {
-	mu  sync.Mutex
-	now time.Time
-}
-
-func newFakeClock() *fakeClock { return &fakeClock{now: time.Unix(1_700_000_000, 0)} }
-
-func (c *fakeClock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.now
-}
-
-func (c *fakeClock) Advance(d time.Duration) {
-	c.mu.Lock()
-	c.now = c.now.Add(d)
-	c.mu.Unlock()
-}
+// newFakeClock returns a settable clock for the breaker (fakeClock lives in
+// lookup_cache_test.go).
+func newFakeClock() *fakeClock { return &fakeClock{t: time.Unix(1_700_000_000, 0)} }
 
 // switchableUpstream answers chat completions with a 503 while failing is
 // set and with a short completion otherwise, counting every call.
