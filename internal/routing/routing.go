@@ -253,6 +253,23 @@ func (o TargetOptions) SpeakAs(voice, language string) (VoiceChoice, bool) {
 	return VoiceChoice{}, false
 }
 
+// DefaultSynthesisCacheTTL is how long a cached clip lives when the alias
+// does not set its own TTL: long enough to carry a greeting through a
+// multi-day outage of the primary voice.
+const DefaultSynthesisCacheTTL = 7 * 24 * time.Hour
+
+// MaxSynthesisCacheTTLSeconds bounds an alias's own clip TTL (30 days).
+const MaxSynthesisCacheTTLSeconds = 30 * 24 * 3600
+
+// SynthesisCacheTTL is the clip TTL an alias's stored
+// synthesis_cache_ttl_s means: 0 (unset) is DefaultSynthesisCacheTTL.
+func SynthesisCacheTTL(seconds int) time.Duration {
+	if seconds <= 0 {
+		return DefaultSynthesisCacheTTL
+	}
+	return time.Duration(seconds) * time.Second
+}
+
 // Plan is the ordered set of priority tiers for a request, plus the within-
 // tier balancing strategy.
 type Plan struct {
@@ -267,6 +284,11 @@ type Plan struct {
 	// pin lasts after the session's last request served there.
 	SessionAffinity    bool
 	SessionAffinityTTL time.Duration
+	// SynthesisCache answers a repeated speech request from the clip the
+	// serving tier rendered before; SynthesisCacheTTL is how long a clip is
+	// kept.
+	SynthesisCache    bool
+	SynthesisCacheTTL time.Duration
 }
 
 // Ordered flattens the tiers into the try-order for one request: tier by tier,
@@ -359,11 +381,11 @@ func (r *Router) Resolve(ctx context.Context, model string, allowPassthrough boo
 // resolveAlias expands an alias from the catalog into priority tiers.
 func (r *Router) resolveAlias(ctx context.Context, model string) (*Plan, error) {
 	var strategy string
-	var dlpModelScan, exposeBackendHeaders, dlpAudioScan, sessionAffinity bool
-	var affinityTTLSeconds int
+	var dlpModelScan, exposeBackendHeaders, dlpAudioScan, sessionAffinity, synthesisCache bool
+	var affinityTTLSeconds, synthesisCacheTTLSeconds int
 	err := r.st.PG.QueryRow(ctx, `
-		SELECT strategy, dlp_model_scan, expose_backend_headers, dlp_audio_scan, session_affinity, session_affinity_ttl_s
-		FROM model_aliases WHERE alias = $1`, model).Scan(&strategy, &dlpModelScan, &exposeBackendHeaders, &dlpAudioScan, &sessionAffinity, &affinityTTLSeconds)
+		SELECT strategy, dlp_model_scan, expose_backend_headers, dlp_audio_scan, session_affinity, session_affinity_ttl_s, synthesis_cache, synthesis_cache_ttl_s
+		FROM model_aliases WHERE alias = $1`, model).Scan(&strategy, &dlpModelScan, &exposeBackendHeaders, &dlpAudioScan, &sessionAffinity, &affinityTTLSeconds, &synthesisCache, &synthesisCacheTTLSeconds)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, lookupcache.Miss(modelNotFoundError{model})
@@ -424,7 +446,8 @@ func (r *Router) resolveAlias(ctx context.Context, model string) (*Plan, error) 
 	}
 	return &Plan{
 		Alias: model, Strategy: strategy, DLPModelScan: dlpModelScan, ExposeBackendHeaders: exposeBackendHeaders, DLPAudioScan: dlpAudioScan,
-		SessionAffinity: sessionAffinity, SessionAffinityTTL: AffinityTTL(affinityTTLSeconds), Tiers: tiers,
+		SessionAffinity: sessionAffinity, SessionAffinityTTL: AffinityTTL(affinityTTLSeconds),
+		SynthesisCache: synthesisCache, SynthesisCacheTTL: SynthesisCacheTTL(synthesisCacheTTLSeconds), Tiers: tiers,
 	}, nil
 }
 

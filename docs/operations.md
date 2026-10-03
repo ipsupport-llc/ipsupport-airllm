@@ -91,8 +91,15 @@ migrations. A clean re-bootstrap is `make compose-down && make compose-up`.
 - **Postgres** is the source of truth — back it up. It holds identity, keys,
   sealed provider credentials, the usage ledger, DLP incidents, the capture
   index, and runtime settings.
-- **Redis** holds only ephemeral rolling-usage counters; it can be rebuilt and
-  does not require backup.
+- **Redis** holds only ephemeral data — rolling-usage counters and, for aliases
+  with the [synthesis cache](configuration.md#synthesis-cache), cached speech
+  clips; it can be rebuilt and does not require backup. Cached clips are the
+  bulk of it (a few hundred KB per phrase and voice for WAV), so size Redis
+  for the distinct phrases those aliases speak within their TTL. A Redis that
+  runs out of memory refuses the counters' writes as well as the clips', and
+  an eviction policy would drop counters as readily as clips, so give it room
+  rather than relying on eviction; a shorter `synthesis_cache_ttl_s` is the
+  lever when it grows.
 - **Blob store** holds sealed capture bodies. In dev it is `CAPTURE_BLOB_DIR` on
   the filesystem; back it with a volume or object store on deploy. Capture
   retention and the raw-window TTL bound its growth.
@@ -304,6 +311,7 @@ All metrics are prefixed `airllm_`.
 | `airllm_capture_dropped` | gauge | — | Capture records dropped due to a full async buffer |
 | `airllm_ledger_dropped` | gauge | — | Usage ledger rows dropped due to a full async buffer (that request's cost/tokens never reached `usage_ledger`) |
 | `airllm_webhook_dropped` | gauge | — | Alert webhook deliveries dropped due to a full async buffer under sustained fan-out |
+| `airllm_synthesis_cache_total` | counter | `alias`, `outcome` | Speech requests on aliases with the [synthesis cache](configuration.md#synthesis-cache): `hit` (answered from a clip), `miss` (a provider rendered it), `error` (the cache could not be read; a provider answered) |
 
 ### Grafana dashboards
 

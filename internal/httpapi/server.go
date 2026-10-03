@@ -26,6 +26,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/secrets"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/speechcache"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/unavail"
 )
@@ -85,6 +86,7 @@ type Server struct {
 	breaker       *breaker.Breaker // per-tier circuit breaker; nil admits everything
 	unavail       *unavail.Store   // per-(provider,model) Retry-After-aware skip; nil Check never skips
 	affinity      *affinity.Store  // session pins to a backup tier; nil pins nothing
+	speechCache   *speechcache.Cache
 
 	// Test hooks: non-nil values replace the real implementations in tests.
 	auditHook    func(ctx context.Context, actor, action, target string, detail any)
@@ -117,6 +119,7 @@ func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 		oidc:         deps.OIDC,
 		httpc:        &http.Client{},
 		metrics:      metrics.New(),
+		speechCache:  speechcache.New(st.RDB),
 	}
 	if deps.Providers != nil {
 		s.regPtr.Store(deps.Providers)

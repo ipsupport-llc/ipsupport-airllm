@@ -57,6 +57,18 @@ func TestPutAliasRejectsInvalidTargetOptions(t *testing.T) {
 	}
 }
 
+// TestPutAliasRejectsAnOutOfRangeSynthesisCacheTTL runs with no database:
+// the TTL is checked before anything is written.
+func TestPutAliasRejectsAnOutOfRangeSynthesisCacheTTL(t *testing.T) {
+	s := &Server{}
+	for _, ttl := range []string{"-1", "2592001"} {
+		body := `{"synthesis_cache":true,"synthesis_cache_ttl_s":` + ttl + `,"targets":[{"priority":0,"provider":"p","upstream_model":"m"}]}`
+		if rec := putAlias(s, "a", body); rec.Code != http.StatusBadRequest {
+			t.Errorf("ttl %s: status = %d, want 400 (%s)", ttl, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 // TestAliasTargetOptionsRoundTrip saves an alias with per-target options,
 // reads it back through the admin list, and resolves it through the router
 // the data plane uses.

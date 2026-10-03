@@ -205,7 +205,18 @@ type execResult struct {
 	Attempts int
 	// Session is the request's client session header, or "".
 	Session string
+	// Cache is how the synthesis cache answered a speech request on an
+	// alias that has it: cacheHit, cacheMiss or cacheError. Empty otherwise.
+	Cache string
 }
+
+// Synthesis cache outcomes, as execResult.Cache, the request log line and
+// the airllm_synthesis_cache_total metric spell them.
+const (
+	cacheHit   = "hit"
+	cacheMiss  = "miss"
+	cacheError = "error" // the cache could not be read; a provider answered
+)
 
 // attemptCall makes one upstream call to target t through provider p. commit
 // is runAttempt's: a streaming call invokes it before emitting its first

@@ -24,6 +24,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/pricing"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/speechcache"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 )
 
@@ -297,5 +298,138 @@ func TestCapabilitiesRouteReportsTheFirstTiersVoices(t *testing.T) {
 		{ID: "ru_RU-irina-medium", Language: "ru-RU", Gender: "female"},
 	}; !slices.Equal(got, want) {
 		t.Errorf("Piper-first alias: voices %+v, want the first tier's own voices %+v", got, want)
+	}
+}
+
+func TestSpeechRouteServesARepeatFromTheCacheAndMetersItAsCached(t *testing.T) {
+	up, calls := fakeOpenAISpeech(t, "audio/wav", pcmWAV(22050, 1))
+	suffix := fmt.Sprint(time.Now().UnixNano())
+	piper, alias := "piper-"+suffix, "voice-tts-"+suffix
+	s := newAudioRig(t, providers.NewOpenAICompat(piper, "openai", up.URL, ""))
+	s.speechCache = speechcache.New(nil)
+	seedAudioAlias(t, s, alias, map[string]string{piper: "openai"},
+		fmt.Sprintf(`[{"priority":0,"provider":%q,"upstream_model":"tts-1"}]`, piper))
+	if rec := putAlias(s.Server, alias, fmt.Sprintf(`{"synthesis_cache":true,"dlp_audio_scan":false,"targets":[{"priority":0,"provider":%q,"upstream_model":"tts-1"}]}`, piper)); rec.Code != http.StatusOK {
+		t.Fatalf("turn the cache on: %d %s", rec.Code, rec.Body.String())
+	}
+	s.pricing.Set(piper, "tts-1", pricing.Price{Unit: pricing.UnitTextChar, InputPer1M: 15})
+	logs := captureLogs(t)
+
+	var replies [][]byte
+	for range 2 {
+		rec := httptest.NewRecorder()
+		s.handleAudioSpeech(rec, asKey(speechRequest(fmt.Sprintf(`{"model":%q,"input":"Hello there","voice":"alloy"}`, alias)), alias))
+		if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "audio/wav" {
+			t.Fatalf("status = %d, content type %q: %s", rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
+		}
+		replies = append(replies, rec.Body.Bytes())
+	}
+	if n := len(calls()); n != 1 {
+		t.Errorf("upstream asked %d times, want the repeat answered from the cache", n)
+	}
+	if !bytes.Equal(replies[0], replies[1]) {
+		t.Error("the cached reply differs from the synthesized one")
+	}
+
+	s.flushLedger()
+	rows, err := s.st.PG.Query(context.Background(),
+		`SELECT cached, cost_usd::float8, attempts, provider_name, upstream_model, status FROM usage_ledger WHERE alias = $1 ORDER BY ts, id`, alias)
+	if err != nil {
+		t.Fatalf("ledger rows: %v", err)
+	}
+	defer rows.Close()
+	type row struct {
+		cached          bool
+		cost            float64
+		attempts        int
+		provider, model string
+		status          int
+	}
+	var got []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.cached, &r.cost, &r.attempts, &r.provider, &r.model, &r.status); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		got = append(got, r)
+	}
+	want := []row{
+		{false, 0.000165, 1, piper, "tts-1", http.StatusOK},
+		{true, 0, 0, piper, "tts-1", http.StatusOK},
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("ledger = %+v, want the synthesis at 11 characters and then a cached row at no cost and no attempt: %+v", got, want)
+	}
+
+	var outcomes []string
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var rec struct {
+			Msg   string `json:"msg"`
+			Cache string `json:"cache"`
+		}
+		if json.Unmarshal([]byte(line), &rec) == nil && rec.Msg == "request completed" {
+			outcomes = append(outcomes, rec.Cache)
+		}
+	}
+	if fmt.Sprint(outcomes) != "[miss hit]" {
+		t.Errorf("request log cache outcomes = %v, want [miss hit]", outcomes)
+	}
+}
+
+func TestAliasSynthesisCacheSettingsRoundTripAndDefaultOff(t *testing.T) {
+	suffix := fmt.Sprint(time.Now().UnixNano())
+	piper, plain, cached := "piper-"+suffix, "plain-tts-"+suffix, "cached-tts-"+suffix
+	s := newAudioRig(t, providers.NewOpenAICompat(piper, "openai", "http://127.0.0.1:1", ""))
+	seedAudioAlias(t, s, plain, map[string]string{piper: "openai"},
+		fmt.Sprintf(`[{"priority":0,"provider":%q,"upstream_model":"tts-1"}]`, piper))
+	s.aliases = append(s.aliases, cached)
+	t.Cleanup(func() {
+		_, _ = s.st.PG.Exec(context.Background(), `DELETE FROM model_aliases WHERE alias = $1`, cached)
+	})
+	if rec := putAlias(s.Server, cached, fmt.Sprintf(`{"synthesis_cache":true,"synthesis_cache_ttl_s":172800,"targets":[{"priority":0,"provider":%q,"upstream_model":"tts-1"}]}`, piper)); rec.Code != http.StatusOK {
+		t.Fatalf("put alias: %d %s", rec.Code, rec.Body.String())
+	}
+
+	ctx := context.Background()
+	for alias, want := range map[string]struct {
+		on  bool
+		ttl time.Duration
+	}{plain: {false, routing.DefaultSynthesisCacheTTL}, cached: {true, 48 * time.Hour}} {
+		plan, err := s.router.Resolve(ctx, alias, false)
+		if err != nil {
+			t.Fatalf("resolve %s: %v", alias, err)
+		}
+		if plan.SynthesisCache != want.on || plan.SynthesisCacheTTL != want.ttl {
+			t.Errorf("%s: cache=%v ttl=%v, want %v %v", alias, plan.SynthesisCache, plan.SynthesisCacheTTL, want.on, want.ttl)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	s.handleAdminAliases(rec, httptest.NewRequest(http.MethodGet, "/api/admin/aliases", nil))
+	var list struct {
+		Aliases []struct {
+			Alias              string `json:"alias"`
+			SynthesisCache     bool   `json:"synthesis_cache"`
+			SynthesisCacheTTLS int    `json:"synthesis_cache_ttl_s"`
+		} `json:"aliases"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &list)
+	found := 0
+	for _, a := range list.Aliases {
+		switch a.Alias {
+		case plain:
+			found++
+			if a.SynthesisCache || a.SynthesisCacheTTLS != 0 {
+				t.Errorf("plain alias lists cache=%v ttl=%d, want off and 0", a.SynthesisCache, a.SynthesisCacheTTLS)
+			}
+		case cached:
+			found++
+			if !a.SynthesisCache || a.SynthesisCacheTTLS != 172800 {
+				t.Errorf("cached alias lists cache=%v ttl=%d, want on and 172800", a.SynthesisCache, a.SynthesisCacheTTLS)
+			}
+		}
+	}
+	if found != 2 {
+		t.Errorf("found %d of the two aliases in the list", found)
 	}
 }
