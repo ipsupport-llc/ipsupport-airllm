@@ -1,0 +1,460 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Tier failover: breaker state, fallbacks, per-tier outcomes and latency, synthesis cache. See docs/operations.md, Failover on-call.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "panels": [],
+      "title": "Breakers",
+      "type": "row"
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 0
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "closed",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "open",
+                  "color": "red",
+                  "index": 1
+                },
+                "2": {
+                  "text": "half-open",
+                  "color": "yellow",
+                  "index": 2
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 1
+      },
+      "id": 2,
+      "options": {
+        "showValue": "never",
+        "mergeValues": true,
+        "rowHeight": 0.9,
+        "alignValue": "left",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "title": "Breaker state per tier",
+      "type": "state-timeline",
+      "targets": [
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "max by (alias, tier) (airllm_breaker_state{alias=~\"$alias\"})",
+          "legendFormat": "{{alias}} · tier {{tier}}",
+          "refId": "A"
+        }
+      ],
+      "description": "Closed, open (quarantined) or half-open (one probe let through). Read from the shared breaker state; max across replicas, since each replica only reports the tiers it has served since it started. Only tiers with the breaker switched on appear."
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
+      "id": 3,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "title": "Breaker transitions",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "sum by (alias, tier, to) (increase(airllm_breaker_transitions_total{alias=~\"$alias\"}[$__rate_interval]))",
+          "legendFormat": "{{alias}} · tier {{tier}} → {{to}}",
+          "refId": "A"
+        }
+      ],
+      "description": "State changes per interval. Repeated open → half_open → open is a tier whose probes keep failing; each re-trip doubles its cooldown."
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "id": 4,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "title": "Fallbacks by origin → destination and reason",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "sum by (alias, from_tier, to_tier, reason) (rate(airllm_tier_fallbacks_total{alias=~\"$alias\"}[$__rate_interval]))",
+          "legendFormat": "{{alias}} · {{from_tier}} → {{to_tier}} ({{reason}})",
+          "refId": "A"
+        }
+      ],
+      "description": "Requests that moved past a tier, by the tier that served them in the end (none: nothing did) and why. reason=quarantined is a tier skipped by its open breaker."
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "id": 5,
+      "panels": [],
+      "title": "Tiers",
+      "type": "row"
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "title": "Tier outcomes",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "sum by (alias, tier, outcome) (rate(airllm_tier_outcomes_total{alias=~\"$alias\"}[$__rate_interval]))",
+          "legendFormat": "{{alias}} · tier {{tier}} {{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "description": "Attempts per tier: success, failure (counts against the tier), request_error (the request's fault, no verdict) and quarantined (skipped, no call)."
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 18
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "title": "Tier failure ratio",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "sum by (alias, tier) (rate(airllm_tier_outcomes_total{alias=~\"$alias\", outcome=\"failure\"}[$__rate_interval])) / sum by (alias, tier) (rate(airllm_tier_outcomes_total{alias=~\"$alias\", outcome=~\"success|failure\"}[$__rate_interval]))",
+          "legendFormat": "{{alias}} · tier {{tier}}",
+          "refId": "A"
+        }
+      ],
+      "description": "Failures among the attempts that gave a verdict on the tier."
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 26
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "title": "Tier latency p50",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "histogram_quantile(0.5, sum by (le, alias, tier, outcome) (rate(airllm_tier_attempt_duration_seconds_bucket{alias=~\"$alias\", outcome=~\"success|failure\"}[$__rate_interval])))",
+          "legendFormat": "{{alias}} · tier {{tier}} {{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "description": "Time from an attempt's start to its verdict — for a stream, its first chunk. A failure line sitting at the tier's time budget is a tier that hangs rather than errors."
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 26
+      },
+      "id": 9,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "title": "Tier latency p95",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "histogram_quantile(0.95, sum by (le, alias, tier, outcome) (rate(airllm_tier_attempt_duration_seconds_bucket{alias=~\"$alias\", outcome=~\"success|failure\"}[$__rate_interval])))",
+          "legendFormat": "{{alias}} · tier {{tier}} {{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "description": "Time from an attempt's start to its verdict — for a stream, its first chunk. A failure line sitting at the tier's time budget is a tier that hangs rather than errors."
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      },
+      "id": 10,
+      "panels": [],
+      "title": "Synthesis cache",
+      "type": "row"
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 35
+      },
+      "id": 11,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "title": "Synthesis cache hit rate",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "sum by (alias) (rate(airllm_synthesis_cache_total{alias=~\"$alias\", outcome=\"hit\"}[$__rate_interval])) / sum by (alias) (rate(airllm_synthesis_cache_total{alias=~\"$alias\"}[$__rate_interval]))",
+          "legendFormat": "{{alias}}",
+          "refId": "A"
+        }
+      ],
+      "description": "Share of answered synthesis requests served from the cache. Empty until a gateway with the synthesis cache serves an alias that has it switched on."
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "airllm"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Prometheus",
+        "multi": false,
+        "name": "DS_PROMETHEUS",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "type": "datasource"
+      },
+      {
+        "current": {},
+        "datasource": "${DS_PROMETHEUS}",
+        "definition": "label_values(airllm_tier_outcomes_total, alias)",
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "Alias",
+        "multi": true,
+        "name": "alias",
+        "options": [],
+        "query": {
+          "query": "label_values(airllm_tier_outcomes_total, alias)",
+          "refId": "alias"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "AirLLM Failover",
+  "uid": "airllm-failover",
+  "version": 1
+}

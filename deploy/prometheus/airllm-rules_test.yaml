@@ -1,0 +1,29 @@
+# Unit tests for the chart's PrometheusRule, run by `make rules-test` against the
+# rule rendered from ci/full-values.yaml into namespace airllm.
+rule_files: [rules.yaml]
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      # replica a saw tier 0 open for 20m; replica b never served it
+      - series: 'airllm_breaker_state{namespace="airllm",pod="a",alias="voice",tier="0"}'
+        values: '1x8 2 1x10'
+      - series: 'airllm_breaker_state{namespace="airllm",pod="b",alias="voice",tier="0"}'
+        values: '0x20'
+      # a tier that opened briefly and closed
+      - series: 'airllm_breaker_state{namespace="airllm",pod="a",alias="voice",tier="1"}'
+        values: '0x3 1x5 0x12'
+      # another release's namespace is not ours
+      - series: 'airllm_breaker_state{namespace="other",pod="c",alias="voice",tier="0"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: AirLLMTierQuarantined
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: AirLLMTierQuarantined
+        exp_alerts:
+          - exp_labels: {namespace: airllm, alias: voice, tier: "0", severity: warning, alert_source: metric}
+            exp_annotations:
+              summary: "AirLLM alias voice tier 0 quarantined for over 15m"
+              description: "The tier's circuit breaker has not closed for 15m: its provider keeps failing and requests are served by the next tier. Check the AirLLM Failover dashboard, the console's Aliases → Health view and the gateway's \"tier attempt failed\" logs for this alias."

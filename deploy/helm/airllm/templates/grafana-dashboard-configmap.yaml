@@ -11,4 +11,6 @@ metadata:
 data:
   airllm-overview.json: |-
 {{ .Files.Get "files/airllm-overview.json" | indent 4 }}
+  airllm-failover.json: |-
+{{ .Files.Get "files/airllm-failover.json" | indent 4 }}
 {{- end }}

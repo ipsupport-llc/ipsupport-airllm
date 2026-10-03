@@ -40,6 +40,8 @@ jobs:
           version: v3.16.2
       - name: helm lint + template (all value permutations)
         run: make helm-lint
+      - name: PrometheusRule unit tests (promtool)
+        run: make rules-test
 
   compose:
     runs-on: ubuntu-latest

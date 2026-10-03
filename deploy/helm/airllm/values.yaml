@@ -159,3 +159,13 @@ metrics:
     enabled: false
     labels:
       grafana_dashboard: "1"
+  prometheusRule:                               # alert rules; requires the Prometheus Operator CRDs
+    enabled: false
+    namespace: ""
+    labels: {}                                  # e.g. { release: kube-prometheus-stack }, to match the rule selector
+    # A tier quarantined this long behind a working fallback fires
+    # AirLLMTierQuarantined. A failing probe re-opens the tier, so a provider
+    # that stays down keeps it out of `closed` for the whole time.
+    tierQuarantinedFor: 15m
+    alertLabels:                                # added to every alert, e.g. for Alertmanager routing
+      severity: warning
