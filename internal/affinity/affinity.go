@@ -212,7 +212,7 @@ func (s *Store) remoteOK() {
 // hashed: the key has a fixed shape whatever the client sent.
 func redisKey(k key) string {
 	sum := sha256.Sum256([]byte(k.session))
-	return "airllm:affinity:" + k.alias + ":" + hex.EncodeToString(sum[:])
+	return "air:affinity:" + k.alias + ":" + hex.EncodeToString(sum[:])
 }
 
 // pinScript raises a pin to ARGV[1] unless it already holds a later tier,

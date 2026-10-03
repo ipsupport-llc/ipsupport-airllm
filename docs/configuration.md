@@ -340,7 +340,7 @@ and streamed, both ingress protocols), transcription and speech.
 | `session_affinity_ttl_s` | `0` | Pin lifetime after the session's last request on the pinned tier; `0` is 4 hours, at most 604800 (one week). |
 
 Pins are shared by every replica through Redis (key
-`airllm:affinity:<alias>:<sha256 of the session>`). Each replica also keeps
+`air:affinity:<alias>:<sha256 of the session>`). Each replica also keeps
 the pins it wrote itself, so its sessions stay pinned through a Redis outage.
 A session moving to a new tier logs `session pinned to tier` with `alias`,
 `session`, `tier` and `ttl_s`. Every request of a call can be listed from the
