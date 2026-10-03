@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/breaker"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
 )
@@ -24,6 +25,9 @@ type failoverConfig struct {
 	TimeoutMS int `json:"timeout_ms"`
 	// FallbackOnAuth is the default for routing.TargetOptions.FallbackOnAuth.
 	FallbackOnAuth bool `json:"fallback_on_auth"`
+	// Breaker holds the default circuit breaker knobs; an unset one takes
+	// breaker.Defaults. The breaker is off unless enabled here or per tier.
+	Breaker routing.BreakerOptions `json:"breaker"`
 }
 
 // loadFailover reads the failover defaults from settings into the atomic
@@ -35,6 +39,9 @@ func (s *Server) loadFailover(ctx context.Context) {
 	}
 	if cfg.TimeoutMS < 0 {
 		cfg.TimeoutMS = 0
+	}
+	if cfg.Breaker.Validate() != nil {
+		cfg.Breaker = routing.BreakerOptions{}
 	}
 	s.failoverPtr.Store(&cfg)
 }
@@ -62,6 +69,10 @@ func (s *Server) handleAdminPutFailover(w http.ResponseWriter, r *http.Request) 
 	}
 	if body.TimeoutMS < 0 {
 		writeControlError(w, http.StatusBadRequest, "timeout_ms must not be negative")
+		return
+	}
+	if err := body.Breaker.Validate(); err != nil {
+		writeControlError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	raw, _ := json.Marshal(body)
@@ -176,6 +187,11 @@ type attemptCall func(ctx context.Context, p providers.Provider, t routing.Targe
 // retries. supports, when non-nil, rejects targets whose provider lacks the
 // capability the call needs; they are skipped with unsupported as the error.
 //
+// Each tier sits behind its circuit breaker: an open tier is skipped without
+// a call, and every attempt's outcome is recorded against its tier. When the
+// only targets left were in open tiers the request fails fast with
+// errAllQuarantined.
+//
 // started reports that a streaming call committed output, after which no
 // error can be recovered by another target. A cancellation of ctx itself —
 // the client went away — is never a target failure: it ends the request
@@ -189,6 +205,26 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 	// is the answer only when nothing else happened: a capable target that
 	// was merely busy makes the request a 429, not a "does not support".
 	var skipErr error
+	// moved is every tier this request went past, for the fallback metric;
+	// quarantined is whether any of them was skipped by its breaker.
+	var moved []tierFallback
+	quarantined := false
+	settings := map[int]breaker.Settings{}
+	tierSettings := func(tier int) breaker.Settings {
+		set, ok := settings[tier]
+		if !ok {
+			set = s.breakerSettings(plan, tier)
+			settings[tier] = set
+		}
+		return set
+	}
+	defer func() {
+		var served *int
+		if err == nil {
+			served = &res.Tier
+		}
+		s.recordTierFallbacks(plan.Alias, moved, served)
+	}()
 
 	sawBusy := false
 	for retry := 0; retry <= busyRetries; retry++ {
@@ -207,7 +243,18 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 					continue
 				}
 			}
+			key, set := breaker.Key{Alias: plan.Alias, Tier: t.Tier}, tierSettings(t.Tier)
+			adm := s.breaker.Admit(ctx, key, set)
+			if adm.Skip {
+				quarantined = true
+				moved = append(moved, tierFallback{tier: t.Tier, reason: "quarantined"})
+				s.metrics.TierOutcome(plan.Alias, strconv.Itoa(t.Tier), "quarantined")
+				continue
+			}
 			if !e.Acquire() {
+				if adm.Probe {
+					s.breaker.AbandonProbe(context.WithoutCancel(ctx), key, set)
+				}
 				anyBusy, sawBusy = true, true
 				continue
 			}
@@ -219,20 +266,33 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 			})
 			e.Release()
 
+			if ctx.Err() != nil && callErr != nil {
+				// The client went away: nothing was learnt about the tier.
+				if adm.Probe {
+					s.breaker.AbandonProbe(context.WithoutCancel(ctx), key, set)
+				}
+				return res, committed, callErr
+			}
+			failed := countsAgainstTier(pol, callErr)
+			s.breaker.Record(ctx, key, set, failed, adm.Probe)
+			outcome := "success"
+			if failed {
+				outcome = "failure"
+			}
+			s.metrics.TierOutcome(plan.Alias, strconv.Itoa(t.Tier), outcome)
+
 			if callErr == nil {
 				return res, committed, nil
 			}
 			if committed {
 				return res, true, callErr
 			}
-			if ctx.Err() != nil {
-				return res, false, callErr
-			}
 			lastErr = callErr
 			logAttemptFailure(plan.Alias, t, callErr, time.Since(began), session)
 			if !pol.fallsThrough(callErr) {
 				return res, false, callErr
 			}
+			moved = append(moved, tierFallback{tier: t.Tier, reason: attemptFailureReason(callErr)})
 		}
 		if !anyBusy {
 			break
@@ -244,9 +304,15 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 		}
 	}
 	if lastErr == nil {
-		lastErr = errAllBusy
-		if !sawBusy && skipErr != nil {
+		switch {
+		case sawBusy:
+			lastErr = errAllBusy
+		case quarantined:
+			lastErr = errAllQuarantined
+		case skipErr != nil:
 			lastErr = skipErr
+		default:
+			lastErr = errAllBusy
 		}
 	}
 	if errors.Is(lastErr, errAllBusy) {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/auth"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/blob"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/breaker"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/capture"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/config"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/ledger"
@@ -76,7 +77,8 @@ type Server struct {
 	captureIdx    captureReader     // nil until first audit route access (set in NewServer)
 	metrics       *metrics.Metrics
 	modelPool     *modelpool.Pool
-	catalog       catalogCache // per-provider upstream model list micro-cache
+	catalog       catalogCache     // per-provider upstream model list micro-cache
+	breaker       *breaker.Breaker // per-tier circuit breaker; nil admits everything
 
 	// Test hooks: non-nil values replace the real implementations in tests.
 	auditHook    func(ctx context.Context, actor, action, target string, detail any)
@@ -121,6 +123,8 @@ func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 	s.loadCapture(context.Background())
 	s.loadSecondpass(context.Background())
 	s.loadFailover(context.Background())
+	s.breaker = s.newBreaker(st.RDB)
+	s.metrics.RegisterBreakerStates(s.breakerStates)
 	if deps.Capture != nil {
 		s.capturePl = deps.Capture
 	}

@@ -52,6 +52,52 @@ type TargetOptions struct {
 	// FallbackOnAuth makes an upstream authorisation or billing failure a
 	// reason to try the next target instead of failing the request.
 	FallbackOnAuth *bool `json:"fallback_on_auth,omitempty"`
+	// Breaker overrides the circuit breaker thresholds for this target's
+	// tier. The breaker is per tier, so when the targets of one tier
+	// disagree, each key is taken from the first target that sets it.
+	Breaker *BreakerOptions `json:"breaker,omitempty"`
+}
+
+// BreakerOptions are circuit breaker knobs, as stored in a target's options
+// and in the gateway-wide failover defaults. A nil field is unset.
+type BreakerOptions struct {
+	// Enabled switches the breaker on for the tier.
+	Enabled *bool `json:"enabled,omitempty"`
+	// Failures is the run of consecutive failures that opens the tier.
+	Failures *int `json:"failures,omitempty"`
+	// ErrorRate opens the tier when more than this fraction (0..1] of the
+	// requests in a window of WindowMS failed, once MinRequests were seen.
+	ErrorRate   *float64 `json:"error_rate,omitempty"`
+	WindowMS    *int     `json:"window_ms,omitempty"`
+	MinRequests *int     `json:"min_requests,omitempty"`
+	// CooldownMS is the first trip's cooldown; each re-trip doubles it up to
+	// MaxCooldownMS, and it resets after StableMS without a trip.
+	CooldownMS    *int `json:"cooldown_ms,omitempty"`
+	MaxCooldownMS *int `json:"max_cooldown_ms,omitempty"`
+	StableMS      *int `json:"stable_ms,omitempty"`
+}
+
+// Validate rejects out-of-range values: every count and duration must be
+// positive, and the error rate must lie in (0, 1].
+func (b *BreakerOptions) Validate() error {
+	if b == nil {
+		return nil
+	}
+	for _, f := range []struct {
+		name string
+		v    *int
+	}{
+		{"failures", b.Failures}, {"window_ms", b.WindowMS}, {"min_requests", b.MinRequests},
+		{"cooldown_ms", b.CooldownMS}, {"max_cooldown_ms", b.MaxCooldownMS}, {"stable_ms", b.StableMS},
+	} {
+		if f.v != nil && *f.v <= 0 {
+			return fmt.Errorf("breaker.%s must be positive", f.name)
+		}
+	}
+	if b.ErrorRate != nil && (*b.ErrorRate <= 0 || *b.ErrorRate > 1) {
+		return fmt.Errorf("breaker.error_rate must be in (0, 1]")
+	}
+	return nil
 }
 
 // ParseTargetOptions decodes a stored or submitted options object. Empty
@@ -71,6 +117,9 @@ func ParseTargetOptions(raw []byte) (TargetOptions, error) {
 	}
 	if o.TimeoutMS != nil && *o.TimeoutMS < 0 {
 		return o, fmt.Errorf("invalid options: timeout_ms must not be negative")
+	}
+	if err := o.Breaker.Validate(); err != nil {
+		return o, fmt.Errorf("invalid options: %w", err)
 	}
 	return o, nil
 }
