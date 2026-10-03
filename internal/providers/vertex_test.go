@@ -28,10 +28,10 @@ func (s stubTokenSource) Token(context.Context) (string, error) {
 }
 
 func TestVertexBaseURL(t *testing.T) {
-	cfg := vertexConfig{Project: "acme", Location: "us-west1"}
+	cfg := googleCloudConfig{Project: "acme", Location: "us-west1"}
 	cases := []struct {
 		name     string
-		cfg      vertexConfig
+		cfg      googleCloudConfig
 		explicit string
 		want     string
 	}{
@@ -42,12 +42,12 @@ func TestVertexBaseURL(t *testing.T) {
 		},
 		{
 			"the global location uses the unprefixed host",
-			vertexConfig{Project: "acme", Location: "global"}, "",
+			googleCloudConfig{Project: "acme", Location: "global"}, "",
 			"https://aiplatform.googleapis.com/v1/projects/acme/locations/global/endpoints/openapi",
 		},
 		{
 			"an unset location is global",
-			vertexConfig{Project: "acme"}, "",
+			googleCloudConfig{Project: "acme"}, "",
 			"https://aiplatform.googleapis.com/v1/projects/acme/locations/global/endpoints/openapi",
 		},
 		{
@@ -74,19 +74,19 @@ func TestParseVertexConfig(t *testing.T) {
 	cases := []struct {
 		name    string
 		raw     string
-		want    vertexConfig
+		want    googleCloudConfig
 		wantErr bool
 	}{
-		{"absent config", "", vertexConfig{}, false},
-		{"the column default", "{}", vertexConfig{}, false},
-		{"both values", `{"project":"acme","location":"us-west1"}`, vertexConfig{Project: "acme", Location: "us-west1"}, false},
-		{"surrounding whitespace is trimmed", `{"project":"  acme ","location":" global "}`, vertexConfig{Project: "acme", Location: "global"}, false},
-		{"unrelated keys are ignored", `{"project":"acme","nonsense":1}`, vertexConfig{Project: "acme"}, false},
-		{"malformed json", `{"project":`, vertexConfig{}, true},
+		{"absent config", "", googleCloudConfig{}, false},
+		{"the column default", "{}", googleCloudConfig{}, false},
+		{"both values", `{"project":"acme","location":"us-west1"}`, googleCloudConfig{Project: "acme", Location: "us-west1"}, false},
+		{"surrounding whitespace is trimmed", `{"project":"  acme ","location":" global "}`, googleCloudConfig{Project: "acme", Location: "global"}, false},
+		{"unrelated keys are ignored", `{"project":"acme","nonsense":1}`, googleCloudConfig{Project: "acme"}, false},
+		{"malformed json", `{"project":`, googleCloudConfig{}, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := parseVertexConfig([]byte(c.raw))
+			got, err := parseGoogleCloudConfig([]byte(c.raw))
 			if c.wantErr {
 				if err == nil {
 					t.Fatalf("want an error, got %+v", got)
@@ -94,7 +94,7 @@ func TestParseVertexConfig(t *testing.T) {
 				return
 			}
 			if err != nil {
-				t.Fatalf("parseVertexConfig: %v", err)
+				t.Fatalf("parseGoogleCloudConfig: %v", err)
 			}
 			if got != c.want {
 				t.Errorf("got %+v, want %+v", got, c.want)
@@ -106,14 +106,14 @@ func TestParseVertexConfig(t *testing.T) {
 func TestValidateVertexConfig(t *testing.T) {
 	cases := []struct {
 		name    string
-		cfg     vertexConfig
+		cfg     googleCloudConfig
 		baseURL string
 		wantErr bool
 	}{
-		{"a project is enough", vertexConfig{Project: "acme"}, "", false},
-		{"an explicit address is enough on its own", vertexConfig{}, "http://127.0.0.1:8080", false},
-		{"neither is rejected", vertexConfig{}, "", true},
-		{"a location alone is not a configuration", vertexConfig{Location: "us-west1"}, "", true},
+		{"a project is enough", googleCloudConfig{Project: "acme"}, "", false},
+		{"an explicit address is enough on its own", googleCloudConfig{}, "http://127.0.0.1:8080", false},
+		{"neither is rejected", googleCloudConfig{}, "", true},
+		{"a location alone is not a configuration", googleCloudConfig{Location: "us-west1"}, "", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

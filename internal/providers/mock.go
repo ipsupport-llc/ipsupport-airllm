@@ -238,6 +238,10 @@ func (m *Mock) Transcribe(_ context.Context, req audio.TranscriptionRequest) (au
 	}, nil
 }
 
+// RecognitionLanguages is a fixed short list, enough to show that the
+// capabilities route reports what the first tier's provider says.
+func (m *Mock) RecognitionLanguages() []string { return []string{"en", "es"} }
+
 // Synthesize returns deterministic fake "audio" (not real audio bytes —
 // good enough for routing/pricing/limits tests, which never decode it).
 func (m *Mock) Synthesize(_ context.Context, req audio.SpeechRequest) (audio.SpeechResponse, error) {

@@ -32,7 +32,7 @@ one listener.
 | `policy` | Per-role allowed-model gate |
 | `routing` | Alias catalog → ordered targets (strategy + fallback tiers) |
 | `lookupcache` | In-memory TTL cache for the per-request key and alias lookups, serving the last good answer through a brief database outage |
-| `providers` | Provider registry; OpenAI-compatible HTTP/SSE client; the Vertex AI client and its OAuth2 token source; concurrency semaphores |
+| `providers` | Provider registry; OpenAI-compatible HTTP/SSE client; the Vertex AI and Google Speech clients and their shared OAuth2 token source; concurrency semaphores |
 | `openai` / `anthropic` | Protocol codecs (parse, marshal, SSE) |
 | `llm` | Protocol-neutral intermediate representation |
 | `limits` | Redis rolling-window counters (check-before / increment-after, with an atomic token reservation closing the race between the two) |
@@ -91,7 +91,7 @@ one listener.
 
 - **Postgres** is the source of truth: identity, keys, role policies, providers
   (with sealed credentials and a per-kind `config` object — a cloud project and
-  location for `vertex`), pricing, the usage ledger, DLP incidents, the capture
+  location for `vertex` and `google-speech`), pricing, the usage ledger, DLP incidents, the capture
   index, and the `settings` table that backs runtime config.
 - **Redis** holds only the rolling-window usage counters (time-bucketed).
 - **Blob store** holds capture bodies, always sealed with AES-256-GCM. A

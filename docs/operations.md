@@ -234,9 +234,11 @@ mint a token.
 The cloud side is a prerequisite the chart cannot check: a workload identity pool and
 a provider trusting the cluster's OIDC issuer, and an IAM policy on that service
 account permitting **this release's namespace and service account** to impersonate it.
-Give it the model-API role only — the gateway has no business holding the rest of the
-project. When any of that is wrong the pod still starts and every other provider keeps
-serving; the Vertex provider alone is disabled, loudly, in the log.
+Give it the model-API role — plus, for a
+[`google-speech` provider](configuration.md#google-speech-google-speech), the Speech
+client and service-usage consumer roles — and nothing else: the gateway has no business
+holding the rest of the project. When any of that is wrong the pod still starts and every other provider keeps
+serving; the Google providers alone are disabled, loudly, in the log.
 
 ### Observability wiring
 
@@ -509,6 +511,20 @@ despite being a preview; a preview can be withdrawn on shorter notice than the
 models Google commits to for at least 12 months (3.5 Flash, 3.5 Flash-Lite,
 3.1 Flash-Lite, per its model-versions page read 2026-09-24), so re-check it
 when touching this list.
+
+### Google Speech-to-Text prices
+
+Speech publishes no machine-readable price list either, so `google-speech`
+rows are entered by hand: unit `audio_second`, provider set to the
+`google-speech` provider's name, one row per model an alias can run — the
+target's `upstream_model` and every model in its `recognition_models`, since
+the ledger records the one that ran. The v2 standard recognition rate is
+**$0.016 a minute** for the first 500 000 minutes a month — **266.67** per 1M
+seconds in the row's input rate (read 2026-10-03). Google bills each request
+rounded up to the second; the gateway prices the billed duration Google
+returns, so the ledger matches the invoice per request. Volume tiers ($0.010
+above 500 000 minutes, $0.008 above 1M, $0.004 above 2M) are not modelled: the
+row keeps the first-tier rate, which over-states cost only past those volumes.
 
 ### Gemini thought signatures
 

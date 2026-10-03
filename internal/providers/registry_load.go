@@ -13,8 +13,9 @@ import (
 )
 
 // defaultBaseURL returns the public base URL for a provider kind; an explicit
-// per-provider base_url overrides it. Vertex is absent on purpose: its address
-// is assembled from the provider's configuration, see vertexBaseURL.
+// per-provider base_url overrides it. Vertex and Google Speech are absent on
+// purpose: their addresses are assembled from the provider's configuration,
+// see vertexBaseURL and googleSpeechBaseURL.
 func defaultBaseURL(kind string) string {
 	switch kind {
 	case "openai":
@@ -43,7 +44,7 @@ func defaultBaseURL(kind string) string {
 // credentials or configuration are wrong.
 func Build(ctx context.Context, rows []store.ProviderRow, sealer *secrets.Sealer) *Registry {
 	reg := NewRegistry()
-	// Fingerprints of every vertex credential this load actually resolved a
+	// Fingerprints of every Google credential this load actually resolved a
 	// token source for — reconciled against the token cache at the end, so
 	// a credential rotated away in a prior save doesn't linger forever.
 	liveTokenFingerprints := map[string]bool{}
@@ -76,6 +77,16 @@ func Build(ctx context.Context, rows []store.ProviderRow, sealer *secrets.Sealer
 				continue
 			}
 			prov = v
+			if credErr == nil {
+				liveTokenFingerprints[googleTokenFingerprint(cred)] = true
+			}
+		case KindGoogleSpeech:
+			g, err := newGoogleSpeechFromRow(ctx, p, cred, credErr)
+			if err != nil {
+				slog.Error("google-speech provider disabled", "provider", p.Name, "err", err)
+				continue
+			}
+			prov = g
 			if credErr == nil {
 				liveTokenFingerprints[googleTokenFingerprint(cred)] = true
 			}
@@ -131,7 +142,7 @@ func newVertexFromRow(ctx context.Context, p store.ProviderRow, cred []byte, cre
 	if credErr != nil {
 		return nil, fmt.Errorf("stored credential could not be decrypted: %w", credErr)
 	}
-	cfg, err := parseVertexConfig(p.Config)
+	cfg, err := parseGoogleCloudConfig(p.Config)
 	if err != nil {
 		return nil, err
 	}
@@ -143,4 +154,26 @@ func newVertexFromRow(ctx context.Context, p store.ProviderRow, cred []byte, cre
 		return nil, err
 	}
 	return NewVertex(p.Name, vertexBaseURL(cfg, p.BaseURL), tokens), nil
+}
+
+// newGoogleSpeechFromRow builds a Google Speech provider from its stored
+// row, with the same refusals as newVertexFromRow: a stored credential that
+// cannot be decrypted, or credential bytes that do not resolve, disable the
+// provider rather than fall through to the pod's own identity.
+func newGoogleSpeechFromRow(ctx context.Context, p store.ProviderRow, cred []byte, credErr error) (*GoogleSpeech, error) {
+	if credErr != nil {
+		return nil, fmt.Errorf("stored credential could not be decrypted: %w", credErr)
+	}
+	cfg, err := parseGoogleCloudConfig(p.Config)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateGoogleSpeechConfig(cfg); err != nil {
+		return nil, err
+	}
+	tokens, err := GoogleTokenSource(ctx, cred)
+	if err != nil {
+		return nil, err
+	}
+	return NewGoogleSpeech(p.Name, googleSpeechBaseURL(cfg, p.BaseURL), cfg.Project, cfg.location(), tokens), nil
 }

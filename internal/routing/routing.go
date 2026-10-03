@@ -62,6 +62,11 @@ type TargetOptions struct {
 	// setting is sent instead, and <think> blocks are cut from the reply.
 	// Unset leaves the client's settings as they are.
 	Thinking *string `json:"thinking,omitempty"`
+	// RecognitionModels picks the recognition model by the request's
+	// language, keyed by BCP-47 tag: an exact tag wins over a bare language
+	// ("en-US" over "en"), and a language with no entry uses the target's
+	// upstream model. Read by providers that choose a model per language.
+	RecognitionModels map[string]string `json:"recognition_models,omitempty"`
 }
 
 // thinkingOff is the one value TargetOptions.Thinking accepts.
@@ -135,6 +140,11 @@ func ParseTargetOptions(raw []byte) (TargetOptions, error) {
 	}
 	if o.Thinking != nil && *o.Thinking != thinkingOff {
 		return o, fmt.Errorf(`invalid options: thinking must be "off"`)
+	}
+	for lang, model := range o.RecognitionModels {
+		if strings.TrimSpace(lang) == "" || strings.TrimSpace(model) == "" {
+			return o, fmt.Errorf("invalid options: recognition_models needs a language and a model in every entry")
+		}
 	}
 	return o, nil
 }

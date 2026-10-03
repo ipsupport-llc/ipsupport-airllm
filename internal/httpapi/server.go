@@ -208,7 +208,7 @@ func (r *statusRecorder) Flush() {
 // ingressOf maps a request path to a metrics ingress label.
 func ingressOf(path string) string {
 	switch path {
-	case "/v1/chat/completions", "/v1/models", "/v1/audio/transcriptions", "/v1/audio/speech":
+	case "/v1/chat/completions", "/v1/models", "/v1/audio/transcriptions", "/v1/audio/speech", "/v1/audio/capabilities":
 		return "openai"
 	case "/v1/messages":
 		return "anthropic"
@@ -254,6 +254,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/messages", s.requireAPIKey(s.handleMessages))
 	s.mux.HandleFunc("POST /v1/audio/transcriptions", s.requireAPIKey(s.handleAudioTranscriptions))
 	s.mux.HandleFunc("POST /v1/audio/speech", s.requireAPIKey(s.handleAudioSpeech))
+	s.mux.HandleFunc("GET /v1/audio/capabilities", s.requireAPIKey(s.handleAudioCapabilities))
 
 	// Control-plane auth endpoints (public — no session required).
 	s.mux.HandleFunc("GET /api/auth/mode", s.handleAuthMode)
