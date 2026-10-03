@@ -17,7 +17,7 @@ import (
 // RefreshConfig. API keys and aliases are not here — the lookup cache already
 // re-asks for them after its TTL.
 
-// refreshedSettings are the settings rows held in memory, and how each is
+// settingAppliers lists the settings rows held in memory, and how each is
 // installed.
 func (s *Server) settingAppliers() map[string]func([]byte) {
 	return map[string]func([]byte){
@@ -30,18 +30,23 @@ func (s *Server) settingAppliers() map[string]func([]byte) {
 
 // configState is what this instance last installed from the database.
 type configState struct {
-	mu        sync.Mutex // orders a local save against a concurrent refresh
-	providers [sha256.Size]byte
-	settings  map[string][]byte // raw value per settings row; absent = not read yet
+	mu          sync.Mutex        // orders a local save against a concurrent refresh
+	providersFP [sha256.Size]byte // providers.Fingerprint of the rows behind the current registry
+	settings    map[string][]byte // raw value per settings row; absent = not read yet
 }
 
-// loadSetting reads one settings row and installs it. A missing or unreadable
-// row installs the defaults.
+// loadSetting reads one settings row and installs it; a missing row installs
+// the defaults. A row that cannot be read keeps what is installed, or installs
+// the defaults if nothing has been read yet (at boot).
 func (s *Server) loadSetting(ctx context.Context, name string) {
 	s.config.mu.Lock()
 	defer s.config.mu.Unlock()
 	raw, err := s.st.GetSetting(ctx, name)
 	if err != nil {
+		if _, seen := s.config.settings[name]; seen {
+			slog.Warn("setting not read; keeping the current one", "setting", name, "err", err)
+			return
+		}
 		raw = nil
 	} else {
 		s.rememberSetting(name, raw)
@@ -56,8 +61,9 @@ func (s *Server) rememberSetting(name string, raw []byte) {
 	s.config.settings[name] = raw
 }
 
-// reloadProviders rebuilds the registry from the DB (after a provider change).
-func (s *Server) reloadProviders(ctx context.Context) error {
+// ReloadProviders rebuilds the registry from the DB — at boot, and after a
+// provider change saved on this replica.
+func (s *Server) ReloadProviders(ctx context.Context) error {
 	s.config.mu.Lock()
 	defer s.config.mu.Unlock()
 	return s.loadProvidersLocked(ctx, true)
@@ -72,11 +78,11 @@ func (s *Server) loadProvidersLocked(ctx context.Context, force bool) error {
 		return err
 	}
 	fp := providers.Fingerprint(rows)
-	if !force && fp == s.config.providers {
+	if !force && fp == s.config.providersFP {
 		return nil
 	}
 	s.regPtr.Store(providers.Build(ctx, rows, s.sealer))
-	s.config.providers = fp
+	s.config.providersFP = fp
 	if !force {
 		slog.Info("providers reloaded from the database", "providers", len(rows))
 	}

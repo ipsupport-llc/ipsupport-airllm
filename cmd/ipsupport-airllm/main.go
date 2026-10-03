@@ -23,7 +23,6 @@ import (
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/httpapi"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/limits"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/pricing"
-	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/secondpass"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/secrets"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/seed"
@@ -135,13 +134,6 @@ func run() error {
 		return err
 	}
 
-	// Build the provider registry from the DB (decrypting stored credentials,
-	// instantiating a client per kind). Reloaded when providers change.
-	reg, err := providers.LoadFromStore(ctx, st, sealer)
-	if err != nil {
-		return err
-	}
-
 	// Build the capture pipeline. CAPTURE_BLOB_DIR env controls where blobs
 	// land (default: ./capture-blobs for dev). Capture is off by default; the
 	// pipeline is always wired so the config can be enabled at runtime.
@@ -171,18 +163,22 @@ func run() error {
 	defer capturePipeline.Stop()
 
 	deps := httpapi.Deps{
-		Providers: reg,
-		Limiter:   limits.New(st.RDB),
-		Pricing:   priceTable,
-		Sealer:    sealer,
-		Auth:      authImpl,
-		Login:     loginImpl,
-		OIDC:      oidcImpl,
-		Capture:   capturePipeline,
-		Blob:      blobStore,
+		Limiter: limits.New(st.RDB),
+		Pricing: priceTable,
+		Sealer:  sealer,
+		Auth:    authImpl,
+		Login:   loginImpl,
+		OIDC:    oidcImpl,
+		Capture: capturePipeline,
+		Blob:    blobStore,
 	}
 
 	apiSrv := httpapi.NewServer(cfg, st, deps)
+	// Build the provider registry from the DB (decrypting stored credentials,
+	// instantiating a client per kind). Reloaded when providers change.
+	if err := apiSrv.ReloadProviders(ctx); err != nil {
+		return err
+	}
 	apiSrvPtr.Store(apiSrv)
 	apiSrv.Ledger().Start()
 	defer apiSrv.Ledger().Stop()

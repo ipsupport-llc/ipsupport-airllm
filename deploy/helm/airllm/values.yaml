@@ -69,7 +69,7 @@ app:
     tls:
       enabled: false
       secretName: ""
-  terminationGracePeriodSeconds: 30           # > config.shutdownDrain + config.shutdownTimeout
+  terminationGracePeriodSeconds: 30             # > config.shutdownDrain + config.shutdownTimeout
   podDisruptionBudget:                          # caps voluntary disruptions (node drains, upgrades)
     enabled: true
     maxUnavailable: 1

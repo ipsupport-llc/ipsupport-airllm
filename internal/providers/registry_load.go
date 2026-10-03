@@ -34,23 +34,13 @@ func defaultBaseURL(kind string) string {
 	}
 }
 
-// LoadFromStore builds a registry from the enabled providers, decrypting each
+// Build builds a registry from the enabled provider rows, decrypting each
 // stored credential. A mock provider is always available. Kinds without a
 // client yet (anthropic-direct) are skipped with a warning.
 //
 // A provider that cannot be built is skipped, never fatal: the gateway has to
 // start — and keep serving every other provider — when one provider's
 // credentials or configuration are wrong.
-func LoadFromStore(ctx context.Context, st *store.Store, sealer *secrets.Sealer) (*Registry, error) {
-	rows, err := st.ListProvidersForRegistry(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return Build(ctx, rows, sealer), nil
-}
-
-// Build builds a registry from provider rows already read from the store; see
-// LoadFromStore.
 func Build(ctx context.Context, rows []store.ProviderRow, sealer *secrets.Sealer) *Registry {
 	reg := NewRegistry()
 	// Fingerprints of every vertex credential this load actually resolved a

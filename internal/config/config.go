@@ -224,14 +224,11 @@ func loadSessionKey(master []byte) ([]byte, error) {
 // loadLookupCache reads LOOKUP_CACHE_TTL (default 30s) and
 // LOOKUP_CACHE_MAX_STALE (default 5m), Go duration strings.
 func loadLookupCache() (ttl, maxStale time.Duration, err error) {
-	if ttl, err = time.ParseDuration(env("LOOKUP_CACHE_TTL", "30s")); err != nil {
-		return 0, 0, fmt.Errorf("LOOKUP_CACHE_TTL: %w", err)
+	if ttl, err = duration("LOOKUP_CACHE_TTL", "30s", true); err != nil {
+		return 0, 0, err
 	}
-	if maxStale, err = time.ParseDuration(env("LOOKUP_CACHE_MAX_STALE", "5m")); err != nil {
-		return 0, 0, fmt.Errorf("LOOKUP_CACHE_MAX_STALE: %w", err)
-	}
-	if ttl <= 0 {
-		return 0, 0, fmt.Errorf("LOOKUP_CACHE_TTL must be positive, got %v", ttl)
+	if maxStale, err = duration("LOOKUP_CACHE_MAX_STALE", "5m", false); err != nil {
+		return 0, 0, err
 	}
 	if maxStale < ttl {
 		return 0, 0, fmt.Errorf("LOOKUP_CACHE_MAX_STALE (%v) must not be below LOOKUP_CACHE_TTL (%v)", maxStale, ttl)

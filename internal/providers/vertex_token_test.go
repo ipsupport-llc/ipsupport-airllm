@@ -214,7 +214,7 @@ func TestGoogleTokenSourceDoesNotSerializeDifferentCredentials(t *testing.T) {
 
 // TestPruneGoogleTokenSourcesEvictsRotatedCredentials proves a credential no
 // longer configured drops out of the cache instead of accumulating forever
-// (Routing/fallback I3 fix) — simulating what LoadFromStore does on every
+// (Routing/fallback I3 fix) — simulating what Build does on every
 // registry rebuild: after resolving today's live credentials, it prunes
 // anything else out of the shared cache.
 func TestPruneGoogleTokenSourcesEvictsRotatedCredentials(t *testing.T) {

@@ -66,6 +66,20 @@ func TestRefreshKeepsTheLastConfigWhileTheDatabaseIsDown(t *testing.T) {
 	wantStatus(t, f.chat(t, f.token), http.StatusOK, "providers kept through the outage")
 }
 
+func TestFailedReadAfterASaveKeepsTheCurrentSetting(t *testing.T) {
+	f := newCacheFixture(t, nil)
+	ctx := context.Background()
+	restoreSetting(t, f, "failover")
+	putSetting(t, f, "failover", `{"timeout_ms": 1234}`)
+	f.srv.loadFailover(ctx)
+
+	f.proxy.cut() // the save's own write went through; the read-back does not
+	f.srv.loadFailover(ctx)
+	if got := f.srv.failoverCfg().TimeoutMS; got != 1234 {
+		t.Errorf("failover timeout after a failed read-back = %d, want 1234 kept, not the defaults", got)
+	}
+}
+
 func TestRefreshLeavesAnUnchangedRegistryInPlace(t *testing.T) {
 	f := newCacheFixture(t, nil)
 	ctx := context.Background()
@@ -80,7 +94,7 @@ func TestRefreshLeavesAnUnchangedRegistryInPlace(t *testing.T) {
 func TestLocalProviderSaveDoesNotTriggerASecondRebuild(t *testing.T) {
 	f := newCacheFixture(t, nil)
 	ctx := context.Background()
-	if err := f.srv.reloadProviders(ctx); err != nil { // what a provider save on this replica does
+	if err := f.srv.ReloadProviders(ctx); err != nil { // what a provider save on this replica does
 		t.Fatalf("reload: %v", err)
 	}
 	before := f.srv.reg()

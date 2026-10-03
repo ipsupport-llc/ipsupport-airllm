@@ -107,7 +107,7 @@ func GoogleTokenSource(ctx context.Context, credJSON []byte) (TokenSource, error
 // PruneGoogleTokenSources removes every cached token source whose
 // fingerprint is not in keep. Called once per registry rebuild with the
 // fingerprints of every vertex credential currently configured (see
-// LoadFromStore), so a credential that was rotated away — whose fingerprint
+// Build), so a credential that was rotated away — whose fingerprint
 // changes the moment the stored ciphertext changes — doesn't sit in the
 // cache forever; without this, the cache is bounded by the number of
 // distinct credential VALUES ever configured across the process's whole

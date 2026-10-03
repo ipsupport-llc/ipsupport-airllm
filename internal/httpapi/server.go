@@ -37,7 +37,7 @@ type oidcHandler interface {
 
 // Deps are the runtime dependencies wired into the server.
 type Deps struct {
-	Providers *providers.Registry
+	Providers *providers.Registry // nil = empty until ReloadProviders
 	Limiter   *limits.Limiter
 	Pricing   *pricing.Table
 	Sealer    *secrets.Sealer
@@ -116,7 +116,11 @@ func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 		httpc:        &http.Client{},
 		metrics:      metrics.New(),
 	}
-	s.regPtr.Store(deps.Providers)
+	if deps.Providers != nil {
+		s.regPtr.Store(deps.Providers)
+	} else {
+		s.regPtr.Store(providers.NewRegistry()) // filled by ReloadProviders
+	}
 	s.loadDLP(context.Background())
 	s.modelPool = modelpool.New(func() ([]string, int) {
 		c := s.dlpCfg()
