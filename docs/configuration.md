@@ -153,11 +153,12 @@ answer within two seconds and may fail over on an expired credential:
 ```
 
 Every failed attempt logs a `tier attempt failed` line with `alias`, `tier`
-(0 = first), `provider`, `upstream_model`, `reason` (`timeout`,
+(the target's configured priority), `provider`, `upstream_model`, `reason` (`timeout`,
 `provider_auth`, `model_not_found`, `rate_limited`, `http_<status>`, …),
 `latency_ms` and, when the client sent one, `session` (the `X-Session-Id`
-request header). The usage ledger records the serving `tier` and the number
-of upstream `attempts` per request.
+request header). The usage ledger records the serving `tier` (again the
+configured priority, so it stays meaningful when another tier is disabled) and
+the number of upstream `attempts` per request.
 
 ## Provider kinds
 

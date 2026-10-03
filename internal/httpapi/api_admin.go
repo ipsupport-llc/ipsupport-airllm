@@ -60,14 +60,14 @@ func (s *Server) adminRoutes() {
 	// Second-pass: background DLP re-scan config.
 	s.mux.HandleFunc("GET /api/admin/secondpass", a(s.handleAdminGetSecondpass))
 	s.mux.HandleFunc("PUT /api/admin/secondpass", a(s.handleAdminPutSecondpass))
-
-	// Failover: gateway-wide defaults for per-target failover options.
-	s.mux.HandleFunc("GET /api/admin/failover", a(s.handleAdminGetFailover))
-	s.mux.HandleFunc("PUT /api/admin/failover", a(s.handleAdminPutFailover))
 	s.mux.HandleFunc("GET /api/admin/dlp/incidents", a(s.handleAdminDLPIncidents))
 	s.mux.HandleFunc("GET /api/admin/webhooks", a(s.handleAdminWebhooks))
 	s.mux.HandleFunc("POST /api/admin/webhooks", a(s.handleAdminCreateWebhook))
 	s.mux.HandleFunc("DELETE /api/admin/webhooks/{id}", a(s.handleAdminDeleteWebhook))
+
+	// Failover: gateway-wide defaults for per-target failover options.
+	s.mux.HandleFunc("GET /api/admin/failover", a(s.handleAdminGetFailover))
+	s.mux.HandleFunc("PUT /api/admin/failover", a(s.handleAdminPutFailover))
 }
 
 func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {

@@ -31,8 +31,10 @@ type Target struct {
 	DisplayLabel string
 	// Options is the target's own failover policy (alias_targets.options).
 	Options TargetOptions
-	// Tier is the index of the priority tier this target belongs to, 0 being
-	// the first tried. Set by Plan.Ordered.
+	// Tier identifies the priority tier this target belongs to: the
+	// configured alias_targets.priority, not its position in Plan.Tiers, so
+	// it stays the same when a provider in another tier is disabled or
+	// added. Lower is tried first; a passthrough target is tier 0.
 	Tier int
 }
 
@@ -88,11 +90,8 @@ type Plan struct {
 // free(provider) drives least-busy.
 func (p *Plan) Ordered(rr uint64, free func(provider string) int) []Target {
 	var out []Target
-	for i, tier := range p.Tiers {
-		for _, t := range orderTier(tier, p.Strategy, rr, free) {
-			t.Tier = i
-			out = append(out, t)
-		}
+	for _, tier := range p.Tiers {
+		out = append(out, orderTier(tier, p.Strategy, rr, free)...)
 	}
 	return out
 }
@@ -207,6 +206,7 @@ func (r *Router) Resolve(ctx context.Context, model string, allowPassthrough boo
 		if kind == "anthropic" {
 			t.UpstreamProtocol = "anthropic"
 		}
+		t.Tier = priority
 		if len(tiers) == 0 || priority != lastPriority {
 			tiers = append(tiers, []Target{})
 			lastPriority = priority

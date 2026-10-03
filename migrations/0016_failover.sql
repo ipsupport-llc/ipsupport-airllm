@@ -9,9 +9,10 @@
 ALTER TABLE alias_targets
     ADD COLUMN options jsonb NOT NULL DEFAULT '{}';
 
--- tier is the priority tier of the target that served the request (or the
--- last one attempted, on failure), 0 being the first; attempts is how many
--- upstream calls the request made. Rows written before this ship read 0 for
+-- tier is the configured priority of the target that served the request (or
+-- of the last one attempted, on failure) — the priority value itself, not a
+-- position, so it stays comparable when targets in other tiers are disabled;
+-- attempts is how many upstream calls the request made. Rows written before this ship read 0 for
 -- both: attempts = 0 there means "not recorded", not "no call was made".
 ALTER TABLE usage_ledger
     ADD COLUMN tier int NOT NULL DEFAULT 0,

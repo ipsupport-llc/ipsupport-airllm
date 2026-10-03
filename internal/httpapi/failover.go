@@ -81,6 +81,8 @@ type attemptPolicy struct {
 	fallbackOnAuth bool
 }
 
+// policyFor resolves target t's policy key by key: a value set in its own
+// options wins, an unset one takes the gateway-wide default.
 func (s *Server) policyFor(t routing.Target) attemptPolicy {
 	cfg := s.failoverCfg()
 	timeoutMS := cfg.TimeoutMS
@@ -108,11 +110,13 @@ func (p attemptPolicy) fallsThrough(err error) bool {
 // failure would.
 const errCodeTierTimeout = "tier_timeout"
 
-// Attempt states for runAttempt's budget race.
+// Attempt states for runAttempt's budget race. Whichever of the timer, a
+// first chunk and the call's return moves the state off pending first wins.
 const (
 	attemptPending int32 = iota
 	attemptCommitted
 	attemptExpired
+	attemptReturned
 )
 
 // runAttempt runs one upstream call under a time budget. call receives a
@@ -138,7 +142,10 @@ func runAttempt(ctx context.Context, provider string, budget time.Duration, call
 		return state.CompareAndSwap(attemptPending, attemptCommitted) || state.Load() == attemptCommitted
 	}
 	err = call(actx, commit)
-	if err != nil && state.Load() == attemptExpired && ctx.Err() == nil {
+	// Claim the outcome before looking at it: a budget that runs out after
+	// the call already returned must not relabel that call's own error.
+	returnedFirst := state.CompareAndSwap(attemptPending, attemptReturned)
+	if err != nil && !returnedFirst && state.Load() == attemptExpired && ctx.Err() == nil {
 		err = &providers.Error{
 			Status:    http.StatusGatewayTimeout,
 			Retryable: true,
@@ -178,7 +185,12 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 	free := s.freeFunc(reg)
 	session := clientSessionFrom(ctx)
 	var lastErr error
+	// skipErr is why a target was skipped as unable to serve the call. It
+	// is the answer only when nothing else happened: a capable target that
+	// was merely busy makes the request a 429, not a "does not support".
+	var skipErr error
 
+	sawBusy := false
 	for retry := 0; retry <= busyRetries; retry++ {
 		anyBusy := false
 		for _, t := range plan.Ordered(s.router.NextRR(plan.Alias), free) {
@@ -191,12 +203,12 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 			}
 			if supports != nil {
 				if err := supports(e.Provider); err != nil {
-					lastErr = err
+					skipErr = err
 					continue
 				}
 			}
 			if !e.Acquire() {
-				anyBusy = true
+				anyBusy, sawBusy = true, true
 				continue
 			}
 			pol := s.policyFor(t)
@@ -233,6 +245,9 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 	}
 	if lastErr == nil {
 		lastErr = errAllBusy
+		if !sawBusy && skipErr != nil {
+			lastErr = skipErr
+		}
 	}
 	if errors.Is(lastErr, errAllBusy) {
 		s.metrics.IncRateLimited("provider_busy")
@@ -270,32 +285,4 @@ func attemptFailureReason(err error) string {
 	default:
 		return "http_" + strconv.Itoa(pe.Status)
 	}
-}
-
-// clientSessionHeader is the optional request header a client uses to tie
-// its requests together (e.g. every turn of one phone call). The gateway
-// only logs it today.
-const clientSessionHeader = "X-Session-Id"
-
-// maxClientSessionLen bounds what a client can make the gateway log.
-const maxClientSessionLen = 128
-
-type clientSessionKey struct{}
-
-// withClientSession carries the request's session header, if any, on ctx.
-func withClientSession(ctx context.Context, r *http.Request) context.Context {
-	id := r.Header.Get(clientSessionHeader)
-	if id == "" {
-		return ctx
-	}
-	if len(id) > maxClientSessionLen {
-		id = id[:maxClientSessionLen]
-	}
-	return context.WithValue(ctx, clientSessionKey{}, id)
-}
-
-// clientSessionFrom returns the session withClientSession stored, or "".
-func clientSessionFrom(ctx context.Context) string {
-	id, _ := ctx.Value(clientSessionKey{}).(string)
-	return id
 }

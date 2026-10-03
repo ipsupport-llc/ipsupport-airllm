@@ -62,7 +62,7 @@ func TestAliasTargetOptionsRoundTrip(t *testing.T) {
 
 	body := fmt.Sprintf(`{"targets":[
 		{"priority":0,"provider":%q,"upstream_model":"fast","options":{"timeout_ms":1500,"fallback_on_auth":true,"later_key":{"x":1}}},
-		{"priority":1,"provider":%q,"upstream_model":"slow"}]}`, prov, prov)
+		{"priority":10,"provider":%q,"upstream_model":"slow"}]}`, prov, prov)
 	if rec := putAlias(s, alias, body); rec.Code != http.StatusOK {
 		t.Fatalf("put: %d %s", rec.Code, rec.Body.String())
 	}
@@ -108,6 +108,9 @@ func TestAliasTargetOptionsRoundTrip(t *testing.T) {
 	fast := plan.Tiers[0][0].Options
 	if fast.TimeoutMS == nil || *fast.TimeoutMS != 1500 || fast.FallbackOnAuth == nil || !*fast.FallbackOnAuth {
 		t.Errorf("resolved options = %+v, want timeout_ms=1500 fallback_on_auth=true", fast)
+	}
+	if tier := plan.Tiers[1][0].Tier; tier != 10 {
+		t.Errorf("second tier's Tier = %d, want its configured priority 10 — stable when other tiers come and go", tier)
 	}
 	if slow := plan.Tiers[1][0].Options; slow.TimeoutMS != nil || slow.FallbackOnAuth != nil {
 		t.Errorf("resolved options for the unset target = %+v, want nothing set", slow)

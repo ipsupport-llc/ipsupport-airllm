@@ -26,8 +26,8 @@ type Entry struct {
 	// ReasoningTokens is the share of CompletionTokens spent thinking — a
 	// breakdown of that number, not an addition to it. See llm.Usage.
 	ReasoningTokens int
-	// Tier is the priority tier of the target that served the request (or
-	// the last one attempted, on failure); 0 is the first tier.
+	// Tier is the configured priority of the target that served the request
+	// (or of the last one attempted, on failure). See routing.Target.Tier.
 	Tier int
 	// Attempts is how many upstream calls the request made across targets.
 	Attempts  int

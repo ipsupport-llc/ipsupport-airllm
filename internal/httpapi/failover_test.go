@@ -16,6 +16,7 @@ import (
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/audio"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/metrics"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
 )
@@ -57,7 +58,7 @@ func budgetPlan(first routing.Target) *routing.Plan {
 		Strategy: "round_robin",
 		Tiers: [][]routing.Target{
 			{first},
-			{{Provider: "mock-ok", UpstreamModel: "mock-ok-model"}},
+			{{Provider: "mock-ok", UpstreamModel: "mock-ok-model", Tier: 1}},
 		},
 	}
 }
@@ -399,4 +400,53 @@ func captureLogs(t *testing.T) *bytes.Buffer {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 	return &buf
+}
+
+// chatOnly is a provider with no audio capability.
+type chatOnly struct{ name string }
+
+func (c chatOnly) Name() string     { return c.name }
+func (c chatOnly) Kind() string     { return "openai" }
+func (c chatOnly) Protocol() string { return "openai" }
+func (c chatOnly) Chat(context.Context, llm.ChatRequest) (llm.ChatResponse, error) {
+	return llm.ChatResponse{}, nil
+}
+func (c chatOnly) ChatStream(context.Context, llm.ChatRequest, func(llm.StreamChunk) error) error {
+	return nil
+}
+
+func TestAudioCapableButBusyTargetIsReportedAsBusy(t *testing.T) {
+	reg := providers.NewRegistry()
+	reg.Register(chatOnly{name: "text-only"}, 0)
+	reg.Register(providers.NewMock("speaker"), 1)
+	s := &Server{router: routing.NewRouter(nil), metrics: metrics.New()}
+	s.regPtr.Store(reg)
+	busy, _ := reg.Get("speaker")
+	if !busy.Acquire() {
+		t.Fatal("could not occupy the speaker's only slot")
+	}
+	defer busy.Release()
+	plan := &routing.Plan{Alias: "tts", Tiers: [][]routing.Target{
+		{{Provider: "text-only", UpstreamModel: "m"}},
+		{{Provider: "speaker", UpstreamModel: "tts-1"}},
+	}}
+
+	_, _, err := s.runSynthesize(context.Background(), plan, audio.SpeechRequest{Input: "hi"})
+	if code, _ := classifyUpstreamErr(err); code != http.StatusTooManyRequests {
+		t.Errorf("got %v (status %d), want 429: a capable target was only busy", err, code)
+	}
+}
+
+func TestSessionHeaderReachesTheHandler(t *testing.T) {
+	s := &Server{mux: http.NewServeMux(), metrics: metrics.New()}
+	var seen string
+	s.mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		seen = clientSessionFrom(r.Context())
+	})
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}"))
+	r.Header.Set("X-Session-Id", "call-7")
+	s.ServeHTTP(httptest.NewRecorder(), r)
+	if seen != "call-7" {
+		t.Errorf("session in handler = %q, want call-7", seen)
+	}
 }
