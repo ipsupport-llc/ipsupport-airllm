@@ -560,7 +560,7 @@ var errContended = errors.New("breaker: state update contended")
 const updateAttempts = 5
 
 func redisKey(k Key) string {
-	return fmt.Sprintf("airllm:breaker:%s:%d", k.Alias, k.Tier)
+	return fmt.Sprintf("air:breaker:%s:%d", k.Alias, k.Tier)
 }
 
 func (s *redisStore) load(ctx context.Context, k Key) (record, error) {
