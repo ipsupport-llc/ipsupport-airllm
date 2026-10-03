@@ -404,8 +404,8 @@ tier failed has no outcome.
 | `synthesis_cache_ttl_s` | `0` | How long a clip is kept after it was rendered; `0` is 7 days, at most 2592000 (30 days). |
 
 Clips live in Redis, shared by every replica, under
-`airllm:tts:<alias>:<sha256 of the rest of the key>` — so one alias's clips can
-be listed or dropped with `SCAN … MATCH airllm:tts:<alias>:*`. A clip over
+`air:tts:<alias>:<sha256 of the rest of the key>` — so one alias's clips can
+be listed or dropped with `SCAN … MATCH air:tts:<alias>:*`. A clip over
 4 MiB is served but not kept. The cache is best-effort: when Redis cannot be
 read the request goes to the provider (outcome `error`), and the gateway leaves
 Redis alone for five seconds before trying it again, so an outage costs a

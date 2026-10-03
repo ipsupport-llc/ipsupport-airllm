@@ -173,7 +173,7 @@ func (k Key) id() string {
 		_ = binary.Write(h, binary.BigEndian, uint32(len(f)))
 		h.Write([]byte(f))
 	}
-	return "airllm:tts:" + k.Alias + ":" + hex.EncodeToString(h.Sum(nil))
+	return "air:tts:" + k.Alias + ":" + hex.EncodeToString(h.Sum(nil))
 }
 
 // The stored value is a version line, the content type and the model on a
