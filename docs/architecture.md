@@ -123,6 +123,10 @@ Schema migrations are embedded and applied automatically on boot, in order.
   Breaker state lives in Redis so every replica agrees, with per-replica
   in-memory state as the fallback while Redis is unreachable. See
   [Circuit breaker](configuration.md#circuit-breaker).
+- On an alias with session affinity, a client session (`X-Session-Id`) that
+  a fallback tier served is pinned to that tier in Redis: its later requests
+  start there and only ever move forward. See
+  [Call affinity](configuration.md#call-affinity).
 
 ## Hot-reload
 
