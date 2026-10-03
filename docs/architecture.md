@@ -148,8 +148,8 @@ Two surfaces, one source of truth each:
   give per-stage latency breakdowns. `airllm_dlp_model_requests_inflight` tracks
   in-flight BERT scans — the primary saturation indicator when the DLP sidecar
   is the bottleneck. Tier failover is covered by `airllm_breaker_state`,
-  `airllm_breaker_transitions_total`, `airllm_tier_fallbacks_total` and
-  `airllm_tier_outcomes_total` (see [Circuit breaker](configuration.md#circuit-breaker)).
+  `airllm_breaker_transitions_total`, `airllm_tier_fallbacks_total`,
+  `airllm_tier_outcomes_total` and `airllm_tier_attempt_duration_seconds` (see [Circuit breaker](configuration.md#circuit-breaker)).
 
 - **Grafana dashboards** — JSON in `deploy/grafana/dashboards/`, datasource
   wired via a `${DS_PROMETHEUS}` template variable (no hardcoded UID). Bring up

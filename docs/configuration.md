@@ -265,6 +265,7 @@ probe` and `tier breaker closed` (with `via`: `probe` or `manual`). Metrics:
 | `airllm_breaker_transitions_total` | `alias`, `tier`, `to` | State changes, counted once by the replica that made them. |
 | `airllm_tier_fallbacks_total` | `alias`, `from_tier`, `to_tier`, `reason` | Requests that moved past `from_tier`, served in the end by `to_tier` (`none` if nothing served them); `reason` is a failure reason or `quarantined`. |
 | `airllm_tier_outcomes_total` | `alias`, `tier`, `outcome` | Attempts per tier: `success`, `failure`, `request_error` (failed because of the request, no verdict on the tier) or `quarantined` (skipped while open). |
+| `airllm_tier_attempt_duration_seconds` | `alias`, `tier`, `outcome` | Histogram of the time from an attempt's start to its verdict — for a stream, its first chunk, not its end. Same outcomes as above except `quarantined`, which makes no call. |
 
 #### Target unavailability (`Retry-After`)
 
