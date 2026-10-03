@@ -15,6 +15,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"strconv"
 	"sync"
@@ -31,6 +32,8 @@ type Store struct {
 
 	mu    sync.Mutex
 	local map[key]pin
+	// nextSweep is when a write may next drop the expired local pins.
+	nextSweep time.Time
 	// remoteDownTill is when to try Redis again after it failed. It runs on
 	// the wall clock, not now: it is about the network, not pin expiry.
 	remoteDownTill time.Time
@@ -54,9 +57,13 @@ func WithClock(now func() time.Time) Option { return func(s *Store) { s.now = no
 // interval rather than one per request.
 const remoteRetryAfter = 5 * time.Second
 
-// sweepAt is the local pin count past which a write first drops the expired
-// ones, so a long-running replica does not keep every call it ever served.
-const sweepAt = 1024
+// sweepAt is the local pin count past which a write drops the expired ones,
+// at most once per sweepEvery, so a long-running replica does not keep every
+// call it ever served nor walk them all on every write.
+const (
+	sweepAt    = 1024
+	sweepEvery = time.Minute
+)
 
 // New returns a store whose pins are shared through rdb; nil rdb keeps them
 // in this process.
@@ -85,7 +92,7 @@ func (s *Store) Pinned(ctx context.Context, alias, session string) (int, bool) {
 			if rt, perr := strconv.Atoi(v); perr == nil && (!ok || rt > tier) {
 				tier, ok = rt, true
 			}
-		case err == redis.Nil:
+		case errors.Is(err, redis.Nil):
 			s.remoteOK()
 		case ctx.Err() == nil:
 			s.remoteFailed(err)
@@ -118,6 +125,28 @@ func (s *Store) Pin(ctx context.Context, alias, session string, tier int, ttl ti
 	return moved
 }
 
+// Forget drops session's pin on alias, so its next pin starts afresh rather
+// than being held back by a later tier.
+func (s *Store) Forget(ctx context.Context, alias, session string) {
+	if s == nil {
+		return
+	}
+	k := key{alias, session}
+	s.mu.Lock()
+	delete(s.local, k)
+	s.mu.Unlock()
+	if s.useRemote() {
+		cctx, cancel := context.WithTimeout(ctx, s.opTimeout)
+		defer cancel()
+		switch err := s.rdb.Del(cctx, redisKey(k)).Err(); {
+		case err == nil:
+			s.remoteOK()
+		case ctx.Err() == nil:
+			s.remoteFailed(err)
+		}
+	}
+}
+
 func (s *Store) localPinned(k key) (int, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -132,7 +161,8 @@ func (s *Store) localPin(k key, tier int, ttl time.Duration) (moved bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
-	if len(s.local) >= sweepAt {
+	if len(s.local) >= sweepAt && !now.Before(s.nextSweep) {
+		s.nextSweep = now.Add(sweepEvery)
 		for lk, p := range s.local {
 			if !now.Before(p.until) {
 				delete(s.local, lk)

@@ -11,8 +11,8 @@ import (
 // the tier the session is pinned to. pinned is false when the alias has
 // affinity off, the request carries no session, or the session holds no
 // pin. A pin to a tier the plan no longer reaches — it and every later tier
-// were removed or disabled since — is ignored: starting the session over
-// beats failing the rest of the call.
+// were removed or disabled since — is dropped: starting the session over
+// beats failing the rest of the call, and the session may pin again.
 func (s *Server) sessionFloor(ctx context.Context, plan *routing.Plan, session string) (floor int, pinned bool) {
 	if !plan.SessionAffinity || session == "" {
 		return 0, false
@@ -28,6 +28,7 @@ func (s *Server) sessionFloor(ctx context.Context, plan *routing.Plan, session s
 			}
 		}
 	}
+	s.affinity.Forget(ctx, plan.Alias, session)
 	return 0, false
 }
 
@@ -42,9 +43,6 @@ func (s *Server) pinSession(ctx context.Context, plan *routing.Plan, session str
 		return
 	}
 	ttl := plan.SessionAffinityTTL
-	if ttl <= 0 {
-		ttl = routing.DefaultAffinityTTL
-	}
 	if s.affinity.Pin(context.WithoutCancel(ctx), plan.Alias, session, tier, ttl) {
 		slog.Info("session pinned to tier", "alias", plan.Alias, "session", session, "tier", tier, "ttl_s", int(ttl.Seconds()))
 	}

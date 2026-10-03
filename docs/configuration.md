@@ -327,7 +327,8 @@ fails still falls through to the next one, and the pin moves forward with it;
 it never moves back. Every request the pinned tier serves renews the pin, which
 expires `session_affinity_ttl_s` after the session's last such request. A new
 session starts at the first tier. A pin to a tier the alias no longer has —
-it and every later tier were removed or disabled — is ignored.
+it and every later tier were removed or disabled — is dropped, and the
+session starts over at the first tier.
 
 Affinity is set per alias, and off by default: without it, or for a request
 without the header, routing is exactly as before. It applies to chat (unary

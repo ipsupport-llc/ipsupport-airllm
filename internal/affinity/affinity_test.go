@@ -26,8 +26,9 @@ func testRedis(t *testing.T) *redis.Client {
 	return rdb
 }
 
-// A pin only moves forward, whichever store holds it: a later replica that
-// never saw the session reads the later tier back from Redis.
+// A pin only moves forward, whichever store holds it — a later replica that
+// never saw the session reads the later tier back from Redis — until it is
+// forgotten.
 func TestPinNeverMovesBack(t *testing.T) {
 	ctx := context.Background()
 	stores := map[string]func(t *testing.T) (writer, reader *Store){
@@ -55,6 +56,13 @@ func TestPinNeverMovesBack(t *testing.T) {
 			}
 			if !w.Pin(ctx, alias, "call-1", 3, time.Minute) {
 				t.Error("pinning a later tier did not report a move")
+			}
+			w.Forget(ctx, alias, "call-1")
+			if !w.Pin(ctx, alias, "call-1", 1, time.Minute) {
+				t.Error("pinning after Forget did not report a move")
+			}
+			if tier, ok := r.Pinned(ctx, alias, "call-1"); !ok || tier != 1 {
+				t.Errorf("pinned after Forget = %d (%v), want 1", tier, ok)
 			}
 		})
 	}

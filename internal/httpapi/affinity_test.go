@@ -35,7 +35,7 @@ func newAffinityTestServer(t *testing.T, clk *fakeClock, ps ...providers.Provide
 // affinityPlan puts the given upstream providers into tiers 0, 1, … of an
 // alias with session affinity on.
 func affinityPlan(providerNames ...string) *routing.Plan {
-	plan := &routing.Plan{Alias: "voice-reply", Strategy: "round_robin", SessionAffinity: true}
+	plan := &routing.Plan{Alias: "voice-reply", Strategy: "round_robin", SessionAffinity: true, SessionAffinityTTL: routing.DefaultAffinityTTL}
 	for i, p := range providerNames {
 		plan.Tiers = append(plan.Tiers, []routing.Target{{Provider: p, UpstreamModel: "m", Tier: i}})
 	}
@@ -221,6 +221,27 @@ func TestPinToATierTheAliasNoLongerHasIsIgnored(t *testing.T) {
 	plan.Tiers = plan.Tiers[:1] // the backup tier was removed from the alias
 	if res := chatIn(t, s, call, plan); res.Provider != "primary" {
 		t.Errorf("served by %q, want the primary — the pinned tier is gone", res.Provider)
+	}
+}
+
+func TestSessionWhosePinnedTierWasRemovedPinsAgain(t *testing.T) {
+	primary, backup, last := newSwitchableUpstream(t, true), newSwitchableUpstream(t, true), newSwitchableUpstream(t, false)
+	s := newAffinityTestServer(t, newFakeClock(),
+		providers.NewOpenAICompat("primary", "openai", primary.URL, ""),
+		providers.NewOpenAICompat("backup", "openai", backup.URL, ""),
+		providers.NewOpenAICompat("last", "openai", last.URL, ""))
+	full := affinityPlan("primary", "backup", "last")
+	call := inSession("call-1")
+
+	chatIn(t, s, call, full) // pinned to the last tier
+	backup.failing.Store(false)
+	shrunk := affinityPlan("primary", "backup") // the last tier was removed
+	if res := chatIn(t, s, call, shrunk); res.Provider != "backup" {
+		t.Fatalf("served by %q, want the backup once the pinned tier is gone", res.Provider)
+	}
+	primary.failing.Store(false)
+	if res := chatIn(t, s, call, full); res.Provider != "backup" {
+		t.Errorf("served by %q, want the backup the session moved to — not the primary, nor the old pin's tier", res.Provider)
 	}
 }
 
