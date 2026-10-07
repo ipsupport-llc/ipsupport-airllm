@@ -16,6 +16,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/audio"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/breaker"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/metrics"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
@@ -319,5 +320,34 @@ func TestAnUnreadableCacheLeavesTheProviderToAnswer(t *testing.T) {
 	}
 	if n := len(up.asked()); n != 2 {
 		t.Errorf("upstream asked %d times, want every request answered by it", n)
+	}
+}
+
+func TestACacheHitTellsTheBreakerNothingAboutTheTier(t *testing.T) {
+	primary, backup := newVoiceUpstream(t, 24000), newVoiceUpstream(t, 22050)
+	clk := &testClock{t: time.Now()}
+	s := newCacheTestServer(t, clk, map[string]*voiceUpstream{"google": primary, "piper": backup})
+	s.breaker = s.newBreaker(nil, breaker.WithClock(clk.Now))
+	plan := cachedPlan(
+		routing.Target{Provider: "google", UpstreamModel: "tts-1", Options: breakerWith(routing.BreakerOptions{Failures: ms(2)})},
+		routing.Target{Provider: "piper", UpstreamModel: "tts-1"},
+	)
+	speak(t, s, plan, "Thanks for calling", "en-US-Neural2-A")
+	primary.failing.Store(true)
+
+	speak(t, s, plan, "One moment", "en-US-Neural2-A")
+	// Answered from the primary's own clip without calling it: neither a
+	// success that breaks the run of failures nor a call that counts.
+	if _, res := speak(t, s, plan, "Thanks for calling", "en-US-Neural2-A"); res.Provider != "google" || res.Cache != cacheHit || res.Attempts != 0 {
+		t.Fatalf("served by %s cache=%q attempts=%d, want a hit on the primary with no upstream call", res.Provider, res.Cache, res.Attempts)
+	}
+	speak(t, s, plan, "Goodbye", "en-US-Neural2-A")
+
+	asked := len(primary.asked())
+	if _, res := speak(t, s, plan, "Still there?", "en-US-Neural2-A"); res.Provider != "piper" {
+		t.Fatalf("served by %s, want the backup", res.Provider)
+	}
+	if n := len(primary.asked()); n != asked {
+		t.Errorf("primary asked again after two failures in a row (%d calls, was %d): the hit between them reset the breaker", n, asked)
 	}
 }

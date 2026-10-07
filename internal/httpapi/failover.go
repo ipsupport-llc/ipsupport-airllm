@@ -146,6 +146,12 @@ func (p attemptPolicy) fallsThrough(err error) bool {
 	return p.fallbackOnAuth && providers.IsAuthFailure(err)
 }
 
+// errServedWithoutCall is what an attemptCall returns when it answered from a
+// local store (the synthesis cache) instead of calling its target. The
+// request is served, but nothing was learnt about the tier and no upstream
+// call was made: no breaker verdict, no tier outcome, no counted attempt.
+var errServedWithoutCall = errors.New("served without an upstream call")
+
 // errCodeTierTimeout marks an attempt abandoned because it outlived its
 // target's time budget. Retryable, so it falls through like any upstream
 // failure would.
@@ -355,6 +361,13 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 			})
 			e.Release()
 
+			if errors.Is(callErr, errServedWithoutCall) {
+				if adm.Probe {
+					s.breaker.AbandonProbe(ctx, key, set)
+				}
+				res.Attempts--
+				return res, committed, nil
+			}
 			switch {
 			case recorded.Load():
 			case callErr == nil:

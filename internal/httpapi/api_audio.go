@@ -458,7 +458,7 @@ func (s *Server) runSynthesize(ctx context.Context, plan *routing.Plan, req audi
 			case hit:
 				resp = audio.SpeechResponse{Audio: clip.Audio, ContentType: clip.ContentType}
 				served, cache = clip.Model, cacheHit
-				return nil
+				return errServedWithoutCall
 			case err != nil:
 				if !errors.Is(err, speechcache.ErrUnavailable) {
 					slog.Warn("synthesis cache lookup failed", "alias", plan.Alias, "provider", t.Provider, "err", err)
@@ -489,12 +489,7 @@ func (s *Server) runSynthesize(ctx context.Context, plan *routing.Plan, req audi
 		return audio.SpeechResponse{}, res, err
 	}
 	res.UpstreamModel, res.Cache = served, cache
-	switch cache {
-	case cacheHit:
-		// executePlan counted the attempt that found the clip, but no
-		// upstream call was made for it.
-		res.Attempts--
-	case cacheMiss:
+	if cache == cacheMiss {
 		// Stored even if the client has gone: the clip is already paid for.
 		clip := speechcache.Clip{Audio: resp.Audio, ContentType: resp.ContentType, Model: served}
 		if err := s.speechCache.Put(context.WithoutCancel(ctx), key, clip, plan.SynthesisCacheTTL); err != nil && !errors.Is(err, speechcache.ErrUnavailable) {
