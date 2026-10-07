@@ -70,7 +70,7 @@ func New() *Metrics {
 			Name: "airllm_tier_fallbacks_total", Help: "Requests that moved past a tier, by origin tier, the tier that served (none if nothing did) and reason.",
 		}, []string{"alias", "from_tier", "to_tier", "reason"}),
 		tierOutcomes: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "airllm_tier_outcomes_total", Help: "Tier attempts by alias, tier and outcome (success, failure, request_error, quarantined).",
+			Name: "airllm_tier_outcomes_total", Help: "Tier attempts by alias, tier and outcome (success, failure, request_error, quarantined, unavailable).",
 		}, []string{"alias", "tier", "outcome"}),
 		tierLatency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name: "airllm_tier_attempt_duration_seconds", Help: "Time from a tier attempt's start to its verdict (a stream's first chunk), by alias, tier and outcome.",
@@ -223,13 +223,14 @@ func (m *Metrics) TierFallback(alias, from, to, reason string) {
 	m.tierFallbacks.WithLabelValues(alias, from, to, reason).Inc()
 }
 
-// TierQuarantined counts a tier skipped by its open breaker, without a call.
+// TierSkipped counts a tier passed over without a call: "quarantined" by its
+// open breaker, or "unavailable" while its (provider, model) is marked down.
 // Attempts that reach the tier go through TierAttempt, which also times them.
-func (m *Metrics) TierQuarantined(alias, tier string) {
+func (m *Metrics) TierSkipped(alias, tier, outcome string) {
 	if m == nil {
 		return
 	}
-	m.tierOutcomes.WithLabelValues(alias, tier, "quarantined").Inc()
+	m.tierOutcomes.WithLabelValues(alias, tier, outcome).Inc()
 }
 
 // TierAttempt counts one attempt that reached a tier — success, failure or

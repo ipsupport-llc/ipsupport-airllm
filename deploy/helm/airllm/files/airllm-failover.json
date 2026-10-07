@@ -180,7 +180,7 @@
           "refId": "A"
         }
       ],
-      "description": "Requests that moved past a tier, by the tier that served them in the end (none: nothing did) and why. reason=quarantined is a tier skipped by its open breaker."
+      "description": "Requests that moved past a tier, by the tier that served them in the end (none: nothing did) and why. reason=quarantined is a tier skipped by its open breaker, reason=unavailable one skipped while its provider and model are marked down."
     },
     {
       "collapsed": false,
@@ -232,7 +232,7 @@
           "refId": "A"
         }
       ],
-      "description": "Attempts per tier: success, failure (counts against the tier), request_error (the request's fault, no verdict) and quarantined (skipped, no call)."
+      "description": "Attempts per tier: success, failure (counts against the tier), request_error (the request's fault, no verdict) quarantined (skipped by its breaker) and unavailable (skipped while its provider and model are marked down); neither makes a call."
     },
     {
       "datasource": "${DS_PROMETHEUS}",

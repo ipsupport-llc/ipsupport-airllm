@@ -282,7 +282,7 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 			if adm.Skip {
 				quarantined = true
 				moved = append(moved, tierFallback{tier: t.Tier, reason: "quarantined"})
-				s.metrics.TierQuarantined(plan.Alias, tierLabel)
+				s.metrics.TierSkipped(plan.Alias, tierLabel, "quarantined")
 				continue
 			}
 			unavailKey := unavail.Key{Provider: t.Provider, UpstreamModel: t.UpstreamModel}
@@ -295,7 +295,7 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 				// unavail's doc comment for why there's no separate
 				// prober).
 				moved = append(moved, tierFallback{tier: t.Tier, reason: "unavailable"})
-				s.metrics.TierOutcome(plan.Alias, tierLabel, "unavailable")
+				s.metrics.TierSkipped(plan.Alias, tierLabel, "unavailable")
 				continue
 			}
 			if !e.Acquire() {
