@@ -17,6 +17,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/audio"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/lookupcache"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 )
@@ -62,6 +63,11 @@ type TargetOptions struct {
 	// setting is sent instead, and <think> blocks are cut from the reply.
 	// Unset leaves the client's settings as they are.
 	Thinking *string `json:"thinking,omitempty"`
+	// RecognitionModels picks the recognition model by the request's
+	// language, keyed by BCP-47 tag: an exact tag wins over a bare language
+	// ("en-US" over "en"), and a language with no entry uses the target's
+	// upstream model. Read by providers that choose a model per language.
+	RecognitionModels map[string]string `json:"recognition_models,omitempty"`
 }
 
 // thinkingOff is the one value TargetOptions.Thinking accepts.
@@ -135,6 +141,19 @@ func ParseTargetOptions(raw []byte) (TargetOptions, error) {
 	}
 	if o.Thinking != nil && *o.Thinking != thinkingOff {
 		return o, fmt.Errorf(`invalid options: thinking must be "off"`)
+	}
+	seen := map[string]bool{}
+	for lang, model := range o.RecognitionModels {
+		if strings.TrimSpace(lang) == "" || strings.TrimSpace(model) == "" {
+			return o, fmt.Errorf("invalid options: recognition_models needs a language and a model in every entry")
+		}
+		// Keys match in any case, so two spellings of one language would
+		// leave the choice between them to map order.
+		tag := audio.CanonicalLanguage(lang)
+		if seen[tag] {
+			return o, fmt.Errorf("invalid options: recognition_models lists %s twice", tag)
+		}
+		seen[tag] = true
 	}
 	return o, nil
 }

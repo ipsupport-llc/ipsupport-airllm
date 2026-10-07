@@ -15,7 +15,7 @@ import (
 type Provider interface {
 	// Name is the unique provider name (matches providers.name in the DB).
 	Name() string
-	// Kind is the provider family: openai | openrouter | xai | groq | ollama | muse | anthropic | vertex | mock.
+	// Kind is the provider family: openai | openrouter | xai | groq | ollama | muse | anthropic | vertex | google-speech | mock.
 	Kind() string
 	// Protocol is the native wire protocol: openai | anthropic.
 	Protocol() string
@@ -51,6 +51,13 @@ type PricedModelLister interface {
 // implement it.
 type Transcriber interface {
 	Transcribe(ctx context.Context, req audio.TranscriptionRequest) (audio.TranscriptionResponse, error)
+}
+
+// RecognitionLanguageLister is implemented by transcribing providers that
+// can say which languages they recognise, as BCP-47 primary subtags ("en",
+// "ru"). It answers the capabilities route for an alias's first tier.
+type RecognitionLanguageLister interface {
+	RecognitionLanguages() []string
 }
 
 // Synthesizer is implemented by providers that can synthesize speech from

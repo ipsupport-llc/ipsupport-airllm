@@ -16,25 +16,33 @@ import (
 // It exists so the admin API needs no per-kind knowledge of its own: what a
 // kind requires is decided here, next to the code that consumes it.
 func ValidateProviderConfig(kind string, raw []byte, baseURL string) error {
-	if kind != "vertex" {
-		return nil
+	switch kind {
+	case "vertex":
+		cfg, err := parseGoogleCloudConfig(raw)
+		if err != nil {
+			return err
+		}
+		return validateVertexConfig(cfg, baseURL)
+	case KindGoogleSpeech:
+		cfg, err := parseGoogleCloudConfig(raw)
+		if err != nil {
+			return err
+		}
+		return validateGoogleSpeechConfig(cfg)
 	}
-	cfg, err := parseVertexConfig(raw)
-	if err != nil {
-		return err
-	}
-	return validateVertexConfig(cfg, baseURL)
+	return nil
 }
 
-// vertexConfig is what a Vertex AI provider needs beyond its credential:
-// which cloud project is billed, and which location serves the request.
+// googleCloudConfig is what a Google Cloud provider — Vertex AI or Google
+// Speech — needs beyond its credential: which cloud project is billed, and
+// which location serves the request.
 //
 // It is stored as structured configuration rather than folded into base_url
 // because an assembled endpoint URL cannot be taken apart again — the same
 // two values also spell the prediction endpoint a later embeddings capability
 // would call, and an operator entering them separately cannot spell the
 // project differently in two places.
-type vertexConfig struct {
+type googleCloudConfig struct {
 	Project  string `json:"project"`
 	Location string `json:"location"`
 }
@@ -54,16 +62,16 @@ const (
 	vertexDefaultPublisher = "google"
 )
 
-// parseVertexConfig reads a provider's stored JSON configuration. Absent or
+// parseGoogleCloudConfig reads a provider's stored JSON configuration. Absent or
 // empty input is an empty configuration rather than an error: every provider
 // row carries '{}' by default, and kinds that need no configuration keep it.
-func parseVertexConfig(raw []byte) (vertexConfig, error) {
-	var cfg vertexConfig
+func parseGoogleCloudConfig(raw []byte) (googleCloudConfig, error) {
+	var cfg googleCloudConfig
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return cfg, nil
 	}
 	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return vertexConfig{}, fmt.Errorf("parse vertex config: %w", err)
+		return googleCloudConfig{}, fmt.Errorf("parse provider config: %w", err)
 	}
 	cfg.Project = strings.TrimSpace(cfg.Project)
 	cfg.Location = strings.TrimSpace(cfg.Location)
@@ -74,7 +82,7 @@ func parseVertexConfig(raw []byte) (vertexConfig, error) {
 // request, so the admin API can reject it on save instead of letting the
 // operator find out from a failed request hours later. An explicit base_url
 // stands in for the project because it already names a complete endpoint.
-func validateVertexConfig(cfg vertexConfig, baseURL string) error {
+func validateVertexConfig(cfg googleCloudConfig, baseURL string) error {
 	if cfg.Project == "" && baseURL == "" {
 		return errors.New("vertex provider needs a cloud project (or an explicit base_url)")
 	}
@@ -83,7 +91,7 @@ func validateVertexConfig(cfg vertexConfig, baseURL string) error {
 
 // location resolves the configured location, defaulting to global — the
 // deployment style that needs no regional decision.
-func (c vertexConfig) location() string {
+func (c googleCloudConfig) location() string {
 	if c.Location == "" {
 		return vertexGlobalLocation
 	}
@@ -97,7 +105,7 @@ func (c vertexConfig) location() string {
 // An explicitly configured address wins and is used verbatim. That is not
 // polish: it is what makes the provider testable against a local stub, and it
 // covers a proxy or an endpoint pinned to another API version.
-func vertexBaseURL(cfg vertexConfig, explicit string) string {
+func vertexBaseURL(cfg googleCloudConfig, explicit string) string {
 	if explicit != "" {
 		return strings.TrimRight(explicit, "/")
 	}

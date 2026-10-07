@@ -897,18 +897,19 @@ async function adminProviders(c) {
     b.addEventListener("click", () => editProvider(c, JSON.parse(b.getAttribute("data-edit")))));
 }
 
-// isVertex reports whether a provider record or a form's values describe the
-// one kind that is addressed by structured configuration and authenticated by
-// a refreshing token rather than a static key.
-function isVertex(p) { return p.kind === "vertex"; }
+// isGoogleCloud reports whether a provider record or a form's values describe
+// a Google Cloud kind — Vertex AI or Google Speech — addressed by structured
+// configuration and authenticated by a refreshing token rather than a static
+// key.
+function isGoogleCloud(p) { return p.kind === "vertex" || p.kind === "google-speech"; }
 
-// credentialBadge says what a provider authenticates with. A vertex provider
+// credentialBadge says what a provider authenticates with. A Google Cloud provider
 // with nothing stored is not missing its key — it authenticates as the pod's
 // own identity, which is the recommended configuration and must not read as
 // broken in the list.
 function credentialBadge(p) {
   if (p.has_credential) return `<span class="badge active">set</span>`;
-  if (isVertex(p)) return `<span class="badge active">federated</span>`;
+  if (isGoogleCloud(p)) return `<span class="badge active">federated</span>`;
   return `<span class="badge neutral">none</span>`;
 }
 
@@ -916,22 +917,22 @@ function editProvider(c, p) {
   const cfg = p.config || {};
   modalForm(p.name ? `Edit provider ${p.name}` : "New provider", [
     { name: "name", label: "Name", value: p.name || "", disabled: !!p.name },
-    { name: "kind", label: "Kind", type: "select", options: ["mock", "openai", "openrouter", "xai", "groq", "ollama", "muse", "anthropic", "vertex"], value: p.kind || "mock" },
+    { name: "kind", label: "Kind", type: "select", options: ["mock", "openai", "openrouter", "xai", "groq", "ollama", "muse", "anthropic", "vertex", "google-speech"], value: p.kind || "mock" },
     { name: "base_url", label: "Base URL (optional override)", value: p.base_url || "" },
-    // Vertex is addressed by project and location rather than by a URL, and
-    // holds an OAuth2 credential rather than a key — so its fields appear
-    // only for that kind, and the API-key field steps aside rather than
+    // Google Cloud kinds are addressed by project and location rather than by
+    // a URL, and hold an OAuth2 credential rather than a key — so their fields
+    // appear only for those kinds, and the API-key field steps aside rather than
     // being repurposed for a credential it cannot carry.
-    { name: "project", label: "Cloud project", value: cfg.project || "", showWhen: isVertex },
-    { name: "location", label: "Location (blank = global)", value: cfg.location || "", showWhen: isVertex },
+    { name: "project", label: "Cloud project", value: cfg.project || "", showWhen: isGoogleCloud },
+    { name: "location", label: "Location (blank = global)", value: cfg.location || "", showWhen: isGoogleCloud },
     // A blank credential keeps the stored one, so removing it is a separate,
     // explicit checkbox — offered only when there is something to remove, and
     // hiding the credential inputs while ticked, since the admin API rejects a
     // save that both sets and clears.
     { name: "clear_credential", type: "checkbox", value: false, showWhen: () => !!p.has_credential,
-      label: "Remove the stored credential — vertex then authenticates as the pod's own identity; other kinds are left without a key" },
-    { name: "api_key", label: p.has_credential ? "API key (set — blank keeps current)" : "API key", type: "password", value: "", placeholder: p.has_credential ? "•••••• stored" : "", showWhen: (v) => !isVertex(v) && !v.clear_credential },
-    { name: "credential_json", type: "textarea", value: "", showWhen: (v) => isVertex(v) && !v.clear_credential,
+      label: "Remove the stored credential — vertex and google-speech then authenticate as the pod's own identity; other kinds are left without a key" },
+    { name: "api_key", label: p.has_credential ? "API key (set — blank keeps current)" : "API key", type: "password", value: "", placeholder: p.has_credential ? "•••••• stored" : "", showWhen: (v) => !isGoogleCloud(v) && !v.clear_credential },
+    { name: "credential_json", type: "textarea", value: "", showWhen: (v) => isGoogleCloud(v) && !v.clear_credential,
       label: p.has_credential
         ? "Service-account JSON (stored — blank keeps it)"
         : "Service-account JSON — leave blank to authenticate as the pod's own identity" },
@@ -939,14 +940,14 @@ function editProvider(c, p) {
     { name: "enabled", label: "Enabled", type: "checkbox", value: p.enabled !== false },
   ], async (v) => {
     const body = { kind: v.kind, base_url: v.base_url, enabled: v.enabled, max_concurrency: Number(v.max_concurrency) || 0 };
-    if (isVertex(v)) {
-      // Only the kind that has structured configuration sends it: the admin
+    if (isGoogleCloud(v)) {
+      // Only the kinds that have structured configuration send it: the admin
       // API keeps the stored configuration when a save omits it, so an empty
       // object from another kind would erase a project as a side effect.
       body.config = { project: v.project.trim(), location: v.location.trim() };
     }
     if (v.clear_credential) body.clear_credential = true;
-    else if (isVertex(v)) body.credential_json = v.credential_json.trim();
+    else if (isGoogleCloud(v)) body.credential_json = v.credential_json.trim();
     else body.api_key = v.api_key;
     const x = await api("PUT", `/api/admin/providers/${encodeURIComponent(v.name)}`, body);
     if (x.ok) { toast("Provider saved"); adminProviders(c); return true; }
@@ -1176,7 +1177,7 @@ async function editAlias(c, a) {
       <input id="al-affinity" type="checkbox" ${a.session_affinity ? "checked" : ""} style="width:auto" /></label>
     <label class="field"><span class="lab">Session pin TTL, hours (empty = 4)</span>
       <input id="al-affinity-ttl" type="number" min="0" max="168" step="any" value="${esc(affinityTTLText(a.session_affinity_ttl_s))}" style="width:96px" /></label>
-    <div class="lab" style="color:var(--muted);font-size:.82rem;margin-bottom:.3rem">Targets: same priority = load-balanced tier; higher number = fallback tier. Label is what the header shows — real provider/model names never leak. Options (JSON, optional): <span class="mono">timeout_ms</span> — time budget (first chunk for streams, whole call otherwise); <span class="mono">fallback_on_auth</span> — try the next tier on upstream auth/billing errors; <span class="mono">breaker</span> — circuit breaker for the tier, e.g. <span class="mono">{"enabled":true,"failures":3,"cooldown_ms":60000}</span>.</div>
+    <div class="lab" style="color:var(--muted);font-size:.82rem;margin-bottom:.3rem">Targets: same priority = load-balanced tier; higher number = fallback tier. Label is what the header shows — real provider/model names never leak. Options (JSON, optional): <span class="mono">timeout_ms</span> — time budget (first chunk for streams, whole call otherwise); <span class="mono">fallback_on_auth</span> — try the next tier on upstream auth/billing errors; <span class="mono">breaker</span> — circuit breaker for the tier, e.g. <span class="mono">{"enabled":true,"failures":3,"cooldown_ms":60000}</span>; <span class="mono">recognition_models</span> — recognition model per BCP-47 language, e.g. <span class="mono">{"en-US":"telephony"}</span> (google-speech).</div>
     <div id="al-targets"></div>
     <button type="button" class="btn ghost sm" id="al-add" style="margin-top:.3rem">+ Add target</button>
     <div class="row" style="justify-content:flex-end;margin-top:1rem">

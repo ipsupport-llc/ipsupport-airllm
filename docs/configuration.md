@@ -149,9 +149,17 @@ nothing changes until an operator opts in.
 | `unavailable_max_ms` | `25600` | Gateway-wide only — see "Target unavailability" below. |
 
 Per-target `options` is a free-form JSON object: the keys above are the ones
-the gateway reads today, and any other key is stored and returned untouched.
-A known key with the wrong type, a negative `timeout_ms` or a non-object is
-rejected on save with `400`. For example, a voice alias whose first tier must
+the gateway reads today, plus one that only makes sense per target and so has
+no gateway-wide default:
+
+| Key | Meaning |
+|-----|---------|
+| `recognition_models` | The recognition model per language, keyed by BCP-47 tag, for a provider that chooses its model by language (today `google-speech`): `{"en-US": "telephony", "es-ES": "telephony"}`. An exact tag wins over a bare language, so `"en"` covers every English region unless `"en-GB"` is listed too. A language with no entry is recognised with the target's `upstream_model`. The ledger records the model that actually ran, so price each one. |
+
+Any other key is stored and returned untouched. A known key with the wrong
+type, a negative `timeout_ms`, a `recognition_models` entry with an empty
+language or model or one language listed twice (in any case), or a non-object
+is rejected on save with `400`. For example, a voice alias whose first tier must
 answer within two seconds and may fail over on an expired credential:
 
 ```json
@@ -362,9 +370,9 @@ one rebuilds the registry immediately; no restart.
 `openai`, `openrouter`, `xai`, `groq`, `ollama` and `muse` are one
 OpenAI-compatible HTTP client pointed at different addresses,
 authenticating with `Authorization: Bearer <api_key>`; an explicit
-`base_url` always overrides the default below. The other three are each
+`base_url` always overrides the default below. The other four are each
 their own thing: `mock` answers in-process, `anthropic` has no client yet,
-and `vertex` is described in full further down.
+and `vertex` and `google-speech` are described in full further down.
 
 | Kind | Default address | Credential |
 |------|-----------------|------------|
@@ -377,6 +385,7 @@ and `vertex` is described in full further down.
 | `muse` | `https://api.meta.ai/v1` | `api_key` — Meta Model API (Muse Spark); also exposes an Anthropic-shaped `/v1/messages` surface this codebase doesn't use, since every kind here speaks OpenAI wire format upstream regardless |
 | `anthropic` | — | **no client yet**: a row of this kind is skipped when the registry is built, with a warning. Unrelated to the Anthropic-shaped `/v1/messages` *ingress*, which works with any kind. |
 | `vertex` | assembled from its configuration — see below | a short-lived OAuth2 access token, consulted per request and refreshed when it expires |
+| `google-speech` | assembled from its configuration — see below | the same short-lived token as `vertex` |
 
 Two things about the compatible kinds are worth knowing. They structurally
 expose the audio endpoints whether or not the vendor implements them, so an
@@ -391,8 +400,8 @@ never returned by the admin API: `GET /api/admin/providers` reports only
 Importing prices (`POST /api/admin/pricing/import/{provider}`) reads the kind's
 own `/models` catalogue. Every compatible kind accepts the call, but in
 practice only OpenRouter publishes prices there, so the others import nothing.
-`vertex` does not implement the interface at all and answers
-`unsupported: true` — see its pricing note below. A catalogue publishes flat
+`vertex` and `google-speech` do not implement the interface at all and answer
+`unsupported: true` — see their pricing notes below. A catalogue publishes flat
 rates only, so an import leaves any hand-entered long-prompt tier on the row
 alone rather than flattening it.
 
@@ -524,6 +533,60 @@ see [Operations → Reasoning tokens](operations.md#reasoning-tokens). Two
 practical consequences: a Vertex tier costs meaningfully more per request than
 its unit price suggests, and a small `max_tokens` can be spent entirely on
 thinking before any text is produced.
+
+### Google Speech (`google-speech`)
+
+Google Cloud Speech-to-Text, reached over its native v2 REST API — it has no
+OpenAI-shaped surface. It declares transcription and a curated model list
+only: it cannot synthesize, and chat on it fails as a configuration mistake.
+A transcription alias can put it in any tier, ahead of or behind the
+OpenAI-compatible recognisers, and failover between them works with the same
+request.
+
+**Configuration** is the same `config` object as `vertex`, with one
+difference:
+
+| Key | Required | Meaning |
+|-----|----------|---------|
+| `project` | **yes**, even with `base_url` | The project recognising and billed. It is part of every request's path, and it is sent as the quota project (`X-Goog-User-Project`), so recognition is billed there whatever project the identity belongs to — the identity needs `roles/serviceusage.serviceUsageConsumer` on it, besides `roles/speech.client`. |
+| `location` | no — defaults to `global` | The recognition location. `global` uses `speech.googleapis.com`; any other location its own host, e.g. `eu-speech.googleapis.com`. |
+
+Each request goes to `<host>/v2/projects/<project>/locations/<location>/recognizers/_:recognize`,
+the project's default recognizer, so nothing has to be created on the Google
+side. An explicit `base_url` replaces the host — what makes the provider
+testable against a stub.
+
+**Credential** works exactly as for `vertex`: blank for the pod's federated
+identity, or a service-account JSON key; credential bytes that do not resolve
+disable the provider, never fall back to the ambient identity.
+
+**What a request becomes:**
+
+- **Language.** Google wants a locale, so a bare language gets its usual
+  region (`uk` → `uk-UA`, `en` → `en-US`, `zh` → `cmn-Hans-CN`, `ar` →
+  `ar-EG`); a request with none is recognised as `en-US`. Alternative languages follow the primary
+  in the same list, up to Google's four in all.
+- **Model.** The target's `recognition_models` entry for the primary language
+  — matched against Google's locale first, then against the language as the
+  client sent it, so a `"zh"` entry still applies — else the target's
+  `upstream_model` (see [Failover policy](#failover-policy-getput-apiadminfailover)).
+  The alias editor offers `chirp_3`, `long`, `short`, `telephony` and
+  `telephony_short`; any other model can be typed in.
+- **Audio** is sent as is, and Google reads the format from its header — send
+  WAV, FLAC or MP3, not raw PCM.
+- **Punctuation** is requested. Some model and language pairs refuse it with a
+  `400`; the gateway then retries once without it and remembers the pair, so
+  those transcripts come back unpunctuated instead of failing.
+
+**What comes back:** the results' transcripts joined, the language Google
+detected, the mean of the confidences it reported, and its **billed** duration
+— which is what prices the request and counts against `audio_seconds` caps.
+Should a reply carry no billed duration, a WAV upload is metered by its own
+length, rounded up to the second as Google bills, rather than going free.
+
+**Prices are entered by hand**, one `audio_second` row per model an alias can
+run, under the provider's name; see
+[Operations → Google Speech-to-Text prices](operations.md#google-speech-to-text-prices).
 
 ## Per-role policy
 

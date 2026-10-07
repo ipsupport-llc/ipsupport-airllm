@@ -13,8 +13,9 @@ import (
 )
 
 // defaultBaseURL returns the public base URL for a provider kind; an explicit
-// per-provider base_url overrides it. Vertex is absent on purpose: its address
-// is assembled from the provider's configuration, see vertexBaseURL.
+// per-provider base_url overrides it. Vertex and Google Speech are absent on
+// purpose: their addresses are assembled from the provider's configuration,
+// see vertexBaseURL and googleSpeechBaseURL.
 func defaultBaseURL(kind string) string {
 	switch kind {
 	case "openai":
@@ -43,7 +44,7 @@ func defaultBaseURL(kind string) string {
 // credentials or configuration are wrong.
 func Build(ctx context.Context, rows []store.ProviderRow, sealer *secrets.Sealer) *Registry {
 	reg := NewRegistry()
-	// Fingerprints of every vertex credential this load actually resolved a
+	// Fingerprints of every Google credential this load actually resolved a
 	// token source for — reconciled against the token cache at the end, so
 	// a credential rotated away in a prior save doesn't linger forever.
 	liveTokenFingerprints := map[string]bool{}
@@ -76,6 +77,16 @@ func Build(ctx context.Context, rows []store.ProviderRow, sealer *secrets.Sealer
 				continue
 			}
 			prov = v
+			if credErr == nil {
+				liveTokenFingerprints[googleTokenFingerprint(cred)] = true
+			}
+		case KindGoogleSpeech:
+			g, err := newGoogleSpeechFromRow(ctx, p, cred, credErr)
+			if err != nil {
+				slog.Error("google-speech provider disabled", "provider", p.Name, "err", err)
+				continue
+			}
+			prov = g
 			if credErr == nil {
 				liveTokenFingerprints[googleTokenFingerprint(cred)] = true
 			}
@@ -123,24 +134,49 @@ func Fingerprint(rows []store.ProviderRow) [sha256.Size]byte {
 //
 // A credential that was stored but could not be decrypted disables the
 // provider rather than falling through to the ambient identity. That
-// distinction only exists for this kind: for a static-key kind an unusable
+// distinction only exists for the Google Cloud kinds: for a static-key kind an unusable
 // key produces an unauthenticated call that simply fails, but here it would
 // silently run the gateway as the pod's own principal — a different identity
 // than the operator configured, spending against a different grant.
 func newVertexFromRow(ctx context.Context, p store.ProviderRow, cred []byte, credErr error) (*Vertex, error) {
-	if credErr != nil {
-		return nil, fmt.Errorf("stored credential could not be decrypted: %w", credErr)
-	}
-	cfg, err := parseVertexConfig(p.Config)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateVertexConfig(cfg, p.BaseURL); err != nil {
-		return nil, err
-	}
-	tokens, err := GoogleTokenSource(ctx, cred)
+	cfg, tokens, err := googleCloudFromRow(ctx, p, cred, credErr, func(cfg googleCloudConfig) error {
+		return validateVertexConfig(cfg, p.BaseURL)
+	})
 	if err != nil {
 		return nil, err
 	}
 	return NewVertex(p.Name, vertexBaseURL(cfg, p.BaseURL), tokens), nil
+}
+
+// newGoogleSpeechFromRow builds a Google Speech provider from its stored
+// row, with the same refusals as newVertexFromRow.
+func newGoogleSpeechFromRow(ctx context.Context, p store.ProviderRow, cred []byte, credErr error) (*GoogleSpeech, error) {
+	cfg, tokens, err := googleCloudFromRow(ctx, p, cred, credErr, validateGoogleSpeechConfig)
+	if err != nil {
+		return nil, err
+	}
+	return NewGoogleSpeech(p.Name, googleSpeechBaseURL(cfg, p.BaseURL), cfg.Project, cfg.location(), tokens), nil
+}
+
+// googleCloudFromRow is what every Google Cloud kind needs from its row: the
+// configuration, checked by the kind's own validate, and a token source.
+// Each refusal — a credential that cannot be decrypted, a configuration that
+// could never serve, credential bytes that do not resolve — disables the
+// provider rather than fall through to the pod's own identity.
+func googleCloudFromRow(ctx context.Context, p store.ProviderRow, cred []byte, credErr error, validate func(googleCloudConfig) error) (googleCloudConfig, TokenSource, error) {
+	if credErr != nil {
+		return googleCloudConfig{}, nil, fmt.Errorf("stored credential could not be decrypted: %w", credErr)
+	}
+	cfg, err := parseGoogleCloudConfig(p.Config)
+	if err != nil {
+		return googleCloudConfig{}, nil, err
+	}
+	if err := validate(cfg); err != nil {
+		return googleCloudConfig{}, nil, err
+	}
+	tokens, err := GoogleTokenSource(ctx, cred)
+	if err != nil {
+		return googleCloudConfig{}, nil, err
+	}
+	return cfg, tokens, nil
 }

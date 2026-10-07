@@ -231,8 +231,10 @@ func (p *OpenAICompat) Transcribe(ctx context.Context, in audio.TranscriptionReq
 	if err := mw.WriteField("response_format", "verbose_json"); err != nil {
 		return audio.TranscriptionResponse{}, err
 	}
-	if in.Language != "" {
-		if err := mw.WriteField("language", in.Language); err != nil {
+	// The Whisper family takes a bare ISO-639-1 language and fails on a
+	// region; alternatives have nowhere to go and are dropped.
+	if lang := audio.PrimaryLanguage(in.Language); lang != "" {
+		if err := mw.WriteField("language", lang); err != nil {
 			return audio.TranscriptionResponse{}, err
 		}
 	}
@@ -273,12 +275,35 @@ func (p *OpenAICompat) Transcribe(ctx context.Context, in audio.TranscriptionReq
 
 	var w struct {
 		Text     string  `json:"text"`
+		Language string  `json:"language"`
 		Duration float64 `json:"duration"`
+		Segments []struct {
+			AvgLogprob float64 `json:"avg_logprob"`
+		} `json:"segments"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&w); err != nil {
 		return audio.TranscriptionResponse{}, err
 	}
-	return audio.TranscriptionResponse{Text: w.Text, DurationSeconds: w.Duration}, nil
+	out := audio.TranscriptionResponse{Text: w.Text, Language: audio.LanguageFromName(w.Language), DurationSeconds: w.Duration}
+	// The Whisper family reports no confidence, only each segment's mean
+	// token log-probability (-∞..0). Its mean maps onto 0..1 as 1 + lp/5,
+	// clamped — the same heuristic the in-process Whisper recognisers use,
+	// so a confidence floor tuned against them keeps its meaning.
+	if n := len(w.Segments); n > 0 {
+		var sum float64
+		for _, seg := range w.Segments {
+			sum += seg.AvgLogprob
+		}
+		out.Confidence = min(1, max(0, 1+sum/float64(n)/5))
+	}
+	return out, nil
+}
+
+// RecognitionLanguages is the telephony-grade set the Whisper family, which
+// every OpenAI-compatible transcription route serves, recognises well at
+// phone bandwidth.
+func (p *OpenAICompat) RecognitionLanguages() []string {
+	return append([]string(nil), audio.TelephonyLanguages...)
 }
 
 // Synthesize requests text-to-speech audio. The response is read whole —

@@ -38,6 +38,9 @@ func TestPutAliasRejectsInvalidTargetOptions(t *testing.T) {
 		"breaker zero cooldown":   `{"breaker":{"cooldown_ms":0}}`,
 		"thinking other than off": `{"thinking":"on"}`,
 		"thinking of wrong type":  `{"thinking":false}`,
+		"models not a map":        `{"recognition_models":["long"]}`,
+		"model left empty":        `{"recognition_models":{"en-US":""}}`,
+		"one language twice":      `{"recognition_models":{"en-US":"long","EN_us":"telephony"}}`,
 	}
 	for name, opts := range cases {
 		t.Run(name, func(t *testing.T) {
