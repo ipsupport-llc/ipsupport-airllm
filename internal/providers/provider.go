@@ -15,7 +15,7 @@ import (
 type Provider interface {
 	// Name is the unique provider name (matches providers.name in the DB).
 	Name() string
-	// Kind is the provider family: openai | openrouter | xai | groq | ollama | muse | anthropic | vertex | google-speech | mock.
+	// Kind is the provider family: openai | openrouter | xai | groq | ollama | muse | anthropic | vertex | google-speech | google-tts | mock.
 	Kind() string
 	// Protocol is the native wire protocol: openai | anthropic.
 	Protocol() string
@@ -64,6 +64,13 @@ type RecognitionLanguageLister interface {
 // text. Providers without a synthesis capability simply do not implement it.
 type Synthesizer interface {
 	Synthesize(ctx context.Context, req audio.SpeechRequest) (audio.SpeechResponse, error)
+}
+
+// VoiceLister is implemented by synthesizing providers that can enumerate
+// their voices. It answers the capabilities route for an alias's first tier
+// when that tier's target does not list its voices in its own options.
+type VoiceLister interface {
+	ListVoices(ctx context.Context) ([]audio.Voice, error)
 }
 
 // Entry wraps a provider with a concurrency limit. A request must Acquire a

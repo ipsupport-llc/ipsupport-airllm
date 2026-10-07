@@ -41,6 +41,11 @@ func TestPutAliasRejectsInvalidTargetOptions(t *testing.T) {
 		"models not a map":        `{"recognition_models":["long"]}`,
 		"model left empty":        `{"recognition_models":{"en-US":""}}`,
 		"one language twice":      `{"recognition_models":{"en-US":"long","EN_us":"telephony"}}`,
+		"voices not a map":        `{"voices":["en-US-Neural2-F"]}`,
+		"voice of wrong shape":    `{"voices":{"en-US-Neural2-F":"onyx"}}`,
+		"unknown gender":          `{"voices":{"en-US-Neural2-F":{"voice":"onyx","gender":"f"}}}`,
+		"default without voice":   `{"default_voices":{"en":{"model":"tts-1"}}}`,
+		"default twice":           `{"default_voices":{"en":{"voice":"a"},"EN":{"voice":"b"}}}`,
 	}
 	for name, opts := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -68,6 +68,18 @@ type TargetOptions struct {
 	// ("en-US" over "en"), and a language with no entry uses the target's
 	// upstream model. Read by providers that choose a model per language.
 	RecognitionModels map[string]string `json:"recognition_models,omitempty"`
+	// Voices maps a canonical voice — the identifier pipelines use, a Google
+	// voice name or a Piper one — to the voice and model this target speaks
+	// it with. On a first tier it is also the voice catalogue the
+	// capabilities route reports, so entries may describe the canonical
+	// voice's language and gender.
+	Voices map[string]VoiceChoice `json:"voices,omitempty"`
+	// DefaultVoices is the voice for a canonical voice Voices does not map,
+	// keyed by the BCP-47 language it speaks; an exact tag wins over a bare
+	// language. A target with either map that can place a voice in neither
+	// is skipped for it, so the next tier speaks instead of the request
+	// failing on a name this provider has never heard.
+	DefaultVoices map[string]VoiceChoice `json:"default_voices,omitempty"`
 }
 
 // thinkingOff is the one value TargetOptions.Thinking accepts.
@@ -118,6 +130,20 @@ func (b *BreakerOptions) Validate() error {
 	return nil
 }
 
+// VoiceChoice is how a target speaks one canonical voice. An empty Voice is
+// the canonical voice itself; an empty Model is the target's upstream model.
+// Language and Gender describe the canonical voice, for the capabilities
+// route; they do not change what is sent.
+type VoiceChoice struct {
+	Voice    string `json:"voice,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Language string `json:"language,omitempty"`
+	Gender   string `json:"gender,omitempty"`
+}
+
+// voiceGenders are the genders a voice may be described with.
+var voiceGenders = map[string]bool{"": true, "male": true, "female": true, "neutral": true}
+
 // ParseTargetOptions decodes a stored or submitted options object. Empty
 // input and JSON null are the empty object. Anything that is not an object,
 // or a known key of the wrong type or out of range, is an error.
@@ -155,6 +181,25 @@ func ParseTargetOptions(raw []byte) (TargetOptions, error) {
 		}
 		seen[tag] = true
 	}
+	for id, v := range o.Voices {
+		if strings.TrimSpace(id) == "" {
+			return o, fmt.Errorf("invalid options: voices needs a canonical voice in every entry")
+		}
+		if !voiceGenders[v.Gender] {
+			return o, fmt.Errorf("invalid options: voices: gender of %s must be male, female or neutral", id)
+		}
+	}
+	seen = map[string]bool{}
+	for lang, v := range o.DefaultVoices {
+		if strings.TrimSpace(lang) == "" || strings.TrimSpace(v.Voice) == "" {
+			return o, fmt.Errorf("invalid options: default_voices needs a language and a voice in every entry")
+		}
+		tag := audio.CanonicalLanguage(lang)
+		if seen[tag] {
+			return o, fmt.Errorf("invalid options: default_voices lists %s twice", tag)
+		}
+		seen[tag] = true
+	}
 	return o, nil
 }
 
@@ -182,6 +227,31 @@ type modelNotFoundError struct{ model string }
 
 func (e modelNotFoundError) Error() string { return fmt.Sprintf("model %q not found", e.model) }
 func (e modelNotFoundError) Unwrap() error { return ErrModelNotFound }
+
+// SpeakAs resolves how this target speaks voice, in language when the
+// request names one and otherwise in the language the voice's name
+// carries: its Voices entry, else its DefaultVoices entry for that
+// language, else — on a target with neither map, or for a request naming
+// no voice, which leaves the choice to the provider — the voice unchanged.
+// ok is false when the target has a map but no place for a named voice.
+func (o TargetOptions) SpeakAs(voice, language string) (VoiceChoice, bool) {
+	if v, ok := o.Voices[voice]; ok {
+		if v.Voice == "" {
+			v.Voice = voice
+		}
+		return v, true
+	}
+	if language == "" {
+		language = audio.VoiceLanguage(voice)
+	}
+	if v, ok := audio.ForLanguage(o.DefaultVoices, language); ok {
+		return v, true
+	}
+	if voice == "" || len(o.Voices) == 0 && len(o.DefaultVoices) == 0 {
+		return VoiceChoice{Voice: voice}, true
+	}
+	return VoiceChoice{}, false
+}
 
 // Plan is the ordered set of priority tiers for a request, plus the within-
 // tier balancing strategy.

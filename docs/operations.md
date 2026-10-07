@@ -236,7 +236,9 @@ a provider trusting the cluster's OIDC issuer, and an IAM policy on that service
 account permitting **this release's namespace and service account** to impersonate it.
 Give it the model-API role — plus, for a
 [`google-speech` provider](configuration.md#google-speech-google-speech), the Speech
-client and service-usage consumer roles — and nothing else: the gateway has no business
+client and service-usage consumer roles, and for a
+[`google-tts` provider](configuration.md#google-text-to-speech-google-tts) the
+service-usage consumer role — and nothing else: the gateway has no business
 holding the rest of the project. When any of that is wrong the pod still starts and every other provider keeps
 serving; the Google providers alone are disabled, loudly, in the log.
 
@@ -525,6 +527,19 @@ rounded up to the second; the gateway prices the billed duration Google
 returns, so the ledger matches the invoice per request. Volume tiers ($0.010
 above 500 000 minutes, $0.008 above 1M, $0.004 above 2M) are not modelled: the
 row keeps the first-tier rate, which over-states cost only past those volumes.
+
+### Google Text-to-Speech prices
+
+Text-to-Speech publishes no machine-readable price list, so `google-tts` rows
+are entered by hand: unit `text_char`, provider set to the `google-tts`
+provider's name, one row per voice family an alias can speak (the ledger
+records the family the voice name carries). Rates per 1M characters, which go
+in the row's input rate (read 2026-10-03): **Chirp 3: HD 30**, **Neural2 16**,
+**WaveNet 4**, **Standard 4**, **Studio 160**; any other family a voice
+name carries (`chirp-hd`, `polyglot`, …) needs its row too, priced from
+Google's page, or it is metered at $0. The gateway meters the input's
+characters, which is what Google bills for plain text. The monthly free
+characters are not modelled, so the row over-states cost only within them.
 
 ### Gemini thought signatures
 

@@ -9,12 +9,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/audio"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/ledger"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/limits"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/metrics"
@@ -207,5 +209,93 @@ func TestCapabilitiesRouteReportsTheFirstTiersRecognitionLanguages(t *testing.T)
 	}
 	if code, _ := capabilities(googleFirst, mockFirst); code != http.StatusForbidden {
 		t.Errorf("alias the key may not use: status %d, want 403", code)
+	}
+}
+
+func speechRequest(body string) *http.Request {
+	return httptest.NewRequest(http.MethodPost, "/v1/audio/speech", strings.NewReader(body))
+}
+
+func TestSpeechRouteAnswersWAVFromAGoogleTierAndPricesTheVoiceFamily(t *testing.T) {
+	up, _ := fakeGoogleTTS(t, func(ttsCall) (int, string) { return http.StatusOK, googleSynthesized(pcmWAV(24000, 1)) })
+	suffix := fmt.Sprint(time.Now().UnixNano())
+	gtts, alias := "gtts-"+suffix, "voice-tts-"+suffix
+	s := newAudioRig(t, newGoogleTTS(gtts, up.URL))
+	seedAudioAlias(t, s, alias, map[string]string{gtts: providers.KindGoogleTTS},
+		fmt.Sprintf(`[{"priority":0,"provider":%q,"upstream_model":"neural2"}]`, gtts))
+	// Chirp 3: HD at Google's $30 per million characters.
+	s.pricing.Set(gtts, "chirp3-hd", pricing.Price{Unit: pricing.UnitTextChar, InputPer1M: 30})
+
+	rec := httptest.NewRecorder()
+	s.handleAudioSpeech(rec, asKey(speechRequest(fmt.Sprintf(`{"model":%q,"input":"Hello there","voice":"en-US-Chirp3-HD-Charon"}`, alias)), alias))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "audio/wav" {
+		t.Errorf("content type = %q, want audio/wav by default", ct)
+	}
+	if rate, ok := audio.WAVSampleRate(rec.Body.Bytes()); !ok || rate != 24000 {
+		t.Errorf("sample rate = %d (readable %v), want Google's 24000 in the WAV header", rate, ok)
+	}
+
+	s.flushLedger()
+	var model string
+	var cost float64
+	if err := s.st.PG.QueryRow(context.Background(),
+		`SELECT upstream_model, cost_usd::float8 FROM usage_ledger WHERE alias = $1`, alias).Scan(&model, &cost); err != nil {
+		t.Fatalf("ledger row: %v", err)
+	}
+	if model != "chirp3-hd" || cost != 0.00033 {
+		t.Errorf("ledger model=%q cost=%v, want chirp3-hd at 11 characters = $0.00033", model, cost)
+	}
+}
+
+func TestCapabilitiesRouteReportsTheFirstTiersVoices(t *testing.T) {
+	up, _ := fakeGoogleTTS(t, func(ttsCall) (int, string) { return http.StatusOK, "{}" })
+	suffix := fmt.Sprint(time.Now().UnixNano())
+	gtts, piper := "gtts-"+suffix, "piper-"+suffix
+	cloud, local := "cloud-tts-"+suffix, "local-tts-"+suffix
+	s := newAudioRig(t, newGoogleTTS(gtts, up.URL), providers.NewOpenAICompat(piper, "openai", "http://127.0.0.1:1", ""))
+	kinds := map[string]string{gtts: providers.KindGoogleTTS, piper: "openai"}
+	seedAudioAlias(t, s, cloud, kinds, fmt.Sprintf(`[{"priority":0,"provider":%q,"upstream_model":"neural2"}]`, gtts))
+	seedAudioAlias(t, s, local, nil, fmt.Sprintf(`[
+		{"priority":0,"provider":%q,"upstream_model":"piper","options":{"voices":{
+			"ru_RU-irina-medium":{"gender":"female"},
+			"en_US-ryan-high":{"gender":"male"},
+			"narrator":{"voice":"en_US-lessac-medium","language":"en-US"}}}},
+		{"priority":1,"provider":%q,"upstream_model":"neural2"}]`, piper, gtts))
+
+	voices := func(alias string) ([]audio.Voice, bool) {
+		rec := httptest.NewRecorder()
+		s.handleAudioCapabilities(rec, asKey(httptest.NewRequest(http.MethodGet, "/v1/audio/capabilities?model="+alias, nil), alias))
+		var body struct {
+			Recognition *struct{} `json:"recognition"`
+			Synthesis   struct {
+				Voices []audio.Voice `json:"voices"`
+			} `json:"synthesis"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || rec.Code != http.StatusOK {
+			t.Fatalf("%s: status %d reply %s", alias, rec.Code, rec.Body.String())
+		}
+		return body.Synthesis.Voices, body.Recognition != nil
+	}
+
+	got, recognises := voices(cloud)
+	if recognises {
+		t.Error("Google-first alias: recognition reported for a first tier that only synthesizes")
+	}
+	if want := []audio.Voice{
+		{ID: "en-US-Chirp3-HD-Charon", Language: "en-US", Gender: "male"},
+		{ID: "es-ES-Neural2-A", Language: "es-ES", Gender: "female"},
+	}; !slices.Equal(got, want) {
+		t.Errorf("Google-first alias: voices %+v, want Google's catalogue %+v", got, want)
+	}
+	got, _ = voices(local)
+	if want := []audio.Voice{
+		{ID: "en_US-ryan-high", Language: "en-US", Gender: "male"},
+		{ID: "narrator", Language: "en-US"},
+		{ID: "ru_RU-irina-medium", Language: "ru-RU", Gender: "female"},
+	}; !slices.Equal(got, want) {
+		t.Errorf("Piper-first alias: voices %+v, want the first tier's own voices %+v", got, want)
 	}
 }

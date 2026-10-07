@@ -154,12 +154,15 @@ no gateway-wide default:
 
 | Key | Meaning |
 |-----|---------|
+| `voices` | How this target speaks each canonical voice — the voice identifiers pipelines use (Google voice names in cloud, Piper voice names locally) — as `{"<canonical>": {"voice": "...", "model": "..."}}`: `voice` empty is the canonical voice itself, `model` empty the target's `upstream_model`. Optional `language` (BCP-47) and `gender` (`male`, `female`, `neutral`) describe the canonical voice; on a first-tier target the entries are the voice catalogue [`/v1/audio/capabilities`](api.md) reports, so a local alias lists its Piper voices here. The ledger records the model that actually spoke, so price each one. |
+| `default_voices` | The voice for a canonical voice `voices` does not map, keyed by the BCP-47 language it speaks: `{"en": {"voice": "onyx"}, "es": {"voice": "nova", "model": "tts-1"}}`. The language is the request's `language`, else the one the voice's name starts with (`en-US-Neural2-F`, `en_US-lessac-medium`); an exact tag wins over a bare language. A target with **either** map that can place a voice in neither is skipped for it — the next tier speaks instead — while a target with neither sends the voice unchanged. |
 | `recognition_models` | The recognition model per language, keyed by BCP-47 tag, for a provider that chooses its model by language (today `google-speech`): `{"en-US": "telephony", "es-ES": "telephony"}`. An exact tag wins over a bare language, so `"en"` covers every English region unless `"en-GB"` is listed too. A language with no entry is recognised with the target's `upstream_model`. The ledger records the model that actually ran, so price each one. |
 
 Any other key is stored and returned untouched. A known key with the wrong
 type, a negative `timeout_ms`, a `recognition_models` entry with an empty
-language or model or one language listed twice (in any case), or a non-object
-is rejected on save with `400`. For example, a voice alias whose first tier must
+language or model or one language listed twice (in any case), a `voices`
+entry with an unknown gender, a `default_voices` entry without a voice or
+one language listed twice, or a non-object is rejected on save with `400`. For example, a voice alias whose first tier must
 answer within two seconds and may fail over on an expired credential:
 
 ```json
@@ -370,9 +373,10 @@ one rebuilds the registry immediately; no restart.
 `openai`, `openrouter`, `xai`, `groq`, `ollama` and `muse` are one
 OpenAI-compatible HTTP client pointed at different addresses,
 authenticating with `Authorization: Bearer <api_key>`; an explicit
-`base_url` always overrides the default below. The other four are each
+`base_url` always overrides the default below. The other five are each
 their own thing: `mock` answers in-process, `anthropic` has no client yet,
-and `vertex` and `google-speech` are described in full further down.
+and `vertex`, `google-speech` and `google-tts` are described in full further
+down.
 
 | Kind | Default address | Credential |
 |------|-----------------|------------|
@@ -386,6 +390,7 @@ and `vertex` and `google-speech` are described in full further down.
 | `anthropic` | — | **no client yet**: a row of this kind is skipped when the registry is built, with a warning. Unrelated to the Anthropic-shaped `/v1/messages` *ingress*, which works with any kind. |
 | `vertex` | assembled from its configuration — see below | a short-lived OAuth2 access token, consulted per request and refreshed when it expires |
 | `google-speech` | assembled from its configuration — see below | the same short-lived token as `vertex` |
+| `google-tts` | assembled from its configuration — see below | the same short-lived token as `vertex` |
 
 Two things about the compatible kinds are worth knowing. They structurally
 expose the audio endpoints whether or not the vendor implements them, so an
@@ -400,7 +405,7 @@ never returned by the admin API: `GET /api/admin/providers` reports only
 Importing prices (`POST /api/admin/pricing/import/{provider}`) reads the kind's
 own `/models` catalogue. Every compatible kind accepts the call, but in
 practice only OpenRouter publishes prices there, so the others import nothing.
-`vertex` and `google-speech` do not implement the interface at all and answer
+`vertex`, `google-speech` and `google-tts` do not implement the interface at all and answer
 `unsupported: true` — see their pricing notes below. A catalogue publishes flat
 rates only, so an import leaves any hand-entered long-prompt tier on the row
 alone rather than flattening it.
@@ -587,6 +592,45 @@ length, rounded up to the second as Google bills, rather than going free.
 **Prices are entered by hand**, one `audio_second` row per model an alias can
 run, under the provider's name; see
 [Operations → Google Speech-to-Text prices](operations.md#google-speech-to-text-prices).
+
+### Google Text-to-Speech (`google-tts`)
+
+Google Cloud Text-to-Speech, reached over its native v1 REST API. It
+synthesizes and lists its voices, nothing else: chat on it fails as a
+configuration mistake. A synthesis alias can put it in any tier, and failover
+to and from the OpenAI-compatible speech routes works with the same request.
+
+**Configuration** is the same `config` object as `google-speech`: `project`
+is **required** — it is sent as the quota project (`X-Goog-User-Project`), so
+the identity needs `roles/serviceusage.serviceUsageConsumer` on it —
+and `location` defaults to `global` (`texttospeech.googleapis.com`; any other
+location its own host, e.g. `eu-texttospeech.googleapis.com`). An explicit
+`base_url` replaces the host. The **credential** works exactly as for
+`vertex`.
+
+**What a request becomes:** `POST <host>/v1/text:synthesize` with the voice
+name and the language it starts with (Google wants both; a name without one
+takes the request's `language` in Google's locale form, else `en-US`).
+`response_format` `wav` (the default) asks for `LINEAR16`, which Google
+returns as a WAV at the voice's natural rate; `mp3` and `opus` are also
+accepted, anything else is refused. A voice name Google does not know is
+passed over for the next tier, like any target that cannot speak the voice.
+
+**Model.** Google bills by voice family, not by a model in the request, so
+the ledger records the family the voice name carries — `en-US-Chirp3-HD-Charon`
+is `chirp3-hd`, `en-US-Neural2-F` is `neural2` — and the target's
+`upstream_model` (or a `voices` entry's `model`) only for a name without
+one; nothing but the voice name is sent to Google. The alias editor offers the
+families `chirp3-hd`, `chirp-hd`, `neural2`, `polyglot`, `standard`, `studio`
+and `wavenet` as models.
+
+**Voices.** `GET <host>/v1/voices` is the catalogue `/v1/audio/capabilities`
+reports for an alias whose first tier is this provider and lists no `voices`
+of its own; it is fetched at most every six hours.
+
+**Prices are entered by hand**, one `text_char` row per voice family an alias
+can speak, under the provider's name; see
+[Operations → Google Text-to-Speech prices](operations.md#google-text-to-speech-prices).
 
 ## Per-role policy
 

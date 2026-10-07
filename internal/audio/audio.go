@@ -42,9 +42,15 @@ type TranscriptionResponse struct {
 
 // SpeechRequest is a request to synthesize speech from text.
 type SpeechRequest struct {
-	Model          string
-	Input          string
-	Voice          string
+	Model string
+	Input string
+	// Voice is the voice to speak with, already mapped to the serving
+	// provider's own (see the voices and default_voices target options).
+	Voice string
+	// Language is an optional BCP-47 tag naming the language of Input. A
+	// voice's name usually carries it (see VoiceLanguage); this is for
+	// voices whose names do not.
+	Language       string
 	ResponseFormat string // mp3/wav/opus/...; provider default if empty
 }
 
@@ -52,4 +58,17 @@ type SpeechRequest struct {
 type SpeechResponse struct {
 	Audio       []byte
 	ContentType string // e.g. "audio/mpeg", from the upstream response
+	// Model is the upstream model that actually spoke, when the provider
+	// knows it better than the request's Model did (Google bills by the
+	// voice's family). Empty means the request's.
+	Model string
+}
+
+// Voice is one voice a synthesizer offers: its identifier, the BCP-47
+// language it speaks and its gender ("male", "female", "neutral", or empty
+// when unknown).
+type Voice struct {
+	ID       string `json:"id"`
+	Language string `json:"language"`
+	Gender   string `json:"gender"`
 }

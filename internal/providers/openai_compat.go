@@ -335,7 +335,7 @@ func (p *OpenAICompat) Synthesize(ctx context.Context, in audio.SpeechRequest) (
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return audio.SpeechResponse{}, audioHTTPError(p.name, resp.StatusCode, b, resp.Header)
+		return audio.SpeechResponse{}, classifyVoiceRejection(audioHTTPError(p.name, resp.StatusCode, b, resp.Header))
 	}
 	audioBytes, err := io.ReadAll(resp.Body)
 	if err != nil {

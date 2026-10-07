@@ -91,8 +91,9 @@ one listener.
 
 - **Postgres** is the source of truth: identity, keys, role policies, providers
   (with sealed credentials and a per-kind `config` object — a cloud project and
-  location for `vertex` and `google-speech`), pricing, the usage ledger, DLP incidents, the capture
-  index, and the `settings` table that backs runtime config.
+  location for `vertex`, `google-speech` and `google-tts`), pricing, the usage
+  ledger, DLP incidents, the capture index, and the `settings` table that backs
+  runtime config.
 - **Redis** holds only the rolling-window usage counters (time-bucketed).
 - **Blob store** holds capture bodies, always sealed with AES-256-GCM. A
   filesystem implementation backs local dev; an object store backs deploys.

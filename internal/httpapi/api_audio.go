@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -165,8 +166,12 @@ func alternativeLanguages(r *http.Request) []string {
 // handleAudioCapabilities implements GET /v1/audio/capabilities?model=:
 // what the alias's first tier can do, so a client can offer its users the
 // choices that tier supports. The first target of that tier which can
-// transcribe answers for recognition; an alias whose first tier cannot
-// transcribe has no recognition entry.
+// transcribe answers for recognition, and the first which can synthesize
+// and list its voices for synthesis: those its own voices option lists,
+// else the provider's catalogue. An alias whose first tier cannot do one of
+// them has no entry for it; one whose synthesizers all fail to list their
+// voices answers with the failure, since an empty list would read as "no
+// voices".
 func (s *Server) handleAudioCapabilities(w http.ResponseWriter, r *http.Request) {
 	ak, _ := keyFromContext(r.Context())
 	model := r.URL.Query().Get("model")
@@ -187,31 +192,74 @@ func (s *Server) handleAudioCapabilities(w http.ResponseWriter, r *http.Request)
 	type recognition struct {
 		Languages []string `json:"languages"`
 	}
+	type synthesis struct {
+		Voices []audio.Voice `json:"voices"`
+	}
 	out := struct {
 		Model       string       `json:"model"`
 		Recognition *recognition `json:"recognition,omitempty"`
+		Synthesis   *synthesis   `json:"synthesis,omitempty"`
 	}{Model: model}
 	reg := s.reg()
+	var voicesErr error
 	for _, t := range plan.Tiers[0] {
 		e, ok := reg.Get(t.Provider)
 		if !ok {
 			continue
 		}
-		if _, ok := e.Provider.(providers.Transcriber); !ok {
-			continue
+		if _, ok := e.Provider.(providers.Transcriber); ok && out.Recognition == nil {
+			langs := []string{}
+			if l, ok := e.Provider.(providers.RecognitionLanguageLister); ok {
+				langs = l.RecognitionLanguages()
+			}
+			out.Recognition = &recognition{Languages: langs}
 		}
-		langs := []string{}
-		if l, ok := e.Provider.(providers.RecognitionLanguageLister); ok {
-			langs = l.RecognitionLanguages()
+		if _, ok := e.Provider.(providers.Synthesizer); ok && out.Synthesis == nil {
+			voices, err := targetVoices(r.Context(), e.Provider, t)
+			if err != nil {
+				voicesErr = err
+				continue
+			}
+			out.Synthesis = &synthesis{Voices: voices}
 		}
-		out.Recognition = &recognition{Languages: langs}
-		break
+	}
+	if out.Synthesis == nil && voicesErr != nil {
+		code, typ := classifyUpstreamErr(voicesErr)
+		writeProtocolError(w, r, code, typ, voicesErr.Error())
+		return
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
+// targetVoices is the voice catalogue of one synthesizing target: the
+// canonical voices its options map, described by their entries or else by
+// their names, or failing that the provider's own list; none when it has
+// neither. Sorted by identifier.
+func targetVoices(ctx context.Context, p providers.Provider, t routing.Target) ([]audio.Voice, error) {
+	voices := []audio.Voice{}
+	if len(t.Options.Voices) > 0 {
+		for id, v := range t.Options.Voices {
+			lang := audio.CanonicalLanguage(v.Language)
+			if lang == "" {
+				lang = audio.VoiceLanguage(id)
+			}
+			voices = append(voices, audio.Voice{ID: id, Language: lang, Gender: v.Gender})
+		}
+	} else if l, ok := p.(providers.VoiceLister); ok {
+		listed, err := l.ListVoices(ctx)
+		if err != nil {
+			return nil, err
+		}
+		voices = append(voices, listed...)
+	}
+	slices.SortFunc(voices, func(a, b audio.Voice) int { return strings.Compare(a.ID, b.ID) })
+	return voices, nil
+}
+
 // handleAudioSpeech implements POST /v1/audio/speech: JSON in, raw audio
-// bytes out, batch (no streaming).
+// bytes out, batch (no streaming). The format defaults to WAV, whichever
+// tier speaks, with the sample rate in its header; language optionally
+// names the input's language for a voice whose name does not carry it.
 func (s *Server) handleAudioSpeech(w http.ResponseWriter, r *http.Request) {
 	ak, _ := keyFromContext(r.Context())
 	start := time.Now()
@@ -219,6 +267,7 @@ func (s *Server) handleAudioSpeech(w http.ResponseWriter, r *http.Request) {
 		Model          string `json:"model"`
 		Input          string `json:"input"`
 		Voice          string `json:"voice"`
+		Language       string `json:"language"`
 		ResponseFormat string `json:"response_format"`
 	}
 	// Plain decoding, NOT the control-plane decodeJSON helper: that helper
@@ -262,8 +311,12 @@ func (s *Server) handleAudioSpeech(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	format := strings.ToLower(strings.TrimSpace(body.ResponseFormat))
+	if format == "" {
+		format = "wav"
+	}
 	resp, res, callErr := s.runSynthesize(r.Context(), plan, audio.SpeechRequest{
-		Input: redactedInput, Voice: body.Voice, ResponseFormat: body.ResponseFormat,
+		Input: redactedInput, Voice: body.Voice, Language: audio.CanonicalLanguage(body.Language), ResponseFormat: format,
 	})
 	target, upstreamModel := res.Provider, res.UpstreamModel
 
@@ -349,8 +402,18 @@ func (s *Server) runTranscribe(ctx context.Context, plan *routing.Plan, req audi
 
 // runSynthesize executes the plan for a speech synthesis (see executePlan),
 // skipping targets whose provider cannot synthesize.
+//
+// Each target speaks the requested voice as its own options map it (see
+// routing.TargetOptions.SpeakAs); a target that cannot place the voice is
+// passed over as unable to speak it, as is one whose upstream refuses the
+// name, so an unfamiliar voice moves the request on instead of failing it.
+// A WAV request — the default — is only answered with a readable WAV: a
+// tier that returns anything else is treated as failed, because the client
+// reads the sample rate from the header. The result names the model that
+// actually spoke, so the ledger prices it.
 func (s *Server) runSynthesize(ctx context.Context, plan *routing.Plan, req audio.SpeechRequest) (audio.SpeechResponse, execResult, error) {
 	var resp audio.SpeechResponse
+	var served string
 	supports := func(p providers.Provider) error {
 		if _, ok := p.(providers.Synthesizer); !ok {
 			return &providers.Error{Status: http.StatusBadRequest, Retryable: false, Message: "provider " + p.Name() + " does not support speech synthesis"}
@@ -358,14 +421,36 @@ func (s *Server) runSynthesize(ctx context.Context, plan *routing.Plan, req audi
 		return nil
 	}
 	res, _, err := s.executePlan(ctx, plan, supports, func(ctx context.Context, p providers.Provider, t routing.Target, _ func() bool) error {
+		choice, ok := t.Options.SpeakAs(req.Voice, req.Language)
+		if !ok {
+			return &providers.Error{Status: http.StatusBadRequest, Code: providers.ErrCodeVoiceNotSupported,
+				Message: "target " + t.Provider + "/" + t.UpstreamModel + " has no voice for " + req.Voice}
+		}
 		in := req
-		in.Model = t.UpstreamModel
-		var err error
-		resp, err = p.(providers.Synthesizer).Synthesize(ctx, in)
-		return err
+		in.Model, in.Voice = t.UpstreamModel, choice.Voice
+		if choice.Model != "" {
+			in.Model = choice.Model
+		}
+		out, err := p.(providers.Synthesizer).Synthesize(ctx, in)
+		if err != nil {
+			return err
+		}
+		if in.ResponseFormat == "wav" {
+			if _, ok := audio.WAVSampleRate(out.Audio); !ok {
+				return &providers.Error{Status: http.StatusBadGateway, Retryable: true,
+					Message: "upstream " + p.Name() + " answered a wav request with " + out.ContentType + " that is not a readable WAV"}
+			}
+			out.ContentType = "audio/wav"
+		}
+		resp, served = out, in.Model
+		if out.Model != "" {
+			served = out.Model
+		}
+		return nil
 	})
 	if err != nil {
 		return audio.SpeechResponse{}, res, err
 	}
+	res.UpstreamModel = served
 	return resp, res, nil
 }
