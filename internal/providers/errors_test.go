@@ -4,8 +4,81 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"testing"
+	"time"
 )
+
+// TestParseRetryAfter covers both forms RFC 9110 §10.2.3 allows (seconds,
+// HTTP-date), confirmed against a real upstream's actual response (Muse
+// Spark sends "retry-after: 60" on its 503) — not invented from the spec
+// alone.
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name    string
+		value   string
+		wantOK  bool
+		wantDur time.Duration
+	}{
+		{"seconds form, confirmed live against Muse Spark", "60", true, 60 * time.Second},
+		{"zero seconds", "0", true, 0},
+		{"HTTP-date form, 30s in the future", now.Add(30 * time.Second).Format(http.TimeFormat), true, 30 * time.Second},
+		{"HTTP-date form, in the past", now.Add(-30 * time.Second).Format(http.TimeFormat), true, 0},
+		{"empty", "", false, 0},
+		{"garbage", "not-a-duration", false, 0},
+		{"negative seconds", "-5", false, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := parseRetryAfter(c.value, now)
+			if ok != c.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, c.wantOK)
+			}
+			if ok && got != c.wantDur {
+				t.Errorf("duration = %v, want %v", got, c.wantDur)
+			}
+		})
+	}
+}
+
+// TestHTTPErrorPopulatesRetryAfter is the Retry-After plumbing this gateway
+// didn't have at all before: httpError now reads it from the response
+// header it's handed, so a target the vendor explicitly says "retry after
+// 60s" on doesn't rely on a guessed backoff.
+func TestHTTPErrorPopulatesRetryAfter(t *testing.T) {
+	h := http.Header{}
+	h.Set("Retry-After", "60")
+	pe, ok := httpError("muse", 503, []byte(`{"error":{"code":"service_overloaded"}}`), h).(*Error)
+	if !ok {
+		t.Fatal("httpError must return *Error")
+	}
+	if pe.RetryAfter == nil || *pe.RetryAfter != 60*time.Second {
+		t.Errorf("RetryAfter = %v, want 60s", pe.RetryAfter)
+	}
+}
+
+// TestHTTPErrorNoRetryAfterHeaderLeavesItNil proves the zero value and
+// "absent" stay distinguishable: a nil header (today's every other call
+// site before this change) and a header with no Retry-After must both
+// leave RetryAfter nil, not a fabricated 0s.
+func TestHTTPErrorNoRetryAfterHeaderLeavesItNil(t *testing.T) {
+	pe, ok := httpError("muse", 503, []byte(`{}`), nil).(*Error)
+	if !ok {
+		t.Fatal("httpError must return *Error")
+	}
+	if pe.RetryAfter != nil {
+		t.Errorf("RetryAfter = %v, want nil (no header offered)", pe.RetryAfter)
+	}
+
+	pe, ok = httpError("muse", 503, []byte(`{}`), http.Header{}).(*Error)
+	if !ok {
+		t.Fatal("httpError must return *Error")
+	}
+	if pe.RetryAfter != nil {
+		t.Errorf("RetryAfter = %v, want nil (header present but empty)", pe.RetryAfter)
+	}
+}
 
 func TestIsFallbackWorthyRetryable(t *testing.T) {
 	err := &Error{Status: 503, Retryable: true}
@@ -120,14 +193,14 @@ func TestTransportErrorCancellation(t *testing.T) {
 // classified code makes an error fallback-worthy, but the status alone still
 // decides whether retrying the SAME target is worth it.
 func TestHTTPErrorRetryability(t *testing.T) {
-	notFound := httpError("vx", 404, []byte(`{"error":{"code":404,"message":"nope","status":"NOT_FOUND"}}`))
+	notFound := httpError("vx", 404, []byte(`{"error":{"code":404,"message":"nope","status":"NOT_FOUND"}}`), nil)
 	if IsRetryable(notFound) {
 		t.Error("a 404 must not be retryable against the same target")
 	}
 	if !IsFallbackWorthy(notFound) {
 		t.Error("a Vertex NOT_FOUND must be fallback-worthy, so the router tries the next tier")
 	}
-	if !IsRetryable(httpError("vx", 503, nil)) {
+	if !IsRetryable(httpError("vx", 503, nil, nil)) {
 		t.Error("a 503 must stay retryable")
 	}
 }
@@ -152,15 +225,15 @@ func TestHTTPErrorStatusOnlyCodes(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			var pe *Error
-			if !errors.As(httpError("up", c.status, []byte(c.body)), &pe) || pe.Code != c.want {
+			if !errors.As(httpError("up", c.status, []byte(c.body), nil), &pe) || pe.Code != c.want {
 				t.Errorf("code = %q, want %q", pe.Code, c.want)
 			}
 		})
 	}
-	if IsFallbackWorthy(httpError("up", 401, nil)) {
+	if IsFallbackWorthy(httpError("up", 401, nil, nil)) {
 		t.Error("an auth refusal must not be fallback-worthy by itself; that is a per-target choice")
 	}
-	if !IsAuthFailure(httpError("up", 403, nil)) {
+	if !IsAuthFailure(httpError("up", 403, nil, nil)) {
 		t.Error("a 403 must be recognised as an auth failure")
 	}
 }

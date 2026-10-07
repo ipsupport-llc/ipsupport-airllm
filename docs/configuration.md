@@ -142,6 +142,8 @@ nothing changes until an operator opts in.
 |-------|---------|---------|
 | `timeout_ms` | `0` | Time budget per target attempt; `0` means none. For a **streamed** chat it bounds the wait for the **first chunk carrying text or a tool call** — the role-only and empty deltas a model sends while it thinks do not count, so a tier that thinks past its budget falls through instead of holding the client silent (a slow stream that has started is never cut); for a unary chat, a transcription or a speech request it bounds the **whole call**. A breach abandons the attempt and moves to the next target, exactly like a retryable error; the client sees one clean response from whichever target answers. |
 | `fallback_on_auth` | `false` | Also move on when the upstream refuses the gateway's own credentials or account: HTTP `401`/`403`, and Google `PERMISSION_DENIED`, `UNAUTHENTICATED`, `FAILED_PRECONDITION` or a `BILLING_DISABLED` reason. Off, such an error fails the request as before. |
+| `unavailable_initial_ms` | `200` | Gateway-wide only (no per-target override) — see "Target unavailability" below. |
+| `unavailable_max_ms` | `25600` | Gateway-wide only — see "Target unavailability" below. |
 
 Per-target `options` is a free-form JSON object: the keys above are the ones
 the gateway reads today, and any other key is stored and returned untouched.
@@ -260,6 +262,51 @@ probe` and `tier breaker closed` (with `via`: `probe` or `manual`). Metrics:
 | `airllm_breaker_transitions_total` | `alias`, `tier`, `to` | State changes, counted once by the replica that made them. |
 | `airllm_tier_fallbacks_total` | `alias`, `from_tier`, `to_tier`, `reason` | Requests that moved past `from_tier`, served in the end by `to_tier` (`none` if nothing served them); `reason` is a failure reason or `quarantined`. |
 | `airllm_tier_outcomes_total` | `alias`, `tier`, `outcome` | Attempts per tier: `success`, `failure`, `request_error` (failed because of the request, no verdict on the tier) or `quarantined` (skipped while open). |
+
+#### Target unavailability (`Retry-After`)
+
+A second, simpler mechanism alongside the circuit breaker above, for the
+same "stop hammering a target that just failed" problem from a different
+angle. Where the breaker is per **(alias, tier)** and off unless switched
+on, this one is keyed by **(provider, upstream model)** directly and always
+on: a target's health is a fact about the vendor and model, not about any
+one alias's fallback chain, so a failure discovered via one alias
+immediately protects every other alias whose own tiers happen to resolve
+to the exact same target.
+
+A tier-attributable failure (the same ones the breaker counts — see "Only
+failures that say something about the tier count" above) marks its
+`(provider, upstream_model)` unavailable. The rest of that request is
+unaffected — it still tries every other target as normal — but the next
+request that resolves to that exact target skips it without a call, until
+the mark expires. There is no separate background prober: the next real
+request past the mark IS the retry, and if it fails too, it falls through
+to the next tier exactly like any other failed attempt, invisibly to
+whoever is waiting on it.
+
+How long a mark lasts:
+
+- **The upstream sent a `Retry-After` header** (seconds, or an HTTP-date,
+  per RFC 9110 §10.2.3) on the failing response: honored exactly, never
+  clamped by the defaults below — the vendor's own statement of when it
+  expects to be ready again is not second-guessed.
+- **No `Retry-After`:** the gateway-wide `unavailable_initial_ms` /
+  `unavailable_max_ms` from the failover policy table above. The first
+  mark against a target uses `unavailable_initial_ms`; each further mark
+  against the SAME target (its previous mark having already expired)
+  doubles from the last one, capped at `unavailable_max_ms`. A target that
+  goes on to succeed resets this memory, so its next failure (if any)
+  starts again at `unavailable_initial_ms` rather than wherever the
+  doubling had climbed to.
+
+State is shared by every replica through Redis, the same as the breaker;
+Redis unreachable fails open (nothing is treated as unavailable, same as
+before this existed) rather than blocking traffic.
+
+Logs `target marked unavailable` with `provider`, `upstream_model`,
+`duration_ms` and `source` (`retry_after` or `default_backoff`). A skipped
+attempt counts in the `tier attempt failed` / fallback bookkeeping with
+reason `unavailable`, the same as a `quarantined` breaker skip.
 
 ## Provider kinds
 

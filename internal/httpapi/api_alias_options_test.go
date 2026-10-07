@@ -161,7 +161,10 @@ func TestFailoverDefaultsRoundTrip(t *testing.T) {
 	fresh.loadFailover(ctx)
 	rec = httptest.NewRecorder()
 	fresh.handleAdminGetFailover(rec, httptest.NewRequest(http.MethodGet, "/api/admin/failover", nil))
-	if got := strings.TrimSpace(rec.Body.String()); got != `{"timeout_ms":2500,"fallback_on_auth":true,"breaker":{"enabled":true,"cooldown_ms":5000}}` {
+	// unavailable_initial_ms/unavailable_max_ms are always present: unlike
+	// the breaker, that mechanism has no enable flag and loadFailover fills
+	// in its built-in default whenever a save didn't set them.
+	if got := strings.TrimSpace(rec.Body.String()); got != `{"timeout_ms":2500,"fallback_on_auth":true,"breaker":{"enabled":true,"cooldown_ms":5000},"unavailable_initial_ms":200,"unavailable_max_ms":25600}` {
 		t.Errorf("get = %s, want the saved defaults", got)
 	}
 }

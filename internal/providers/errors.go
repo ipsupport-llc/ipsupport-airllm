@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // Known error codes that make a failure fallback-worthy even though it is
@@ -42,6 +44,12 @@ type Error struct {
 	Retryable bool
 	Code      string
 	Message   string
+	// RetryAfter is the upstream's own Retry-After response header,
+	// parsed, when it sent one on this failure. nil means it didn't — a
+	// target this is nil for gets the gateway's own default backoff
+	// instead of the vendor's, so nil and "retry after 0s" must stay
+	// distinguishable.
+	RetryAfter *time.Duration
 }
 
 func (e *Error) Error() string { return e.Message }
@@ -236,8 +244,33 @@ func transportError(err error) *Error {
 // of either envelope does not matter.
 var ollamaModelNotFoundPattern = regexp.MustCompile(`(?i)\bmodel\b.{0,200}?\bnot found\b`)
 
-// httpError builds a provider Error from a non-2xx upstream response.
-func httpError(name string, status int, body []byte) error {
+// parseRetryAfter parses a Retry-After header value (RFC 9110 §10.2.3): either
+// an integer number of seconds, or an HTTP-date. Empty or unparseable as
+// either form reports false — a malformed header must never produce a
+// fabricated duration.
+func parseRetryAfter(v string, now time.Time) (time.Duration, bool) {
+	if v == "" {
+		return 0, false
+	}
+	if secs, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+		if secs < 0 {
+			return 0, false
+		}
+		return time.Duration(secs) * time.Second, true
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := t.Sub(now); d > 0 {
+			return d, true
+		}
+		return 0, true
+	}
+	return 0, false
+}
+
+// httpError builds a provider Error from a non-2xx upstream response. header
+// is the response's own headers, so Retry-After can be read when present;
+// nil (a caller with no header to offer) just means RetryAfter stays unset.
+func httpError(name string, status int, body []byte, header http.Header) error {
 	code := classifyErrorBody(body)
 	if code == "" {
 		switch {
@@ -247,10 +280,17 @@ func httpError(name string, status int, body []byte) error {
 			code = ErrCodeModelNotFound
 		}
 	}
+	var retryAfter *time.Duration
+	if header != nil {
+		if d, ok := parseRetryAfter(header.Get("Retry-After"), time.Now()); ok {
+			retryAfter = &d
+		}
+	}
 	return &Error{
-		Status:    status,
-		Retryable: status == http.StatusTooManyRequests || status >= 500,
-		Code:      code,
-		Message:   fmt.Sprintf("upstream %s returned %d: %s", name, status, strings.TrimSpace(string(body))),
+		Status:     status,
+		Retryable:  status == http.StatusTooManyRequests || status >= 500,
+		Code:       code,
+		RetryAfter: retryAfter,
+		Message:    fmt.Sprintf("upstream %s returned %d: %s", name, status, strings.TrimSpace(string(body))),
 	}
 }
