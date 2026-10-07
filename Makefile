@@ -50,6 +50,7 @@ rules-test:
 		-s templates/prometheusrule.yaml > $$tmp/rule.yaml && \
 	sed -n '/^spec:/,$$p' $$tmp/rule.yaml | tail -n +2 | sed 's/^  //' > $$tmp/rules.yaml && \
 	cp deploy/prometheus/airllm-rules_test.yaml $$tmp/ && \
+	chmod -R a+rX $$tmp && \
 	docker run --rm -v $$tmp:/w -w /w --entrypoint promtool prom/prometheus:v3.5.0 test rules airllm-rules_test.yaml; \
 	rc=$$?; rm -rf $$tmp; exit $$rc
 
