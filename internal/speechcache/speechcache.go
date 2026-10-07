@@ -21,6 +21,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,12 +33,15 @@ type Key struct {
 	Alias, Provider, Model, Voice, Language, Format, Text string
 }
 
-// Clip is a cached synthesis: the audio, its content type, and the model the
-// provider reported as having spoken it, which the ledger prices.
+// Clip is a cached synthesis: the audio, its content type, the model the
+// provider reported as having spoken it, which the ledger prices, and the
+// display label of the target that rendered it, which a hit is labelled
+// with ("" = none, or a clip stored before labels were kept).
 type Clip struct {
 	Audio       []byte
 	ContentType string
 	Model       string
+	Label       string
 }
 
 // MaxClipBytes is the largest clip kept; a longer one is served but not
@@ -176,23 +180,34 @@ func (k Key) id() string {
 	return "air:tts:" + k.Alias + ":" + hex.EncodeToString(h.Sum(nil))
 }
 
-// The stored value is a version line, the content type and the model on a
-// line each, then the audio.
-const valueVersion = "v1"
+// The stored value is a version line, the content type, the model and the
+// label on a line each, then the audio. A v1 value, from before the label,
+// has no label line and still reads.
+const valueVersion = "v2"
 
 func encode(c Clip) []byte {
+	label := strings.ReplaceAll(c.Label, "\n", " ")
 	var b bytes.Buffer
-	b.Grow(len(valueVersion) + len(c.ContentType) + len(c.Model) + 3 + len(c.Audio))
-	b.WriteString(valueVersion + "\n" + c.ContentType + "\n" + c.Model + "\n")
+	b.Grow(len(valueVersion) + len(c.ContentType) + len(c.Model) + len(label) + 4 + len(c.Audio))
+	b.WriteString(valueVersion + "\n" + c.ContentType + "\n" + c.Model + "\n" + label + "\n")
 	b.Write(c.Audio)
 	return b.Bytes()
 }
 
 // decode reads a stored value; anything it does not recognise is a miss.
 func decode(raw []byte) (Clip, bool) {
-	parts := bytes.SplitN(raw, []byte("\n"), 4)
-	if len(parts) != 4 || string(parts[0]) != valueVersion {
+	version, rest, _ := bytes.Cut(raw, []byte("\n"))
+	fields := map[string]int{"v1": 2, valueVersion: 3}[string(version)]
+	if fields == 0 {
 		return Clip{}, false
 	}
-	return Clip{ContentType: string(parts[1]), Model: string(parts[2]), Audio: parts[3]}, true
+	parts := bytes.SplitN(rest, []byte("\n"), fields+1)
+	if len(parts) != fields+1 {
+		return Clip{}, false
+	}
+	c := Clip{ContentType: string(parts[0]), Model: string(parts[1]), Audio: parts[fields]}
+	if fields == 3 {
+		c.Label = string(parts[2])
+	}
+	return c, true
 }

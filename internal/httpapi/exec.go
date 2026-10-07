@@ -365,14 +365,14 @@ func (o *openaiSink) assembled() string { return o.content.String() }
 // setBackendLabel names the target that served a response in its
 // X-Backend-Model header: only on an alias that exposes backend headers, and
 // only for a target the operator gave a display label.
-func setBackendLabel(w http.ResponseWriter, expose bool, t routing.Target) {
-	if expose && t.DisplayLabel != "" {
+func setBackendLabel(w http.ResponseWriter, t routing.Target, exposeBackend bool) {
+	if exposeBackend && t.DisplayLabel != "" {
 		w.Header().Set("X-Backend-Model", t.DisplayLabel)
 	}
 }
 
 func writeSSEHeaders(w http.ResponseWriter, t routing.Target, exposeBackend bool) {
-	setBackendLabel(w, exposeBackend, t)
+	setBackendLabel(w, t, exposeBackend)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")

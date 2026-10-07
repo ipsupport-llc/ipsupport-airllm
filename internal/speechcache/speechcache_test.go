@@ -39,12 +39,12 @@ func TestClipsRoundTripThroughRedisWithTheirTTL(t *testing.T) {
 	if _, ok, err := c.Get(ctx, k); ok || err != nil {
 		t.Fatalf("before Put: ok=%v err=%v, want a clean miss", ok, err)
 	}
-	want := Clip{Audio: []byte("RIFF\n\x00binary\nWAVE"), ContentType: "audio/wav", Model: "chirp3-hd"}
+	want := Clip{Audio: []byte("RIFF\n\x00binary\nWAVE"), ContentType: "audio/wav", Model: "chirp3-hd", Label: "cloud-tts"}
 	if err := c.Put(ctx, k, want, 3*time.Hour); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	got, ok, err := c.Get(ctx, k)
-	if !ok || err != nil || !bytes.Equal(got.Audio, want.Audio) || got.ContentType != want.ContentType || got.Model != want.Model {
+	if !ok || err != nil || !bytes.Equal(got.Audio, want.Audio) || got.ContentType != want.ContentType || got.Model != want.Model || got.Label != want.Label {
 		t.Errorf("Get = %+v ok=%v err=%v, want %+v", got, ok, err, want)
 	}
 	if ttl := rdb.PTTL(ctx, k.id()).Val(); ttl <= 2*time.Hour || ttl > 3*time.Hour {
@@ -82,5 +82,19 @@ func TestANilCacheStoresNothing(t *testing.T) {
 	}
 	if _, ok, err := c.Get(context.Background(), Key{Text: "hi"}); ok || err != nil {
 		t.Errorf("Get: ok=%v err=%v, want a miss", ok, err)
+	}
+}
+
+func TestAClipStoredByThePreviousReleaseIsServedWithNoLabel(t *testing.T) {
+	got, ok := decode([]byte("v1\naudio/wav\nchirp3-hd\nRIFF\nWAVE"))
+	if !ok || string(got.Audio) != "RIFF\nWAVE" || got.ContentType != "audio/wav" || got.Model != "chirp3-hd" || got.Label != "" {
+		t.Errorf("decode = %+v ok=%v, want the v1 clip with no label", got, ok)
+	}
+}
+
+func TestALabelWithALineBreakDoesNotCorruptTheClip(t *testing.T) {
+	got, ok := decode(encode(Clip{Audio: []byte("RIFF"), ContentType: "audio/wav", Model: "tts-1", Label: "local\ntts"}))
+	if !ok || string(got.Audio) != "RIFF" || got.Label != "local tts" {
+		t.Errorf("decode = %+v ok=%v, want the audio intact and the label on one line", got, ok)
 	}
 }
