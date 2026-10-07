@@ -48,11 +48,7 @@ func (s *Server) handleAdminPricingImport(w http.ResponseWriter, r *http.Request
 	// an import. RETURNING reads back what the row ends up holding, so the
 	// in-memory table below is set from the stored row rather than from the
 	// catalog entry, which would drop that threshold until the next reload.
-	type importedPrice struct {
-		model string
-		price pricing.Price
-	}
-	stored := make([]importedPrice, 0, len(prices))
+	stored := make([]pricing.Row, 0, len(prices))
 	for _, mp := range prices {
 		p := pricing.Price{InputPer1M: mp.InputPer1M, OutputPer1M: mp.OutputPer1M}
 		if err := tx.QueryRow(r.Context(), `
@@ -66,16 +62,14 @@ func (s *Server) handleAdminPricingImport(w http.ResponseWriter, r *http.Request
 			writeControlError(w, http.StatusInternalServerError, "failed to import pricing")
 			return
 		}
-		stored = append(stored, importedPrice{mp.ID, p})
+		stored = append(stored, pricing.Row{Provider: name, Model: mp.ID, Price: p})
 	}
 	if err := tx.Commit(r.Context()); err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to import pricing")
 		return
 	}
 
-	for _, row := range stored {
-		s.pricing.Set(name, row.model, row.price)
-	}
+	s.setPrices(stored)
 	s.audit(r.Context(), sess.principal.Subject, "pricing.import", name, map[string]int{"imported": len(prices)})
 	writeJSON(w, http.StatusOK, map[string]int{"imported": len(prices)})
 }

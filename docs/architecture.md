@@ -139,14 +139,15 @@ Schema migrations are embedded and applied automatically on boot, in order.
 DLP, capture, second-pass and failover policy are cached behind atomic pointers and
 reloaded when saved via the admin API, so policy changes take effect on the
 next request or job without a restart. Provider edits rebuild the registry the
-same way.
+same way, and a saved or imported price is set in the in-memory price table.
 
 That reload happens on the replica that served the save. Every replica also
-re-reads providers and those settings every `CONFIG_REFRESH_INTERVAL` (10 s)
-and installs whatever changed, so a save reaches the other replicas within
-one interval. The registry is rebuilt only when the provider rows changed —
-a rebuild hands every provider a fresh set of concurrency slots — and a
-refresh that cannot reach Postgres keeps the last good configuration.
+re-reads providers, prices and those settings every `CONFIG_REFRESH_INTERVAL`
+(10 s) and installs whatever changed, so a save reaches the other replicas
+within one interval. The registry is rebuilt only when the provider rows
+changed — a rebuild hands every provider a fresh set of concurrency slots —
+the price table only when a price row changed, and a refresh that cannot
+reach Postgres keeps the last good configuration.
 
 ## Observability
 
