@@ -218,11 +218,48 @@ func (p *OpenAICompat) ListModelPricing(ctx context.Context) ([]ModelPrice, erro
 	return prices, nil
 }
 
-// Transcribe uploads audio for transcription. It always requests
-// response_format=verbose_json upstream — regardless of what the
-// gateway's own client asked for — because the gateway needs the
-// reported duration for pricing.
+// Transcribe uploads audio for transcription.
+//
+// The Whisper family treats language as an order: speech in another
+// language comes back translated into it. So a request with alternatives
+// sends none and lets the upstream detect. A detection among the primary and
+// the alternatives is the answer; any other language decodes once more with
+// the primary forced, so a stray detection — a short utterance heard as a
+// third language — never leaks into the call. Without alternatives the
+// primary is forced, and no language at all means detection.
 func (p *OpenAICompat) Transcribe(ctx context.Context, in audio.TranscriptionRequest) (audio.TranscriptionResponse, error) {
+	primary := audio.PrimaryLanguage(in.Language)
+	if len(in.AlternativeLanguages) == 0 || primary == "" {
+		return p.transcribeOnce(ctx, in, primary)
+	}
+	out, err := p.transcribeOnce(ctx, in, "")
+	if err != nil || out.Language == "" || requestedLanguage(in, out.Language) {
+		return out, err
+	}
+	return p.transcribeOnce(ctx, in, primary)
+}
+
+// requestedLanguage reports whether lang is the request's primary language
+// or one of its alternatives, compared by language subtag: Whisper answers
+// "es" for a request that asked for "es-ES".
+func requestedLanguage(in audio.TranscriptionRequest, lang string) bool {
+	lang = audio.PrimaryLanguage(lang)
+	if lang == audio.PrimaryLanguage(in.Language) {
+		return true
+	}
+	for _, alt := range in.AlternativeLanguages {
+		if lang == audio.PrimaryLanguage(alt) {
+			return true
+		}
+	}
+	return false
+}
+
+// transcribeOnce makes one upstream transcription call, forcing language
+// when it is non-empty. It always requests response_format=verbose_json
+// upstream — regardless of what the gateway's own client asked for —
+// because the gateway needs the reported duration for pricing.
+func (p *OpenAICompat) transcribeOnce(ctx context.Context, in audio.TranscriptionRequest, language string) (audio.TranscriptionResponse, error) {
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
 	if err := mw.WriteField("model", in.Model); err != nil {
@@ -232,9 +269,9 @@ func (p *OpenAICompat) Transcribe(ctx context.Context, in audio.TranscriptionReq
 		return audio.TranscriptionResponse{}, err
 	}
 	// The Whisper family takes a bare ISO-639-1 language and fails on a
-	// region; alternatives have nowhere to go and are dropped.
-	if lang := audio.PrimaryLanguage(in.Language); lang != "" {
-		if err := mw.WriteField("language", lang); err != nil {
+	// region, which is why language is a primary subtag.
+	if language != "" {
+		if err := mw.WriteField("language", language); err != nil {
 			return audio.TranscriptionResponse{}, err
 		}
 	}

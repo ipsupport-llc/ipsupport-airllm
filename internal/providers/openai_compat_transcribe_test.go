@@ -83,6 +83,98 @@ func TestOpenAICompatTranscribeJoinsSegmentsAsSpoken(t *testing.T) {
 	}
 }
 
+// fakeWhisper answers each transcription with the language the request
+// forced, or with detected when it forced none, and records the language
+// field of every request it saw ("" for none).
+func fakeWhisper(t *testing.T, detected string, forcedLanguages *[]string) *httptest.Server {
+	t.Helper()
+	names := map[string]string{"en": "english", "es": "spanish", "pt": "portuguese"}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatalf("server: ParseMultipartForm: %v", err)
+		}
+		lang, sent := "", r.MultipartForm.Value["language"]
+		if len(sent) > 0 {
+			lang = sent[0]
+		}
+		*forcedLanguages = append(*forcedLanguages, lang)
+		name := detected
+		if lang != "" {
+			name = names[lang]
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"text":"heard as ` + name + `","language":"` + name + `","duration":2.0}`))
+	}))
+}
+
+// With alternatives the Whisper family must not be told the language: it
+// treats language as an order and translates speech in an alternative into
+// the primary. It detects instead, and a detection among the request's
+// languages is the answer.
+func TestOpenAICompatTranscribeWithAlternativesDetects(t *testing.T) {
+	var forced []string
+	ts := fakeWhisper(t, "spanish", &forced)
+	defer ts.Close()
+
+	p := NewOpenAICompat("up", "openai", ts.URL, "")
+	resp, err := p.Transcribe(context.Background(), audio.TranscriptionRequest{
+		Model: "whisper", Audio: []byte("x"), Filename: "a.wav",
+		Language: "en-US", AlternativeLanguages: []string{"es-ES"},
+	})
+	if err != nil {
+		t.Fatalf("Transcribe: %v", err)
+	}
+	if len(forced) != 1 || forced[0] != "" {
+		t.Fatalf("upstream language fields = %q, want one request with none", forced)
+	}
+	if resp.Text != "heard as spanish" || resp.Language != "es" {
+		t.Errorf("got %q in %q, want the detected Spanish transcript", resp.Text, resp.Language)
+	}
+}
+
+// A detection outside the request's languages — a short utterance heard as
+// Portuguese — must not leak a third language into the call: the audio is
+// decoded once more with the primary forced, and that is the answer.
+func TestOpenAICompatTranscribeStrayDetectionForcesPrimary(t *testing.T) {
+	var forced []string
+	ts := fakeWhisper(t, "portuguese", &forced)
+	defer ts.Close()
+
+	p := NewOpenAICompat("up", "openai", ts.URL, "")
+	resp, err := p.Transcribe(context.Background(), audio.TranscriptionRequest{
+		Model: "whisper", Audio: []byte("x"), Filename: "a.wav",
+		Language: "en-US", AlternativeLanguages: []string{"es-ES"},
+	})
+	if err != nil {
+		t.Fatalf("Transcribe: %v", err)
+	}
+	if len(forced) != 2 || forced[0] != "" || forced[1] != "en" {
+		t.Fatalf("upstream language fields = %q, want detection then en forced", forced)
+	}
+	if resp.Text != "heard as english" || resp.Language != "en" {
+		t.Errorf("got %q in %q, want the forced English transcript", resp.Text, resp.Language)
+	}
+}
+
+// Without alternatives nothing changes: the primary language is forced in
+// the bare form Whisper accepts, and no language means detection.
+func TestOpenAICompatTranscribeWithoutAlternatives(t *testing.T) {
+	for _, tc := range []struct{ language, want string }{{"en-US", "en"}, {"", ""}} {
+		var forced []string
+		ts := fakeWhisper(t, "spanish", &forced)
+		p := NewOpenAICompat("up", "openai", ts.URL, "")
+		if _, err := p.Transcribe(context.Background(), audio.TranscriptionRequest{
+			Model: "whisper", Audio: []byte("x"), Filename: "a.wav", Language: tc.language,
+		}); err != nil {
+			t.Fatalf("Transcribe(%q): %v", tc.language, err)
+		}
+		ts.Close()
+		if len(forced) != 1 || forced[0] != tc.want {
+			t.Errorf("language %q: upstream language fields = %q, want one request with %q", tc.language, forced, tc.want)
+		}
+	}
+}
+
 func TestOpenAICompatTranscribeNon200(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"bad file"}`, http.StatusBadRequest)

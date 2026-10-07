@@ -209,8 +209,8 @@ func TestTranscriptionFailsOverFromGoogleToAWhisperTierWithTheSameRequest(t *tes
 	if res.Provider != "whisper" || res.Tier != 1 || res.Attempts != 2 {
 		t.Fatalf("served by %q tier %d after %d attempts, want the whisper tier after the refused Google one", res.Provider, res.Tier, res.Attempts)
 	}
-	if got.language != "en" {
-		t.Errorf("whisper got language %q, want en — the Whisper family rejects a region", got.language)
+	if got.language != "" {
+		t.Errorf("whisper got language %q, want none — with alternatives a Whisper tier detects rather than translate into the primary", got.language)
 	}
 	if len(got.alternatives) != 0 {
 		t.Errorf("whisper got alternatives %v, want none — it cannot use them", got.alternatives)
