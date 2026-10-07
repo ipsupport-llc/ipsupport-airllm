@@ -282,7 +282,7 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 			if adm.Skip {
 				quarantined = true
 				moved = append(moved, tierFallback{tier: t.Tier, reason: "quarantined"})
-				s.metrics.TierOutcome(plan.Alias, tierLabel, "quarantined")
+				s.metrics.TierSkipped(plan.Alias, tierLabel, "quarantined")
 				continue
 			}
 			unavailKey := unavail.Key{Provider: t.Provider, UpstreamModel: t.UpstreamModel}
@@ -295,7 +295,7 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 				// unavail's doc comment for why there's no separate
 				// prober).
 				moved = append(moved, tierFallback{tier: t.Tier, reason: "unavailable"})
-				s.metrics.TierOutcome(plan.Alias, tierLabel, "unavailable")
+				s.metrics.TierSkipped(plan.Alias, tierLabel, "unavailable")
 				continue
 			}
 			if !e.Acquire() {
@@ -314,7 +314,7 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 			recordSuccess := func() {
 				if recorded.CompareAndSwap(false, true) {
 					s.breaker.Record(ctx, key, set, false, adm.Probe)
-					s.metrics.TierOutcome(plan.Alias, tierLabel, "success")
+					s.metrics.TierAttempt(plan.Alias, tierLabel, "success", time.Since(began))
 				}
 			}
 			committed, callErr := runAttempt(ctx, t.Provider, pol.budget, func(actx context.Context, commit func() bool) error {
@@ -340,14 +340,14 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 				return res, committed, callErr
 			case countsAgainstTier(pol, callErr):
 				s.breaker.Record(ctx, key, set, true, adm.Probe)
-				s.metrics.TierOutcome(plan.Alias, tierLabel, "failure")
+				s.metrics.TierAttempt(plan.Alias, tierLabel, "failure", time.Since(began))
 				s.markUnavailable(ctx, unavailKey, callErr)
 			default:
 				// The request itself was the problem: no verdict on the tier.
 				if adm.Probe {
 					s.breaker.AbandonProbe(ctx, key, set)
 				}
-				s.metrics.TierOutcome(plan.Alias, tierLabel, "request_error")
+				s.metrics.TierAttempt(plan.Alias, tierLabel, "request_error", time.Since(began))
 			}
 
 			if callErr == nil {

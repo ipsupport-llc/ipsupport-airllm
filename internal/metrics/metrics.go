@@ -29,6 +29,7 @@ type Metrics struct {
 	breakerTransitions *prometheus.CounterVec
 	tierFallbacks      *prometheus.CounterVec
 	tierOutcomes       *prometheus.CounterVec
+	tierLatency        *prometheus.HistogramVec
 }
 
 // New builds and registers the collectors on a fresh registry.
@@ -69,11 +70,16 @@ func New() *Metrics {
 			Name: "airllm_tier_fallbacks_total", Help: "Requests that moved past a tier, by origin tier, the tier that served (none if nothing did) and reason.",
 		}, []string{"alias", "from_tier", "to_tier", "reason"}),
 		tierOutcomes: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "airllm_tier_outcomes_total", Help: "Tier attempts by alias, tier and outcome (success, failure, request_error, quarantined).",
+			Name: "airllm_tier_outcomes_total", Help: "Tier attempts by alias, tier and outcome (success, failure, request_error, quarantined, unavailable).",
+		}, []string{"alias", "tier", "outcome"}),
+		tierLatency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name: "airllm_tier_attempt_duration_seconds", Help: "Time from a tier attempt's start to its verdict (a stream's first chunk), by alias, tier and outcome.",
+			// Tier budgets run 1–3 s on the voice path; resolve that range.
+			Buckets: []float64{0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 5, 10, 30},
 		}, []string{"alias", "tier", "outcome"}),
 	}
 	m.reg.MustRegister(m.httpRequests, m.httpDuration, m.component, m.tokens, m.cost, m.rateLimited, m.dlpSkipped, m.dlpDuration,
-		m.breakerTransitions, m.tierFallbacks, m.tierOutcomes)
+		m.breakerTransitions, m.tierFallbacks, m.tierOutcomes, m.tierLatency)
 	return m
 }
 
@@ -217,13 +223,25 @@ func (m *Metrics) TierFallback(alias, from, to, reason string) {
 	m.tierFallbacks.WithLabelValues(alias, from, to, reason).Inc()
 }
 
-// TierOutcome counts one attempt at a tier: success, failure, request_error
-// (no verdict on the tier) or quarantined (skipped by its open breaker).
-func (m *Metrics) TierOutcome(alias, tier, outcome string) {
+// TierSkipped counts a tier passed over without a call: "quarantined" by its
+// open breaker, or "unavailable" while its (provider, model) is marked down.
+// Attempts that reach the tier go through TierAttempt, which also times them.
+func (m *Metrics) TierSkipped(alias, tier, outcome string) {
 	if m == nil {
 		return
 	}
 	m.tierOutcomes.WithLabelValues(alias, tier, outcome).Inc()
+}
+
+// TierAttempt counts one attempt that reached a tier — success, failure or
+// request_error (no verdict on the tier) — and observes how long it took to
+// get there: for a stream, the time to its first chunk.
+func (m *Metrics) TierAttempt(alias, tier, outcome string, d time.Duration) {
+	if m == nil {
+		return
+	}
+	m.tierOutcomes.WithLabelValues(alias, tier, outcome).Inc()
+	m.tierLatency.WithLabelValues(alias, tier, outcome).Observe(d.Seconds())
 }
 
 // BreakerState is one tier breaker's state as read at scrape time.

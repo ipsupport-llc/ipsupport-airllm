@@ -27,6 +27,13 @@ metrics:
       release: kube-prometheus-stack
   dashboards:
     enabled: true
+  prometheusRule:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+    alertLabels:
+      severity: warning
+      alert_source: metric
 googleWorkloadIdentity:
   enabled: true
   projectNumber: "123456789012"

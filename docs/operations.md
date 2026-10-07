@@ -245,6 +245,10 @@ serving; the Vertex provider alone is disabled, loudly, in the log.
 - `metrics.dashboards.enabled=true` renders a `ConfigMap` (labeled
   `grafana_dashboard: "1"`) carrying the same dashboard JSON, for the Grafana
   sidecar to auto-import.
+- `metrics.prometheusRule.enabled=true` renders a `PrometheusRule` with the
+  `AirLLMTierQuarantined` alert (see [Failover on-call](#failover-on-call)).
+  Set `metrics.prometheusRule.labels` to whatever your Prometheus selects rules
+  by, and `alertLabels` to what your Alertmanager routes on.
 
 ### ArgoCD
 
@@ -304,6 +308,8 @@ Dashboard JSON lives in `deploy/grafana/dashboards/`. The datasource is a
 portable and can be imported into any Grafana. Panels cover: request rate by
 status, p50/p95 request latency, per-component latency, token and cost rate,
 rate-limited breakdown, and BERT inflight + scan duration (the bottleneck view).
+A second dashboard, **AirLLM Failover** (`airllm-failover.json`), follows tier
+failover per alias — see [Failover on-call](#failover-on-call).
 
 To bring up the full local observability stack (Prometheus + Grafana,
 loopback-only):
@@ -317,6 +323,47 @@ Helm chart ships a `ServiceMonitor` and the same dashboard JSON as a `ConfigMap`
 (enable with `metrics.serviceMonitor.enabled` / `metrics.dashboards.enabled` — see
 [Kubernetes (Helm chart)](#kubernetes-helm-chart)). Nothing in the repo is
 environment-specific.
+
+### Failover on-call
+
+`AirLLMTierQuarantined` fires when one tier of an alias has stayed open or
+probing for longer than `metrics.prometheusRule.tierQuarantinedFor` (15 min by
+default): its provider keeps failing, and the alias answers from a later tier —
+or fails fast, if every tier is open. Where to look:
+
+1. **Dashboard — AirLLM Failover**, filtered to the alias. Breaker state per
+   tier; transitions (a run of `open → half_open → open` is a probe failing
+   again, each re-trip doubling the cooldown); fallbacks by origin, destination
+   and reason; outcomes, failure ratio and attempt latency per tier. A failure
+   latency pinned at the tier's `timeout_ms` is a provider that hangs rather
+   than errors.
+2. **Console — Aliases → Health.** Each tier's state, why it opened and until
+   when, and a manual release once the provider is fixed (audited as
+   `alias.tier.release`).
+3. **Gateway logs** (JSON). Filter on `msg`, then on `alias`:
+   - `tier attempt failed` — every failed attempt, with `tier`, `provider`,
+     `upstream_model`, `reason`, `latency_ms`, `error` and the client's
+     `session`;
+   - `tier breaker opened` (`reason`, `cooldown_ms`, `open_until`),
+     `tier breaker probe`, `tier breaker closed` (`via`: `probe` or `manual`).
+
+   In LogsQL, for example: `"tier attempt failed" alias:=<alias>`, or
+   `session:=<session>` for one call.
+4. **Ledger — every request of one call**, by the `X-Session-Id` its client
+   sent (the `session` column comes with call affinity):
+
+   ```sql
+   SELECT ts, alias, tier, attempts, provider_name, upstream_model, status, latency_ms, error
+   FROM usage_ledger
+   WHERE session = '<session>'
+   ORDER BY ts;
+   ```
+
+A replica reports a tier's state only once it has served that alias since it
+started, so after a gateway restart the alert's clock starts again with the
+alias's next request.
+
+Rule unit tests: `make rules-test` (renders the rule, runs `promtool` in Docker).
 
 ### In-console sparklines
 

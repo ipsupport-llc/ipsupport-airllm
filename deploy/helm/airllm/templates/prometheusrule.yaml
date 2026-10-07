@@ -1,0 +1,36 @@
+{{- if .Values.metrics.prometheusRule.enabled -}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "airllm.fullname" . }}
+  {{- with .Values.metrics.prometheusRule.namespace }}
+  namespace: {{ . }}
+  {{- end }}
+  labels:
+    {{- include "airllm.labels" . | nindent 4 }}
+    {{- with .Values.metrics.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: airllm-failover
+      rules:
+        # Open or half-open: a probe that fails re-opens the tier, so a
+        # provider that stays down never reads closed in between. Each replica
+        # reports only the tiers it has served since it started, hence max
+        # across replicas; namespace stays for Alertmanager's namespace matcher.
+        - alert: AirLLMTierQuarantined
+          expr: max by (namespace, alias, tier) (airllm_breaker_state{namespace="{{ .Release.Namespace }}"}) >= 1
+          for: {{ .Values.metrics.prometheusRule.tierQuarantinedFor }}
+          {{- with .Values.metrics.prometheusRule.alertLabels }}
+          labels:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          annotations:
+            summary: {{ printf "AirLLM alias {{ $labels.alias }} tier {{ $labels.tier }} quarantined for over %s" .Values.metrics.prometheusRule.tierQuarantinedFor | quote }}
+            description: >-
+              The tier's circuit breaker has not closed for {{ .Values.metrics.prometheusRule.tierQuarantinedFor }}:
+              its provider keeps failing and requests are served by the next tier.
+              Check the AirLLM Failover dashboard, the console's Aliases → Health view
+              and the gateway's "tier attempt failed" logs for this alias.
+{{- end }}
