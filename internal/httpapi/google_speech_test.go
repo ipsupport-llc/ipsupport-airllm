@@ -209,8 +209,8 @@ func TestTranscriptionFailsOverFromGoogleToAWhisperTierWithTheSameRequest(t *tes
 	if res.Provider != "whisper" || res.Tier != 1 || res.Attempts != 2 {
 		t.Fatalf("served by %q tier %d after %d attempts, want the whisper tier after the refused Google one", res.Provider, res.Tier, res.Attempts)
 	}
-	if got.language != "en" {
-		t.Errorf("whisper got language %q, want en — the Whisper family rejects a region", got.language)
+	if got.language != "" {
+		t.Errorf("whisper got language %q, want none — with alternatives a Whisper tier detects rather than translate into the primary", got.language)
 	}
 	if len(got.alternatives) != 0 {
 		t.Errorf("whisper got alternatives %v, want none — it cannot use them", got.alternatives)
@@ -240,6 +240,25 @@ func TestATierSilentOnLanguageReportsTheRequestedOne(t *testing.T) {
 	}
 	if tr.Language != "es-ES" || tr.Confidence != 0 {
 		t.Errorf("language=%q confidence=%v, want the requested es-ES and no confidence", tr.Language, tr.Confidence)
+	}
+}
+
+// A Whisper tier that detects one of the request's alternatives reports it
+// in the form the request named it, as Google would, so the language keeps
+// its form whichever pool or tier served.
+func TestAWhisperTierDetectingAnAlternativeReportsItsRequestedTag(t *testing.T) {
+	whisper, _ := fakeWhisper(t, `{"text":"hola","language":"spanish","duration":1}`)
+	s := newRunChatTestServer(t, providers.NewOpenAICompat("whisper", "groq", whisper.URL, ""))
+	plan := googleSpeechPlan(routing.Target{Provider: "whisper", UpstreamModel: "whisper-large-v3"})
+
+	tr, _, err := s.runTranscribe(context.Background(), plan, audio.TranscriptionRequest{
+		Audio: []byte("wav"), Language: "en-US", AlternativeLanguages: []string{"es-ES"},
+	})
+	if err != nil {
+		t.Fatalf("runTranscribe: %v", err)
+	}
+	if tr.Text != "hola" || tr.Language != "es-ES" {
+		t.Errorf("text=%q language=%q, want the Spanish transcript in the requested es-ES", tr.Text, tr.Language)
 	}
 }
 

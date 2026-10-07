@@ -15,13 +15,30 @@ type TranscriptionRequest struct {
 	Language string
 	// AlternativeLanguages are further BCP-47 languages the caller may be
 	// speaking. Passed on by providers that recognise several languages at
-	// once and ignored by those that cannot.
+	// once; the Whisper family detects instead of being told the language.
 	AlternativeLanguages []string
 	Prompt               string // optional context/spelling guidance
 	// ModelByLanguage is the serving target's recognition model per language
 	// (its recognition_models option). Providers that pick a model by
 	// language read it; the others transcribe with Model.
 	ModelByLanguage map[string]string
+}
+
+// RequestedLanguage is the request's tag — the primary language or one of
+// the alternatives, in canonical case — whose language subtag is lang's, the
+// primary first: "es" finds an alternative "es-ES". Empty when lang is none
+// of them.
+func (r TranscriptionRequest) RequestedLanguage(lang string) string {
+	want := PrimaryLanguage(lang)
+	if want == "" {
+		return ""
+	}
+	for _, tag := range append([]string{r.Language}, r.AlternativeLanguages...) {
+		if PrimaryLanguage(tag) == want {
+			return CanonicalLanguage(tag)
+		}
+	}
+	return ""
 }
 
 // TranscriptionResponse is a transcription result.
