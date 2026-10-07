@@ -87,9 +87,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		writeProtocolError(w, r, http.StatusInternalServerError, "internal_error", "failed to encode response")
 		return
 	}
-	if plan.ExposeBackendHeaders && target.DisplayLabel != "" {
-		w.Header().Set("X-Backend-Model", target.DisplayLabel)
-	}
+	setBackendLabel(w, plan.ExposeBackendHeaders, target.Target)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)

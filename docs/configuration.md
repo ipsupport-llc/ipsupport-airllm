@@ -390,7 +390,10 @@ A hit answers like the provider would have — the same audio, content type and
 sample rate — and costs nothing: the ledger row has `cached = true`,
 `cost_usd = 0`, the provider and model that rendered the clip, and an
 `attempts` count of only the tiers that failed before it (so a plain hit is
-`0`). Its characters still count against the key's `tts_chars` limit, which
+`0`). On an alias with `expose_backend_headers`, its `X-Backend-Model` header
+is the display label of the target whose attempt found the clip — the clip's
+key holds that target's provider, model and voice, so it is the voice that
+spoke it. Its characters still count against the key's `tts_chars` limit, which
 exists to stop a runaway client. The `request completed` log line of every
 answered speech request on such an alias carries `cache` (`hit`, `miss`, or
 `error` when the cache could not be read), and `airllm_synthesis_cache_total`

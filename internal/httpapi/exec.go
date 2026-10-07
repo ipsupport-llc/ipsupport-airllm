@@ -362,10 +362,17 @@ func (o *openaiSink) chunk(c llm.StreamChunk) error {
 // assembled returns the full accumulated response text.
 func (o *openaiSink) assembled() string { return o.content.String() }
 
-func writeSSEHeaders(w http.ResponseWriter, t routing.Target, exposeBackend bool) {
-	if exposeBackend && t.DisplayLabel != "" {
+// setBackendLabel names the target that served a response in its
+// X-Backend-Model header: only on an alias that exposes backend headers, and
+// only for a target the operator gave a display label.
+func setBackendLabel(w http.ResponseWriter, expose bool, t routing.Target) {
+	if expose && t.DisplayLabel != "" {
 		w.Header().Set("X-Backend-Model", t.DisplayLabel)
 	}
+}
+
+func writeSSEHeaders(w http.ResponseWriter, t routing.Target, exposeBackend bool) {
+	setBackendLabel(w, exposeBackend, t)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")

@@ -122,6 +122,7 @@ func (s *Server) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reques
 	}
 	s.enqueueCapture(ak, "openai", model, target, upstreamModel, http.StatusOK, 0, 0, float64(costMicro)/1e6, dlpRes, nil, redactedText)
 
+	setBackendLabel(w, plan.ExposeBackendHeaders, res.Target)
 	if r.FormValue("response_format") == "verbose_json" {
 		writeJSON(w, http.StatusOK, verboseTranscription{
 			Task: "transcribe", Text: redactedText, Language: resp.Language,
@@ -364,6 +365,7 @@ func (s *Server) handleAudioSpeech(w http.ResponseWriter, r *http.Request) {
 	s.enqueueCapture(ak, "openai", body.Model, target, upstreamModel, http.StatusOK, 0, 0, float64(costMicro)/1e6, dlpRes,
 		[]llm.Message{{Role: "user", Content: redactedInput}}, "")
 
+	setBackendLabel(w, plan.ExposeBackendHeaders, res.Target)
 	if resp.ContentType != "" {
 		w.Header().Set("Content-Type", resp.ContentType)
 	}
@@ -428,7 +430,9 @@ func (s *Server) runTranscribe(ctx context.Context, plan *routing.Plan, req audi
 // tier is chosen before the cache is asked and a clip is only ever served
 // for the provider and voice that spoke it. A hit answers without calling
 // the provider and is not counted as an attempt; a clip a provider renders
-// is stored for the next request.
+// is stored for the next request. A hit is labelled, in X-Backend-Model, as
+// the target whose attempt found it: the key holds that target's provider,
+// model and voice, so the clip is that target's own audio.
 func (s *Server) runSynthesize(ctx context.Context, plan *routing.Plan, req audio.SpeechRequest) (audio.SpeechResponse, execResult, error) {
 	var resp audio.SpeechResponse
 	var served string

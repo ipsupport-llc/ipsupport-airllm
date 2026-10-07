@@ -433,3 +433,87 @@ func TestAliasSynthesisCacheSettingsRoundTripAndDefaultOff(t *testing.T) {
 		t.Errorf("found %d of the two aliases in the list", found)
 	}
 }
+
+// seedLabelledAudioAlias saves an alias of two tiers — a dead first one and
+// the given provider behind it, both labelled — with the given extra alias
+// settings, transcript scanning off.
+func seedLabelledAudioAlias(t *testing.T, s *audioRig, alias, dead, live, model, settings string) {
+	t.Helper()
+	seedAudioAlias(t, s, alias, map[string]string{dead: "openai", live: "openai"}, "[]")
+	body := fmt.Sprintf(`{%s"dlp_audio_scan":false,"targets":[
+		{"priority":0,"provider":%q,"upstream_model":%q,"display_label":"primary-tier"},
+		{"priority":1,"provider":%q,"upstream_model":%q,"display_label":"backup-tier"}]}`, settings, dead, model, live, model)
+	if rec := putAlias(s.Server, alias, body); rec.Code != http.StatusOK {
+		t.Fatalf("put alias: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestTranscriptionRouteLabelsTheTierThatServedItAfterFailover(t *testing.T) {
+	whisper, _ := fakeWhisper(t, `{"text":"hi there","language":"en","duration":1}`)
+	suffix := fmt.Sprint(time.Now().UnixNano())
+	dead, live := "dead-"+suffix, "whisper-"+suffix
+	exposed, hidden := "voice-stt-"+suffix, "voice-stt-quiet-"+suffix
+	s := newAudioRig(t, providers.NewOpenAICompat(dead, "openai", "http://127.0.0.1:1", ""), providers.NewOpenAICompat(live, "openai", whisper.URL, ""))
+	seedLabelledAudioAlias(t, s, exposed, dead, live, "large-v3-turbo", `"expose_backend_headers":true,`)
+	s.aliases = append(s.aliases, hidden)
+	t.Cleanup(func() {
+		_, _ = s.st.PG.Exec(context.Background(), `DELETE FROM model_aliases WHERE alias = $1`, hidden)
+	})
+	if rec := putAlias(s.Server, hidden, fmt.Sprintf(`{"dlp_audio_scan":false,"targets":[{"priority":0,"provider":%q,"upstream_model":"large-v3-turbo","display_label":"backup-tier"}]}`, live)); rec.Code != http.StatusOK {
+		t.Fatalf("put quiet alias: %d %s", rec.Code, rec.Body.String())
+	}
+
+	for _, tc := range []struct{ alias, want string }{{exposed, "backup-tier"}, {hidden, ""}} {
+		rec := httptest.NewRecorder()
+		s.handleAudioTranscriptions(rec, asKey(transcriptionRequest(t, [][2]string{{"model", tc.alias}, {"language", "en-US"}}), tc.alias))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d: %s", tc.alias, rec.Code, rec.Body.String())
+		}
+		if got := rec.Header().Get("X-Backend-Model"); got != tc.want {
+			t.Errorf("%s: X-Backend-Model = %q, want %q", tc.alias, got, tc.want)
+		}
+	}
+}
+
+func TestSpeechRouteLabelsTheTierThatSpokeItFreshAndFromTheCache(t *testing.T) {
+	up, calls := fakeOpenAISpeech(t, "audio/wav", pcmWAV(22050, 1))
+	suffix := fmt.Sprint(time.Now().UnixNano())
+	dead, live, alias := "dead-"+suffix, "piper-"+suffix, "voice-tts-"+suffix
+	s := newAudioRig(t, providers.NewOpenAICompat(dead, "openai", "http://127.0.0.1:1", ""), providers.NewOpenAICompat(live, "openai", up.URL, ""))
+	s.speechCache = speechcache.New(nil)
+	seedLabelledAudioAlias(t, s, alias, dead, live, "tts-1", `"expose_backend_headers":true,"synthesis_cache":true,`)
+
+	for i := range 2 {
+		rec := httptest.NewRecorder()
+		s.handleAudioSpeech(rec, asKey(speechRequest(fmt.Sprintf(`{"model":%q,"input":"Hello there","voice":"alloy"}`, alias)), alias))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d: status = %d: %s", i, rec.Code, rec.Body.String())
+		}
+		if got := rec.Header().Get("X-Backend-Model"); got != "backup-tier" {
+			t.Errorf("request %d: X-Backend-Model = %q, want the backup tier that spoke the clip", i, got)
+		}
+	}
+	if n := len(calls()); n != 1 {
+		t.Errorf("upstream asked %d times, want the repeat answered from the cache", n)
+	}
+}
+
+func TestSpeechRouteSendsNoLabelForAnUnlabelledTarget(t *testing.T) {
+	up, _ := fakeOpenAISpeech(t, "audio/wav", pcmWAV(22050, 1))
+	suffix := fmt.Sprint(time.Now().UnixNano())
+	piper, alias := "piper-"+suffix, "voice-tts-"+suffix
+	s := newAudioRig(t, providers.NewOpenAICompat(piper, "openai", up.URL, ""))
+	seedAudioAlias(t, s, alias, map[string]string{piper: "openai"}, "[]")
+	if rec := putAlias(s.Server, alias, fmt.Sprintf(`{"expose_backend_headers":true,"dlp_audio_scan":false,"targets":[{"priority":0,"provider":%q,"upstream_model":"tts-1"}]}`, piper)); rec.Code != http.StatusOK {
+		t.Fatalf("put alias: %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec := httptest.NewRecorder()
+	s.handleAudioSpeech(rec, asKey(speechRequest(fmt.Sprintf(`{"model":%q,"input":"Hello there","voice":"alloy"}`, alias)), alias))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, set := rec.Header()["X-Backend-Model"]; set {
+		t.Errorf("X-Backend-Model = %q, want none for a target with no label", rec.Header().Get("X-Backend-Model"))
+	}
+}
