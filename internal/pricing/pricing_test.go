@@ -234,3 +234,19 @@ func TestReplaceWithTheSameRowsIsANoOp(t *testing.T) {
 		t.Error("Replace with a row removed reported no change")
 	}
 }
+
+// A local Set followed by a database that went back to the rows last
+// installed — another replica reverted the price within one refresh — must
+// still bring this table back in line.
+func TestReplaceAfterASetRestoresTheRowsEvenIfTheyAreUnchanged(t *testing.T) {
+	rows := []Row{{Provider: "p", Model: "m", Price: Price{InputPer1M: 1}}}
+	tab := New()
+	tab.Replace(rows)
+	tab.Set("p", "m", Price{InputPer1M: 5})
+	if !tab.Replace(rows) {
+		t.Error("Replace after a Set kept the Set price because the rows matched the last install")
+	}
+	if got := tab.CostMicroUSD("p", "m", 1_000_000, 0); got != 1_000_000 {
+		t.Errorf("price after Replace = %d, want 1000000 from the rows", got)
+	}
+}

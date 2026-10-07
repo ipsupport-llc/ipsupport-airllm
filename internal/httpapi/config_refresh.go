@@ -15,8 +15,8 @@ import (
 // Every replica keeps the provider registry, the price table and a few
 // settings rows in memory. A save through the admin API reloads them only on
 // the replica that served it; the others pick the change up from the database
-// on their next RefreshConfig. API keys and aliases are not here — the lookup cache already
-// re-asks for them after its TTL.
+// on their next RefreshConfig. API keys and aliases are not here — the lookup
+// cache already re-asks for them after its TTL.
 
 // settingAppliers lists the settings rows held in memory, and how each is
 // installed.
@@ -93,18 +93,18 @@ func (s *Server) loadProvidersLocked(ctx context.Context, force bool) error {
 // setPrices installs prices this replica just saved. It holds s.config.mu so
 // a refresh that read the table before the save cannot swap it back in over
 // them.
-func (s *Server) setPrices(provider string, rows map[string]pricing.Price) {
+func (s *Server) setPrices(rows []pricing.Row) {
 	s.config.mu.Lock()
 	defer s.config.mu.Unlock()
-	for model, p := range rows {
-		s.pricing.Set(provider, model, p)
+	for _, r := range rows {
+		s.pricing.Set(r.Provider, r.Model, r.Price)
 	}
 }
 
 // RefreshConfig re-reads the provider, price and settings rows this instance
-// keeps in memory and installs whatever changed since it last looked. A read that
-// fails changes nothing: the last good configuration keeps serving through a
-// database outage.
+// keeps in memory and installs whatever changed since it last looked. A read
+// that fails changes nothing: the last good configuration keeps serving
+// through a database outage.
 func (s *Server) RefreshConfig(ctx context.Context) {
 	s.config.mu.Lock()
 	defer s.config.mu.Unlock()

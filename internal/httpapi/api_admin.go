@@ -752,7 +752,7 @@ func (s *Server) handleAdminPutPricing(w http.ResponseWriter, r *http.Request) {
 		writeControlError(w, http.StatusInternalServerError, "failed to save pricing")
 		return
 	}
-	s.setPrices(body.Provider, map[string]pricing.Price{model: p})
+	s.setPrices([]pricing.Row{{Provider: body.Provider, Model: model, Price: p}})
 	s.audit(r.Context(), sess.principal.Subject, "pricing.put", model, body)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
 }

@@ -116,6 +116,10 @@ func TestPriceSavedOnAnotherReplicaCostsAfterRefresh(t *testing.T) {
 		_, _ = f.direct.Exec(bg, `DELETE FROM pricing WHERE provider = 'mock' AND model = 'mock-gpt'`)
 	})
 	cost := func() int64 { return f.srv.pricing.AudioCostMicroUSD(provider, "stt", 1_000_000) }
+	imported := func() int64 { return f.srv.pricing.CostMicroUSD("mock", "mock-gpt", 1_000_000, 1_000_000) }
+	if _, err := f.direct.Exec(ctx, `DELETE FROM pricing WHERE provider = 'mock' AND model = 'mock-gpt'`); err != nil {
+		t.Fatalf("clear the import's row: %v", err)
+	}
 
 	f.srv.RefreshConfig(ctx)
 	wantStatus(t, putPrice(t, other, "stt", fmt.Sprintf(`{"provider":%q,"unit":"audio_second","input_per_1m":1}`, provider)), http.StatusOK, "new price")
@@ -128,6 +132,9 @@ func TestPriceSavedOnAnotherReplicaCostsAfterRefresh(t *testing.T) {
 	}
 
 	wantStatus(t, putPrice(t, other, "stt", fmt.Sprintf(`{"provider":%q,"unit":"audio_second","input_per_1m":3}`, provider)), http.StatusOK, "changed price")
+	if got := cost(); got != 1_000_000 {
+		t.Fatalf("changed price applied before any refresh: %d", got)
+	}
 	f.srv.RefreshConfig(ctx)
 	if got := cost(); got != 3_000_000 {
 		t.Errorf("changed price after refresh = %d, want 3000000", got)
@@ -137,8 +144,11 @@ func TestPriceSavedOnAnotherReplicaCostsAfterRefresh(t *testing.T) {
 	rw := httptest.NewRecorder()
 	other.mux.ServeHTTP(rw, req)
 	wantStatus(t, rw, http.StatusOK, "import")
+	if got := imported(); got != 0 {
+		t.Fatalf("imported price applied before any refresh: %d", got)
+	}
 	f.srv.RefreshConfig(ctx)
-	if got := f.srv.pricing.CostMicroUSD("mock", "mock-gpt", 1_000_000, 1_000_000); got != 3_000_000 {
+	if got := imported(); got != 3_000_000 {
 		t.Errorf("imported price after refresh = %d, want 3000000", got)
 	}
 }

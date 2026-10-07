@@ -89,7 +89,7 @@ func (p Price) Validate() error {
 type Table struct {
 	mu     sync.RWMutex
 	prices map[string]Price
-	fp     [sha256.Size]byte // fingerprint of the rows last installed by Replace
+	fp     [sha256.Size]byte // fingerprint of the rows last installed by Replace; zero after a Set
 }
 
 // New returns an empty table.
@@ -144,23 +144,20 @@ func Load(ctx context.Context, st *store.Store) (*Table, error) {
 // Replace installs rows as the whole table, dropping any price not among
 // them, and reports whether it did. Rows equal to the ones the last Replace
 // installed leave the table alone, so a caller polling the store rebuilds it
-// only when a price changed. A Set since then does not count: the row it
-// mirrors was written to the store too, so the next poll differs anyway.
+// only when a price changed — unless a Set came in between, since the store
+// may since have gone back to those very rows.
 func (t *Table) Replace(rows []Row) bool {
 	fp := fingerprint(rows)
-	t.mu.RLock()
-	same := fp == t.fp
-	t.mu.RUnlock()
-	if same {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if fp == t.fp {
 		return false
 	}
 	prices := make(map[string]Price, len(rows))
 	for _, r := range rows {
 		prices[key(r.Provider, r.Model)] = r.Price
 	}
-	t.mu.Lock()
 	t.prices, t.fp = prices, fp
-	t.mu.Unlock()
 	return true
 }
 
@@ -199,6 +196,7 @@ func (t *Table) Set(provider, model string, p Price) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.prices[key(provider, model)] = p
+	t.fp = [sha256.Size]byte{}
 }
 
 // CostMicroUSD returns the cost of a call in integer micro-USD. Looks up an
