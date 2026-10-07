@@ -1115,6 +1115,25 @@ async function showTierHealth(alias) {
   }));
 }
 
+// synthCacheTTLText shows an alias's stored synthesis cache TTL (seconds) as
+// days for the editor; the default (0) is an empty field. Top-level so
+// web/synthcachettl.test.mjs can extract it.
+function synthCacheTTLText(seconds) {
+  const s = Number(seconds) || 0;
+  return s > 0 ? String(Math.round((s / 86400) * 100) / 100) : "";
+}
+
+// parseSynthCacheTTL turns the editor's days into the seconds the API
+// stores: empty is 0 (the gateway default), anything else must lie in
+// (0, 30].
+function parseSynthCacheTTL(text) {
+  const t = (text || "").trim();
+  if (!t) return 0;
+  const d = Number(t);
+  if (!Number.isFinite(d) || d <= 0 || d > 30) throw new Error("synthesis cache TTL must be a number of days between 0 and 30");
+  return Math.round(d * 86400);
+}
+
 async function adminAliases(c) {
   const r = await api("GET", "/api/admin/aliases");
   const al = (r.data && r.data.aliases) || [];
@@ -1177,6 +1196,10 @@ async function editAlias(c, a) {
       <input id="al-affinity" type="checkbox" ${a.session_affinity ? "checked" : ""} style="width:auto" /></label>
     <label class="field"><span class="lab">Session pin TTL, hours (empty = 4)</span>
       <input id="al-affinity-ttl" type="number" min="0" max="168" step="any" value="${esc(affinityTTLText(a.session_affinity_ttl_s))}" style="width:96px" /></label>
+    <label class="field"><span class="lab">Synthesis cache: answer a repeated speech request with the clip the serving tier rendered</span>
+      <input id="al-ttscache" type="checkbox" ${a.synthesis_cache ? "checked" : ""} style="width:auto" /></label>
+    <label class="field"><span class="lab">Synthesis cache TTL, days (empty = 7)</span>
+      <input id="al-ttscache-ttl" type="number" min="0" max="30" step="any" value="${esc(synthCacheTTLText(a.synthesis_cache_ttl_s))}" style="width:96px" /></label>
     <div class="lab" style="color:var(--muted);font-size:.82rem;margin-bottom:.3rem">Targets: same priority = load-balanced tier; higher number = fallback tier. Label is what the header shows — real provider/model names never leak. Options (JSON, optional): <span class="mono">timeout_ms</span> — time budget (first chunk for streams, whole call otherwise); <span class="mono">fallback_on_auth</span> — try the next tier on upstream auth/billing errors; <span class="mono">breaker</span> — circuit breaker for the tier, e.g. <span class="mono">{"enabled":true,"failures":3,"cooldown_ms":60000}</span>; <span class="mono">recognition_models</span> — recognition model per BCP-47 language, e.g. <span class="mono">{"en-US":"telephony"}</span> (google-speech); <span class="mono">voices</span> — canonical voice → <span class="mono">{"voice","model"}</span> this target speaks it with; <span class="mono">default_voices</span> — voice per BCP-47 language for unmapped voices, e.g. <span class="mono">{"en":{"voice":"onyx"}}</span>.</div>
     <div id="al-targets"></div>
     <button type="button" class="btn ghost sm" id="al-add" style="margin-top:.3rem">+ Add target</button>
@@ -1284,9 +1307,10 @@ async function editAlias(c, a) {
     if (alias !== a.alias && existingAliases.includes(alias)) {
       toast(`Alias ${alias} already exists`, "err"); return;
     }
-    let tlist, affinityTTL;
+    let tlist, affinityTTL, cacheTTL;
     try {
       affinityTTL = parseAffinityTTL($("#al-affinity-ttl", bg).value);
+      cacheTTL = parseSynthCacheTTL($("#al-ttscache-ttl", bg).value);
       tlist = [...tdiv.querySelectorAll(".tgt")].map((r) => ({
         priority: Number(r.querySelector(".t-prio").value) || 0,
         provider: r.querySelector(".t-prov").value,
@@ -1299,7 +1323,8 @@ async function editAlias(c, a) {
     const x = await api("PUT", `/api/admin/aliases/${encodeURIComponent(alias)}`,
       { protocol: $("#al-proto", bg).value, strategy: $("#al-strategy", bg).value, targets: tlist,
         dlp_model_scan: $("#al-bert", bg).checked, expose_backend_headers: $("#al-expose", bg).checked, dlp_audio_scan: $("#al-dlpaudio", bg).checked,
-        session_affinity: $("#al-affinity", bg).checked, session_affinity_ttl_s: affinityTTL });
+        session_affinity: $("#al-affinity", bg).checked, session_affinity_ttl_s: affinityTTL,
+        synthesis_cache: $("#al-ttscache", bg).checked, synthesis_cache_ttl_s: cacheTTL });
     if (!x.ok) { toast((x.data && x.data.error) || "Failed", "err"); return; }
     // Rename = save under the new name, then drop the old one. Role
     // policies and pricing that reference the old name are NOT rewritten.

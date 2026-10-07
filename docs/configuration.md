@@ -362,6 +362,55 @@ SELECT ts, alias, tier, attempts, provider_name, status
 FROM usage_ledger WHERE session = 'call-42' ORDER BY ts;
 ```
 
+### Synthesis cache
+
+A voice agent says the same phrases over and over — a greeting, "one moment,
+please", a goodbye. An alias with the synthesis cache answers a speech request
+it has answered before from the clip it kept, without calling a provider.
+
+A clip is kept per **voice that actually spoke it**: its key is the alias, the
+provider that served the request, the voice and model that provider was sent
+after the target's [`voices` / `default_voices`](#failover-policy-getput-apiadminfailover)
+mapping, the request's `language`, the `response_format` and the text. The
+cache is asked once the attempt loop has picked a tier, inside that tier's
+attempt, so it only ever offers the clip that tier rendered — and a tier the
+loop passes over (busy at its `max_concurrency`, or failing) does not serve
+its clips either:
+
+- While the primary tier is out, the backup voice renders a phrase once and
+  serves it from the cache after that. Those clips are kept under the backup
+  provider and are never served for the primary.
+- When the primary comes back, the clips it rendered before the outage are
+  still there and are hits again at once.
+- Editing a voice mapping changes the key of the voices it touches, so their
+  old clips stop matching by themselves and expire; every other voice keeps
+  its clips.
+
+A hit answers like the provider would have — the same audio, content type and
+sample rate — and costs nothing: the ledger row has `cached = true`,
+`cost_usd = 0`, the provider and model that rendered the clip, and an
+`attempts` count of only the tiers that failed before it (so a plain hit is
+`0`). Its characters still count against the key's `tts_chars` limit, which
+exists to stop a runaway client. The `request completed` log line of every
+answered speech request on such an alias carries `cache` (`hit`, `miss`, or
+`error` when the cache could not be read), and `airllm_synthesis_cache_total`
+counts the same outcomes per alias and serving provider — so during an outage
+the backup provider's hits show apart from the primary's. A request every
+tier failed has no outcome.
+
+| Alias field | Default | Meaning |
+|-------------|---------|---------|
+| `synthesis_cache` | `false` | Answer repeated speech requests from the cache. |
+| `synthesis_cache_ttl_s` | `0` | How long a clip is kept after it was rendered; `0` is 7 days, at most 2592000 (30 days). |
+
+Clips live in Redis, shared by every replica, under
+`air:tts:<alias>:<sha256 of the rest of the key>` — so one alias's clips can
+be listed or dropped with `SCAN … MATCH air:tts:<alias>:*`. A clip over
+4 MiB is served but not kept. The cache is best-effort: when Redis cannot be
+read the request goes to the provider (outcome `error`), and the gateway leaves
+Redis alone for five seconds before trying it again, so an outage costs a
+speech request at most one short timeout per interval.
+
 ## Provider kinds
 
 Providers live in the `providers` table and are edited from the admin console

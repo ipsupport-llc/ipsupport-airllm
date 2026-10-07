@@ -146,6 +146,12 @@ func (p attemptPolicy) fallsThrough(err error) bool {
 	return p.fallbackOnAuth && providers.IsAuthFailure(err)
 }
 
+// errServedWithoutCall is what an attemptCall returns when it answered from a
+// local store (the synthesis cache) instead of calling its target. The
+// request is served, but nothing was learnt about the tier and no upstream
+// call was made: no breaker verdict, no tier outcome, no counted attempt.
+var errServedWithoutCall = errors.New("served without an upstream call")
+
 // errCodeTierTimeout marks an attempt abandoned because it outlived its
 // target's time budget. Retryable, so it falls through like any upstream
 // failure would.
@@ -205,7 +211,21 @@ type execResult struct {
 	Attempts int
 	// Session is the request's client session header, or "".
 	Session string
+	// Cache is how the synthesis cache answered a speech request on an
+	// alias that has it. Empty otherwise.
+	Cache cacheOutcome
 }
+
+// cacheOutcome is how the synthesis cache answered one speech request,
+// spelled as the request log line and the airllm_synthesis_cache_total
+// metric spell it.
+type cacheOutcome string
+
+const (
+	cacheHit   cacheOutcome = "hit"
+	cacheMiss  cacheOutcome = "miss"
+	cacheError cacheOutcome = "error" // the cache could not be read; a provider answered
+)
 
 // attemptCall makes one upstream call to target t through provider p. commit
 // is runAttempt's: a streaming call invokes it before emitting its first
@@ -341,6 +361,13 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 			})
 			e.Release()
 
+			if errors.Is(callErr, errServedWithoutCall) {
+				if adm.Probe {
+					s.breaker.AbandonProbe(ctx, key, set)
+				}
+				res.Attempts--
+				return res, committed, nil
+			}
 			switch {
 			case recorded.Load():
 			case callErr == nil:

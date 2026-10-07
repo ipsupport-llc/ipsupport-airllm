@@ -30,6 +30,7 @@ type Metrics struct {
 	tierFallbacks      *prometheus.CounterVec
 	tierOutcomes       *prometheus.CounterVec
 	tierLatency        *prometheus.HistogramVec
+	synthesisCache     *prometheus.CounterVec
 }
 
 // New builds and registers the collectors on a fresh registry.
@@ -77,9 +78,12 @@ func New() *Metrics {
 			// Tier budgets run 1–3 s on the voice path; resolve that range.
 			Buckets: []float64{0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 5, 10, 30},
 		}, []string{"alias", "tier", "outcome"}),
+		synthesisCache: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "airllm_synthesis_cache_total", Help: "Answered speech requests on aliases with the synthesis cache, by alias, serving provider and outcome (hit, miss, error).",
+		}, []string{"alias", "provider", "outcome"}),
 	}
 	m.reg.MustRegister(m.httpRequests, m.httpDuration, m.component, m.tokens, m.cost, m.rateLimited, m.dlpSkipped, m.dlpDuration,
-		m.breakerTransitions, m.tierFallbacks, m.tierOutcomes, m.tierLatency)
+		m.breakerTransitions, m.tierFallbacks, m.tierOutcomes, m.tierLatency, m.synthesisCache)
 	return m
 }
 
@@ -132,6 +136,17 @@ func (m *Metrics) IncRateLimited(reason string) {
 		return
 	}
 	m.rateLimited.WithLabelValues(reason).Inc()
+}
+
+// SynthesisCache counts one answered speech request of an alias with the
+// synthesis cache on, by the provider whose voice answered it: "hit" was
+// answered from a cached clip, "miss" reached the provider, "error" reached
+// it because the cache could not be read.
+func (m *Metrics) SynthesisCache(alias, provider, outcome string) {
+	if m == nil {
+		return
+	}
+	m.synthesisCache.WithLabelValues(alias, provider, outcome).Inc()
 }
 
 func (m *Metrics) DLPModelObserve(d time.Duration) {

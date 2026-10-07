@@ -3,7 +3,9 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"slices"
@@ -17,6 +19,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/speechcache"
 )
 
 // handleAudioTranscriptions implements POST /v1/audio/transcriptions:
@@ -87,7 +90,7 @@ func (s *Server) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reques
 		}
 		entry.Status = code
 		entry.ErrorMsg = callErr.Error()
-		s.finalizeAudioUsage(r.Context(), entry, ak.KeyID, 0, 0, 0)
+		s.finalizeAudioUsage(r.Context(), entry, ak.KeyID, 0, 0, 0, "")
 		writeProtocolError(w, r, code, typ, callErr.Error())
 		return
 	}
@@ -104,14 +107,14 @@ func (s *Server) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reques
 		if blocked {
 			entry.Status = http.StatusBadRequest
 			entry.ErrorMsg = msg
-			s.finalizeAudioUsage(r.Context(), entry, ak.KeyID, costMicro, audioSeconds, 0)
+			s.finalizeAudioUsage(r.Context(), entry, ak.KeyID, costMicro, audioSeconds, 0, "")
 			writeProtocolError(w, r, http.StatusBadRequest, "invalid_request_error", msg)
 			return
 		}
 	}
 
 	entry.Status = http.StatusOK
-	s.finalizeAudioUsage(r.Context(), entry, ak.KeyID, costMicro, audioSeconds, 0)
+	s.finalizeAudioUsage(r.Context(), entry, ak.KeyID, costMicro, audioSeconds, 0, "")
 
 	dlpRes := dlpResult{}
 	if len(findings) > 0 {
@@ -333,15 +336,21 @@ func (s *Server) handleAudioSpeech(w http.ResponseWriter, r *http.Request) {
 		}
 		entry.Status = code
 		entry.ErrorMsg = callErr.Error()
-		s.finalizeAudioUsage(r.Context(), entry, ak.KeyID, 0, 0, 0)
+		s.finalizeAudioUsage(r.Context(), entry, ak.KeyID, 0, 0, 0, "")
 		writeProtocolError(w, r, code, typ, callErr.Error())
 		return
 	}
 
+	// A cached reply cost the gateway nothing, but its characters still
+	// count against the key's character limit, which is there to stop a
+	// runaway client, not to bill it.
 	ttsChars := int64(utf8.RuneCountInString(redactedInput))
-	costMicro := s.pricing.TTSCostMicroUSD(target, upstreamModel, utf8.RuneCountInString(redactedInput))
-	entry.Status = http.StatusOK
-	s.finalizeAudioUsage(r.Context(), entry, ak.KeyID, costMicro, 0, ttsChars)
+	var costMicro int64
+	if res.Cache != cacheHit {
+		costMicro = s.pricing.TTSCostMicroUSD(target, upstreamModel, utf8.RuneCountInString(redactedInput))
+	}
+	entry.Status, entry.Cached = http.StatusOK, res.Cache == cacheHit
+	s.finalizeAudioUsage(r.Context(), entry, ak.KeyID, costMicro, 0, ttsChars, res.Cache)
 
 	dlpRes := dlpResult{}
 	if len(findings) > 0 {
@@ -411,9 +420,18 @@ func (s *Server) runTranscribe(ctx context.Context, plan *routing.Plan, req audi
 // tier that returns anything else is treated as failed, because the client
 // reads the sample rate from the header. The result names the model that
 // actually spoke, so the ledger prices it.
+//
+// On an alias with the synthesis cache, each attempt first looks for the
+// clip its own target rendered of this text in the mapped voice, so the
+// tier is chosen before the cache is asked and a clip is only ever served
+// for the provider and voice that spoke it. A hit answers without calling
+// the provider and is not counted as an attempt; a clip a provider renders
+// is stored for the next request.
 func (s *Server) runSynthesize(ctx context.Context, plan *routing.Plan, req audio.SpeechRequest) (audio.SpeechResponse, execResult, error) {
 	var resp audio.SpeechResponse
 	var served string
+	var cache cacheOutcome
+	var key speechcache.Key
 	supports := func(p providers.Provider) error {
 		if _, ok := p.(providers.Synthesizer); !ok {
 			return &providers.Error{Status: http.StatusBadRequest, Retryable: false, Message: "provider " + p.Name() + " does not support speech synthesis"}
@@ -430,6 +448,25 @@ func (s *Server) runSynthesize(ctx context.Context, plan *routing.Plan, req audi
 		in.Model, in.Voice = t.UpstreamModel, choice.Voice
 		if choice.Model != "" {
 			in.Model = choice.Model
+		}
+		cache = ""
+		if plan.SynthesisCache {
+			key = speechcache.Key{Alias: plan.Alias, Provider: t.Provider, Model: in.Model, Voice: in.Voice,
+				Language: in.Language, Format: in.ResponseFormat, Text: in.Input}
+			clip, hit, err := s.speechCache.Get(ctx, key)
+			switch {
+			case hit:
+				resp = audio.SpeechResponse{Audio: clip.Audio, ContentType: clip.ContentType}
+				served, cache = clip.Model, cacheHit
+				return errServedWithoutCall
+			case err != nil:
+				if !errors.Is(err, speechcache.ErrUnavailable) {
+					slog.Warn("synthesis cache lookup failed", "alias", plan.Alias, "provider", t.Provider, "err", err)
+				}
+				cache = cacheError
+			default:
+				cache = cacheMiss
+			}
 		}
 		out, err := p.(providers.Synthesizer).Synthesize(ctx, in)
 		if err != nil {
@@ -451,6 +488,16 @@ func (s *Server) runSynthesize(ctx context.Context, plan *routing.Plan, req audi
 	if err != nil {
 		return audio.SpeechResponse{}, res, err
 	}
-	res.UpstreamModel = served
+	res.UpstreamModel, res.Cache = served, cache
+	if cache == cacheMiss {
+		// Stored even if the client has gone: the clip is already paid for.
+		clip := speechcache.Clip{Audio: resp.Audio, ContentType: resp.ContentType, Model: served}
+		if err := s.speechCache.Put(context.WithoutCancel(ctx), key, clip, plan.SynthesisCacheTTL); err != nil && !errors.Is(err, speechcache.ErrUnavailable) {
+			slog.Warn("synthesis cache store failed", "alias", plan.Alias, "provider", res.Provider, "err", err)
+		}
+	}
+	if cache != "" {
+		s.metrics.SynthesisCache(plan.Alias, res.Provider, string(cache))
+	}
 	return resp, res, nil
 }

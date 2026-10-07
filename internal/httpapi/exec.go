@@ -176,7 +176,11 @@ func (s *Server) finalizeUsage(ctx context.Context, entry ledger.Entry, keyID, u
 // no-ops when every quantity is zero, so gating on "any non-zero quantity"
 // (rather than status) correctly skips the Redis round trip for requests
 // that never reached a provider.
-func (s *Server) finalizeAudioUsage(ctx context.Context, entry ledger.Entry, keyID string, costMicro, audioSeconds, ttsChars int64) {
+//
+// cache is the synthesis cache outcome of an answered speech request on an
+// alias that has the cache, logged as "cache"; empty for every other
+// request, whose log line keeps its shape.
+func (s *Server) finalizeAudioUsage(ctx context.Context, entry ledger.Entry, keyID string, costMicro, audioSeconds, ttsChars int64, cache cacheOutcome) {
 	entry.CostUSD = float64(costMicro) / 1e6
 	s.ledger.Record(ctx, entry)
 	s.metrics.RecordUsage(entry.IngressProtocol, llm.Usage{}, entry.CostUSD)
@@ -186,6 +190,9 @@ func (s *Server) finalizeAudioUsage(ctx context.Context, entry ledger.Entry, key
 		"ingress", entry.IngressProtocol, "status", entry.Status,
 		"audio_seconds", audioSeconds, "tts_chars", ttsChars,
 		"cost_usd", entry.CostUSD, "latency_ms", entry.LatencyMS,
+	}
+	if cache != "" {
+		logAttrs = append(logAttrs, "cache", string(cache))
 	}
 	if entry.ErrorMsg != "" {
 		slog.Error("request completed", append(logAttrs, "error", entry.ErrorMsg)...)

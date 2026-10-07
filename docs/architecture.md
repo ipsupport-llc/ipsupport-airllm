@@ -35,6 +35,7 @@ one listener.
 | `providers` | Provider registry; OpenAI-compatible HTTP/SSE client; the Vertex AI and Google Speech clients and their shared OAuth2 token source; concurrency semaphores |
 | `openai` / `anthropic` | Protocol codecs (parse, marshal, SSE) |
 | `llm` | Protocol-neutral intermediate representation |
+| `speechcache` | Synthesized clips in Redis, keyed by alias, serving provider, mapped voice and model, language, format and text |
 | `limits` | Redis rolling-window counters (check-before / increment-after, with an atomic token reservation closing the race between the two) |
 | `pricing` / `ledger` | Per-model pricing and the durable usage ledger |
 | `secrets` | AES-256-GCM sealing of provider credentials and capture bodies |
@@ -128,6 +129,10 @@ Schema migrations are embedded and applied automatically on boot, in order.
   a fallback tier served is pinned to that tier in Redis: its later requests
   start there and only ever move forward. See
   [Call affinity](configuration.md#call-affinity).
+- On an alias with the synthesis cache, a speech attempt asks the cache for
+  the clip its own target rendered before calling the provider, so the cache
+  never decides which tier speaks — it only spares a tier the call. See
+  [Synthesis cache](configuration.md#synthesis-cache).
 
 ## Hot-reload
 

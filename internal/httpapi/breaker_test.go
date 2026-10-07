@@ -743,3 +743,25 @@ func TestBreakerReplicasRacingForTheProbeLetOneThrough(t *testing.T) {
 		t.Errorf("upstream called %d times, want 3 failures and exactly one probe across both replicas", got)
 	}
 }
+
+func TestAVoiceATierCannotSpeakTellsTheBreakerNothing(t *testing.T) {
+	primary, backup := newVoiceUpstream(t, 24000), newVoiceUpstream(t, 22050)
+	clk := &testClock{t: time.Now()}
+	s := newCacheTestServer(t, clk, map[string]*voiceUpstream{"google": primary, "piper": backup})
+	s.breaker = s.newBreaker(nil, breaker.WithClock(clk.Now))
+	opts := breakerWith(routing.BreakerOptions{Failures: ms(2)})
+	opts.Voices = map[string]routing.VoiceChoice{"en-US-Neural2-A": {}}
+	plan := ttsPlan(
+		routing.Target{Provider: "google", UpstreamModel: "tts-1", Options: opts},
+		routing.Target{Provider: "piper", UpstreamModel: "tts-1"},
+	)
+
+	for i := range 3 {
+		if _, res := speak(t, s, plan, "Hola", "es_ES-davefx-medium"); res.Provider != "piper" {
+			t.Fatalf("request %d served by %s, want the backup for a voice the primary lacks", i, res.Provider)
+		}
+	}
+	if _, res := speak(t, s, plan, "Hello", "en-US-Neural2-A"); res.Provider != "google" {
+		t.Errorf("served by %s, want the primary: voices it lacks must not quarantine it", res.Provider)
+	}
+}

@@ -502,6 +502,7 @@ func (s *Server) handleAdminAliases(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.st.PG.Query(r.Context(), `
 		SELECT a.alias, a.protocol, a.strategy, a.dlp_model_scan, a.expose_backend_headers, a.dlp_audio_scan,
 			a.session_affinity, a.session_affinity_ttl_s,
+			a.synthesis_cache, a.synthesis_cache_ttl_s,
 			COALESCE(t.priority, 0), COALESCE(t.provider_name, ''),
 			COALESCE(t.upstream_model, ''), COALESCE(t.display_label, ''), COALESCE(t.options, '{}')
 		FROM model_aliases a
@@ -521,6 +522,8 @@ func (s *Server) handleAdminAliases(w http.ResponseWriter, r *http.Request) {
 		DLPAudioScan         bool          `json:"dlp_audio_scan"`
 		SessionAffinity      bool          `json:"session_affinity"`
 		SessionAffinityTTLS  int           `json:"session_affinity_ttl_s"`
+		SynthesisCache       bool          `json:"synthesis_cache"`
+		SynthesisCacheTTLS   int           `json:"synthesis_cache_ttl_s"`
 		Targets              []aliasTarget `json:"targets"`
 	}
 	byAlias := map[string]*aliasView{}
@@ -528,16 +531,17 @@ func (s *Server) handleAdminAliases(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var alias, protocol, strategy, provider, upModel, label string
 		var options []byte
-		var priority, affinityTTLS int
-		var dlpModelScan, exposeBackendHeaders, dlpAudioScan, sessionAffinity bool
-		if err := rows.Scan(&alias, &protocol, &strategy, &dlpModelScan, &exposeBackendHeaders, &dlpAudioScan, &sessionAffinity, &affinityTTLS, &priority, &provider, &upModel, &label, &options); err != nil {
+		var priority, affinityTTLS, synthesisCacheTTLS int
+		var dlpModelScan, exposeBackendHeaders, dlpAudioScan, sessionAffinity, synthesisCache bool
+		if err := rows.Scan(&alias, &protocol, &strategy, &dlpModelScan, &exposeBackendHeaders, &dlpAudioScan, &sessionAffinity, &affinityTTLS, &synthesisCache, &synthesisCacheTTLS, &priority, &provider, &upModel, &label, &options); err != nil {
 			writeControlError(w, http.StatusInternalServerError, "failed to read aliases")
 			return
 		}
 		av, ok := byAlias[alias]
 		if !ok {
 			av = &aliasView{Alias: alias, Protocol: protocol, Strategy: strategy, DLPModelScan: dlpModelScan, ExposeBackendHeaders: exposeBackendHeaders, DLPAudioScan: dlpAudioScan,
-				SessionAffinity: sessionAffinity, SessionAffinityTTLS: affinityTTLS, Targets: []aliasTarget{}}
+				SessionAffinity: sessionAffinity, SessionAffinityTTLS: affinityTTLS,
+				SynthesisCache: synthesisCache, SynthesisCacheTTLS: synthesisCacheTTLS, Targets: []aliasTarget{}}
 			byAlias[alias] = av
 			order = append(order, alias)
 		}
@@ -563,6 +567,8 @@ func (s *Server) handleAdminPutAlias(w http.ResponseWriter, r *http.Request) {
 		DLPAudioScan         *bool         `json:"dlp_audio_scan"`
 		SessionAffinity      bool          `json:"session_affinity"`
 		SessionAffinityTTLS  int           `json:"session_affinity_ttl_s"`
+		SynthesisCache       bool          `json:"synthesis_cache"`
+		SynthesisCacheTTLS   int           `json:"synthesis_cache_ttl_s"`
 		Targets              []aliasTarget `json:"targets"`
 	}
 	// Plain decoding, NOT the strict decodeJSON helper: that helper sets
@@ -593,6 +599,10 @@ func (s *Server) handleAdminPutAlias(w http.ResponseWriter, r *http.Request) {
 		writeControlError(w, http.StatusBadRequest, fmt.Sprintf("session_affinity_ttl_s must be between 0 (default) and %d", routing.MaxAffinityTTLSeconds))
 		return
 	}
+	if body.SynthesisCacheTTLS < 0 || body.SynthesisCacheTTLS > routing.MaxSynthesisCacheTTLSeconds {
+		writeControlError(w, http.StatusBadRequest, fmt.Sprintf("synthesis_cache_ttl_s must be between 0 (default) and %d", routing.MaxSynthesisCacheTTLSeconds))
+		return
+	}
 	for i, t := range body.Targets {
 		if _, err := routing.ParseTargetOptions(t.Options); err != nil {
 			writeControlError(w, http.StatusBadRequest, fmt.Sprintf("target %d (%s/%s): %v", i, t.Provider, t.UpstreamModel, err))
@@ -611,11 +621,12 @@ func (s *Server) handleAdminPutAlias(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 
 	if _, err := tx.Exec(r.Context(), `
-		INSERT INTO model_aliases (alias, protocol, strategy, dlp_model_scan, expose_backend_headers, dlp_audio_scan, session_affinity, session_affinity_ttl_s)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO model_aliases (alias, protocol, strategy, dlp_model_scan, expose_backend_headers, dlp_audio_scan, session_affinity, session_affinity_ttl_s, synthesis_cache, synthesis_cache_ttl_s)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT (alias) DO UPDATE SET protocol = EXCLUDED.protocol, strategy = EXCLUDED.strategy, dlp_model_scan = EXCLUDED.dlp_model_scan, expose_backend_headers = EXCLUDED.expose_backend_headers, dlp_audio_scan = EXCLUDED.dlp_audio_scan,
-			session_affinity = EXCLUDED.session_affinity, session_affinity_ttl_s = EXCLUDED.session_affinity_ttl_s`,
-		alias, body.Protocol, body.Strategy, scan, body.ExposeBackendHeaders, audioScan, body.SessionAffinity, body.SessionAffinityTTLS); err != nil {
+			session_affinity = EXCLUDED.session_affinity, session_affinity_ttl_s = EXCLUDED.session_affinity_ttl_s,
+			synthesis_cache = EXCLUDED.synthesis_cache, synthesis_cache_ttl_s = EXCLUDED.synthesis_cache_ttl_s`,
+		alias, body.Protocol, body.Strategy, scan, body.ExposeBackendHeaders, audioScan, body.SessionAffinity, body.SessionAffinityTTLS, body.SynthesisCache, body.SynthesisCacheTTLS); err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to save alias")
 		return
 	}
