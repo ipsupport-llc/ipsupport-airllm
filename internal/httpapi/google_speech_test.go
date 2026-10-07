@@ -243,6 +243,25 @@ func TestATierSilentOnLanguageReportsTheRequestedOne(t *testing.T) {
 	}
 }
 
+// A Whisper tier that detects one of the request's alternatives reports it
+// in the form the request named it, as Google would, so the language keeps
+// its form whichever pool or tier served.
+func TestAWhisperTierDetectingAnAlternativeReportsItsRequestedTag(t *testing.T) {
+	whisper, _ := fakeWhisper(t, `{"text":"hola","language":"spanish","duration":1}`)
+	s := newRunChatTestServer(t, providers.NewOpenAICompat("whisper", "groq", whisper.URL, ""))
+	plan := googleSpeechPlan(routing.Target{Provider: "whisper", UpstreamModel: "whisper-large-v3"})
+
+	tr, _, err := s.runTranscribe(context.Background(), plan, audio.TranscriptionRequest{
+		Audio: []byte("wav"), Language: "en-US", AlternativeLanguages: []string{"es-ES"},
+	})
+	if err != nil {
+		t.Fatalf("runTranscribe: %v", err)
+	}
+	if tr.Text != "hola" || tr.Language != "es-ES" {
+		t.Errorf("text=%q language=%q, want the Spanish transcript in the requested es-ES", tr.Text, tr.Language)
+	}
+}
+
 func TestGoogleSpeechDropsPunctuationARecognizerRejects(t *testing.T) {
 	up, calls := fakeGoogleSpeech(t, func(c speechCall) (int, string) {
 		if c.body.Config.Features.EnableAutomaticPunctuation {

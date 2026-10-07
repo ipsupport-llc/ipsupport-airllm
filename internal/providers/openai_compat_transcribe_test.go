@@ -83,22 +83,23 @@ func TestOpenAICompatTranscribeJoinsSegmentsAsSpoken(t *testing.T) {
 	}
 }
 
-// fakeWhisper answers each transcription with the language the request
-// forced, or with detected when it forced none, and records the language
-// field of every request it saw ("" for none).
-func fakeWhisper(t *testing.T, detected string, forcedLanguages *[]string) *httptest.Server {
+// fakeWhisper answers each transcription in the language the request
+// forced, or in detectedName — a Whisper language name such as "spanish" —
+// when it forced none, and records the language field of every request it
+// saw ("" for none) in sent.
+func fakeWhisper(t *testing.T, detectedName string, sent *[]string) *httptest.Server {
 	t.Helper()
 	names := map[string]string{"en": "english", "es": "spanish", "pt": "portuguese"}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseMultipartForm(1 << 20); err != nil {
 			t.Fatalf("server: ParseMultipartForm: %v", err)
 		}
-		lang, sent := "", r.MultipartForm.Value["language"]
-		if len(sent) > 0 {
-			lang = sent[0]
+		lang := ""
+		if v := r.MultipartForm.Value["language"]; len(v) > 0 {
+			lang = v[0]
 		}
-		*forcedLanguages = append(*forcedLanguages, lang)
-		name := detected
+		*sent = append(*sent, lang)
+		name := detectedName
 		if lang != "" {
 			name = names[lang]
 		}
@@ -112,8 +113,8 @@ func fakeWhisper(t *testing.T, detected string, forcedLanguages *[]string) *http
 // the primary. It detects instead, and a detection among the request's
 // languages is the answer.
 func TestOpenAICompatTranscribeWithAlternativesDetects(t *testing.T) {
-	var forced []string
-	ts := fakeWhisper(t, "spanish", &forced)
+	var sent []string
+	ts := fakeWhisper(t, "spanish", &sent)
 	defer ts.Close()
 
 	p := NewOpenAICompat("up", "openai", ts.URL, "")
@@ -124,8 +125,8 @@ func TestOpenAICompatTranscribeWithAlternativesDetects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Transcribe: %v", err)
 	}
-	if len(forced) != 1 || forced[0] != "" {
-		t.Fatalf("upstream language fields = %q, want one request with none", forced)
+	if len(sent) != 1 || sent[0] != "" {
+		t.Fatalf("upstream language fields = %q, want one request with none", sent)
 	}
 	if resp.Text != "heard as spanish" || resp.Language != "es" {
 		t.Errorf("got %q in %q, want the detected Spanish transcript", resp.Text, resp.Language)
@@ -136,8 +137,8 @@ func TestOpenAICompatTranscribeWithAlternativesDetects(t *testing.T) {
 // Portuguese — must not leak a third language into the call: the audio is
 // decoded once more with the primary forced, and that is the answer.
 func TestOpenAICompatTranscribeStrayDetectionForcesPrimary(t *testing.T) {
-	var forced []string
-	ts := fakeWhisper(t, "portuguese", &forced)
+	var sent []string
+	ts := fakeWhisper(t, "portuguese", &sent)
 	defer ts.Close()
 
 	p := NewOpenAICompat("up", "openai", ts.URL, "")
@@ -148,11 +149,32 @@ func TestOpenAICompatTranscribeStrayDetectionForcesPrimary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Transcribe: %v", err)
 	}
-	if len(forced) != 2 || forced[0] != "" || forced[1] != "en" {
-		t.Fatalf("upstream language fields = %q, want detection then en forced", forced)
+	if len(sent) != 2 || sent[0] != "" || sent[1] != "en" {
+		t.Fatalf("upstream language fields = %q, want detection then en forced", sent)
 	}
 	if resp.Text != "heard as english" || resp.Language != "en" {
 		t.Errorf("got %q in %q, want the forced English transcript", resp.Text, resp.Language)
+	}
+}
+
+// An upstream that names no language, or one this gateway cannot read, says
+// nothing about whether it heard a requested language, so the primary is
+// forced as for a stray detection.
+func TestOpenAICompatTranscribeUnknownDetectionForcesPrimary(t *testing.T) {
+	var sent []string
+	ts := fakeWhisper(t, "", &sent)
+	defer ts.Close()
+
+	p := NewOpenAICompat("up", "openai", ts.URL, "")
+	resp, err := p.Transcribe(context.Background(), audio.TranscriptionRequest{
+		Model: "whisper", Audio: []byte("x"), Filename: "a.wav",
+		Language: "en-US", AlternativeLanguages: []string{"es-ES"},
+	})
+	if err != nil {
+		t.Fatalf("Transcribe: %v", err)
+	}
+	if len(sent) != 2 || sent[1] != "en" || resp.Language != "en" {
+		t.Errorf("upstream language fields = %q, answer in %q; want en forced after a silent detection", sent, resp.Language)
 	}
 }
 
@@ -160,18 +182,21 @@ func TestOpenAICompatTranscribeStrayDetectionForcesPrimary(t *testing.T) {
 // the bare form Whisper accepts, and no language means detection.
 func TestOpenAICompatTranscribeWithoutAlternatives(t *testing.T) {
 	for _, tc := range []struct{ language, want string }{{"en-US", "en"}, {"", ""}} {
-		var forced []string
-		ts := fakeWhisper(t, "spanish", &forced)
-		p := NewOpenAICompat("up", "openai", ts.URL, "")
-		if _, err := p.Transcribe(context.Background(), audio.TranscriptionRequest{
-			Model: "whisper", Audio: []byte("x"), Filename: "a.wav", Language: tc.language,
-		}); err != nil {
-			t.Fatalf("Transcribe(%q): %v", tc.language, err)
-		}
-		ts.Close()
-		if len(forced) != 1 || forced[0] != tc.want {
-			t.Errorf("language %q: upstream language fields = %q, want one request with %q", tc.language, forced, tc.want)
-		}
+		t.Run("language="+tc.language, func(t *testing.T) {
+			var sent []string
+			ts := fakeWhisper(t, "spanish", &sent)
+			defer ts.Close()
+
+			p := NewOpenAICompat("up", "openai", ts.URL, "")
+			if _, err := p.Transcribe(context.Background(), audio.TranscriptionRequest{
+				Model: "whisper", Audio: []byte("x"), Filename: "a.wav", Language: tc.language,
+			}); err != nil {
+				t.Fatalf("Transcribe: %v", err)
+			}
+			if len(sent) != 1 || sent[0] != tc.want {
+				t.Errorf("upstream language fields = %q, want one request with %q", sent, tc.want)
+			}
+		})
 	}
 }
 
