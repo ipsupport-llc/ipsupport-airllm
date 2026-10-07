@@ -22,8 +22,8 @@ config:                                         # non-secret env (rendered into 
   authMode: local                               # local | oidc
   adminUsername: admin
   captureBlobDir: /var/lib/airllm/captures
-  # Every replica keeps providers and a few settings in memory; a save through the
-  # admin console reaches the OTHER replicas on their next refresh.
+  # Every replica keeps providers, prices and a few settings in memory; a save
+  # through the admin console reaches the OTHER replicas on their next refresh.
   configRefreshInterval: 10s
   # On SIGTERM the pod keeps accepting requests for shutdownDrain (the load balancer
   # needs a moment to stop routing to it), then gives in-flight requests — streams

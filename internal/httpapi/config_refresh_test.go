@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -101,6 +102,63 @@ func TestLocalProviderSaveDoesNotTriggerASecondRebuild(t *testing.T) {
 	f.srv.RefreshConfig(ctx)
 	if f.srv.reg() != before {
 		t.Error("the refresh after a local provider save rebuilt the registry again")
+	}
+}
+
+func TestPriceSavedOnAnotherReplicaCostsAfterRefresh(t *testing.T) {
+	f := newCacheFixture(t, nil)
+	other := pricingServer(t, f.direct) // the replica whose admin API takes the PUT and the import
+	ctx := context.Background()
+	provider := fmt.Sprintf("refresh-price-%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		bg := context.Background()
+		_, _ = f.direct.Exec(bg, `DELETE FROM pricing WHERE provider = $1`, provider)
+		_, _ = f.direct.Exec(bg, `DELETE FROM pricing WHERE provider = 'mock' AND model = 'mock-gpt'`)
+	})
+	cost := func() int64 { return f.srv.pricing.AudioCostMicroUSD(provider, "stt", 1_000_000) }
+
+	f.srv.RefreshConfig(ctx)
+	wantStatus(t, putPrice(t, other, "stt", fmt.Sprintf(`{"provider":%q,"unit":"audio_second","input_per_1m":1}`, provider)), http.StatusOK, "new price")
+	if got := cost(); got != 0 {
+		t.Fatalf("new price applied before any refresh: %d", got)
+	}
+	f.srv.RefreshConfig(ctx)
+	if got := cost(); got != 1_000_000 {
+		t.Errorf("new price after refresh = %d, want 1000000", got)
+	}
+
+	wantStatus(t, putPrice(t, other, "stt", fmt.Sprintf(`{"provider":%q,"unit":"audio_second","input_per_1m":3}`, provider)), http.StatusOK, "changed price")
+	f.srv.RefreshConfig(ctx)
+	if got := cost(); got != 3_000_000 {
+		t.Errorf("changed price after refresh = %d, want 3000000", got)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/pricing/import/mock", nil)
+	rw := httptest.NewRecorder()
+	other.mux.ServeHTTP(rw, req)
+	wantStatus(t, rw, http.StatusOK, "import")
+	f.srv.RefreshConfig(ctx)
+	if got := f.srv.pricing.CostMicroUSD("mock", "mock-gpt", 1_000_000, 1_000_000); got != 3_000_000 {
+		t.Errorf("imported price after refresh = %d, want 3000000", got)
+	}
+}
+
+func TestRefreshKeepsThePricesWhileTheDatabaseIsDown(t *testing.T) {
+	f := newCacheFixture(t, nil)
+	ctx := context.Background()
+	provider := fmt.Sprintf("refresh-price-%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		_, _ = f.direct.Exec(context.Background(), `DELETE FROM pricing WHERE provider = $1`, provider)
+	})
+	if _, err := f.direct.Exec(ctx, `INSERT INTO pricing (provider, model, input_per_1m, output_per_1m) VALUES ($1, 'm', 1, 2)`, provider); err != nil {
+		t.Fatalf("insert price: %v", err)
+	}
+	f.srv.RefreshConfig(ctx)
+
+	f.proxy.cut()
+	f.srv.RefreshConfig(ctx)
+	if got := f.srv.pricing.CostMicroUSD(provider, "m", 1_000_000, 1_000_000); got != 3_000_000 {
+		t.Errorf("price after a refresh during an outage = %d, want 3000000 kept", got)
 	}
 }
 

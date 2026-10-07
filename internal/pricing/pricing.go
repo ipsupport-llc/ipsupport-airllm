@@ -5,6 +5,8 @@ package pricing
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
@@ -87,6 +89,7 @@ func (p Price) Validate() error {
 type Table struct {
 	mu     sync.RWMutex
 	prices map[string]Price
+	fp     [sha256.Size]byte // fingerprint of the rows last installed by Replace
 }
 
 // New returns an empty table.
@@ -98,25 +101,96 @@ func key(provider, model string) string {
 	return provider + "\x00" + model
 }
 
-// Load builds a Table from the pricing rows in the store.
-func Load(ctx context.Context, st *store.Store) (*Table, error) {
-	t := New()
+// Row is one stored price: provider "" is the wildcard row.
+type Row struct {
+	Provider string
+	Model    string
+	Price    Price
+}
+
+// ReadRows reads every pricing row, ordered so that equal tables read equal
+// slices.
+func ReadRows(ctx context.Context, st *store.Store) ([]Row, error) {
 	rows, err := st.PG.Query(ctx, `SELECT provider, model, input_per_1m, output_per_1m, unit,
-		context_threshold, input_per_1m_above, output_per_1m_above FROM pricing`)
+		context_threshold, input_per_1m_above, output_per_1m_above FROM pricing ORDER BY provider, model`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+	var out []Row
 	for rows.Next() {
-		var provider, model string
-		var p Price
-		if err := rows.Scan(&provider, &model, &p.InputPer1M, &p.OutputPer1M, &p.Unit,
+		var r Row
+		p := &r.Price
+		if err := rows.Scan(&r.Provider, &r.Model, &p.InputPer1M, &p.OutputPer1M, &p.Unit,
 			&p.ContextThreshold, &p.InputPer1MAbove, &p.OutputPer1MAbove); err != nil {
 			return nil, err
 		}
-		t.prices[key(provider, model)] = p
+		out = append(out, r)
 	}
-	return t, rows.Err()
+	return out, rows.Err()
+}
+
+// Load builds a Table from the pricing rows in the store.
+func Load(ctx context.Context, st *store.Store) (*Table, error) {
+	rows, err := ReadRows(ctx, st)
+	if err != nil {
+		return nil, err
+	}
+	t := New()
+	t.Replace(rows)
+	return t, nil
+}
+
+// Replace installs rows as the whole table, dropping any price not among
+// them, and reports whether it did. Rows equal to the ones the last Replace
+// installed leave the table alone, so a caller polling the store rebuilds it
+// only when a price changed. A Set since then does not count: the row it
+// mirrors was written to the store too, so the next poll differs anyway.
+func (t *Table) Replace(rows []Row) bool {
+	fp := fingerprint(rows)
+	t.mu.RLock()
+	same := fp == t.fp
+	t.mu.RUnlock()
+	if same {
+		return false
+	}
+	prices := make(map[string]Price, len(rows))
+	for _, r := range rows {
+		prices[key(r.Provider, r.Model)] = r.Price
+	}
+	t.mu.Lock()
+	t.prices, t.fp = prices, fp
+	t.mu.Unlock()
+	return true
+}
+
+// fingerprint identifies a list of rows: equal lists build equal tables.
+func fingerprint(rows []Row) [sha256.Size]byte {
+	h := sha256.New()
+	str := func(s string) {
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(s)))
+		h.Write(n[:])
+		h.Write([]byte(s))
+	}
+	num := func(v uint64) {
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], v)
+		h.Write(n[:])
+	}
+	for _, r := range rows {
+		str(r.Provider)
+		str(r.Model)
+		str(r.Price.Unit)
+		num(math.Float64bits(r.Price.InputPer1M))
+		num(math.Float64bits(r.Price.OutputPer1M))
+		num(uint64(r.Price.ContextThreshold))
+		num(math.Float64bits(r.Price.InputPer1MAbove))
+		num(math.Float64bits(r.Price.OutputPer1MAbove))
+	}
+	var out [sha256.Size]byte
+	h.Sum(out[:0])
+	return out
 }
 
 // Set replaces the price for a provider+model pair (used by admin updates).

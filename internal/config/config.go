@@ -52,8 +52,8 @@ type Config struct {
 	LookupCacheTTL      time.Duration
 	LookupCacheMaxStale time.Duration
 
-	// ConfigRefreshInterval is how often the provider registry and the
-	// in-memory settings are re-read from the database — the longest a save
+	// ConfigRefreshInterval is how often the provider registry, the price
+	// table and the in-memory settings are re-read from the database — the longest a save
 	// made through another replica's admin API takes to apply here.
 	ConfigRefreshInterval time.Duration
 

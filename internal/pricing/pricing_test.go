@@ -193,3 +193,44 @@ func TestPriceValidate(t *testing.T) {
 		}
 	}
 }
+
+func TestReplaceSwapsInTheRowsAndDropsTheOldOnes(t *testing.T) {
+	tab := New()
+	tab.Set("old", "gone", Price{InputPer1M: 1})
+	if !tab.Replace([]Row{{Provider: "p", Model: "m", Price: Price{InputPer1M: 1, OutputPer1M: 2}}}) {
+		t.Fatal("Replace with new rows reported no change")
+	}
+	if got := tab.CostMicroUSD("p", "m", 1_000_000, 1_000_000); got != 3_000_000 {
+		t.Errorf("replaced row = %d, want 3000000", got)
+	}
+	if got := tab.CostMicroUSD("old", "gone", 1_000_000, 0); got != 0 {
+		t.Errorf("a row absent from the replacement still prices at %d", got)
+	}
+}
+
+func TestReplaceWithTheSameRowsIsANoOp(t *testing.T) {
+	rows := []Row{
+		{Provider: "", Model: "m", Price: Price{InputPer1M: 1, Unit: UnitTokens}},
+		{Provider: "p", Model: "m", Price: Price{InputPer1M: 2, Unit: UnitAudioSecond}},
+	}
+	tab := New()
+	tab.Replace(rows)
+	if tab.Replace(append([]Row(nil), rows...)) {
+		t.Error("Replace with the rows already installed rebuilt the table")
+	}
+	for _, changed := range []Row{
+		{Provider: "p", Model: "m", Price: Price{InputPer1M: 2.5, Unit: UnitAudioSecond}},
+		{Provider: "p", Model: "m", Price: Price{InputPer1M: 2, Unit: UnitTextChar}},
+		{Provider: "p", Model: "m", Price: Price{InputPer1M: 2, Unit: UnitAudioSecond, ContextThreshold: 1}},
+		{Provider: "q", Model: "m", Price: Price{InputPer1M: 2, Unit: UnitAudioSecond}},
+	} {
+		next := []Row{rows[0], changed}
+		if !tab.Replace(next) {
+			t.Errorf("Replace with %+v reported no change", changed)
+		}
+		tab.Replace(rows)
+	}
+	if !tab.Replace(rows[:1]) {
+		t.Error("Replace with a row removed reported no change")
+	}
+}
