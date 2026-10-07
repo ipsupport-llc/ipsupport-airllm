@@ -196,8 +196,8 @@ Every failed attempt logs a `tier attempt failed` line with `alias`, `tier`
 `provider_auth`, `model_not_found`, `rate_limited`, `http_<status>`, …),
 `latency_ms` and, when the client sent one, `session` (the `X-Session-Id`
 request header). The usage ledger records the serving `tier` (again the
-configured priority, so it stays meaningful when another tier is disabled) and
-the number of upstream `attempts` per request.
+configured priority, so it stays meaningful when another tier is disabled),
+the number of upstream `attempts` and the client `session` per request.
 
 #### Circuit breaker
 
@@ -311,6 +311,45 @@ Logs `target marked unavailable` with `provider`, `upstream_model`,
 `duration_ms` and `source` (`retry_after` or `default_backoff`). A skipped
 attempt counts in the `tier attempt failed` / fallback bookkeeping with
 reason `unavailable`, the same as a `quarantined` breaker skip.
+
+#### Call affinity
+
+A client that ties its requests together with the `X-Session-Id` header — a
+voice agent sending the call's id on every turn — can be kept on the tier that
+took over when the primary failed, so the call does not switch voice again
+when the primary recovers.
+
+Once a request of a session is served by any tier after the alias's first, the
+gateway pins the session to that tier (the configured priority) in Redis. The
+session's later requests start at the pinned tier: earlier tiers are not
+tried, even after they recover or their breaker closes. A pinned tier that
+fails still falls through to the next one, and the pin moves forward with it;
+it never moves back. Every request the pinned tier serves renews the pin, which
+expires `session_affinity_ttl_s` after the session's last such request. A new
+session starts at the first tier. A pin to a tier the alias no longer has —
+it and every later tier were removed or disabled — is dropped, and the
+session starts over at the first tier.
+
+Affinity is set per alias, and off by default: without it, or for a request
+without the header, routing is exactly as before. It applies to chat (unary
+and streamed, both ingress protocols), transcription and speech.
+
+| Alias field | Default | Meaning |
+|-------------|---------|---------|
+| `session_affinity` | `false` | Pin sessions to the fallback tier that served them. |
+| `session_affinity_ttl_s` | `0` | Pin lifetime after the session's last request on the pinned tier; `0` is 4 hours, at most 604800 (one week). |
+
+Pins are shared by every replica through Redis (key
+`air:affinity:<alias>:<sha256 of the session>`). Each replica also keeps
+the pins it wrote itself, so its sessions stay pinned through a Redis outage.
+A session moving to a new tier logs `session pinned to tier` with `alias`,
+`session`, `tier` and `ttl_s`. Every request of a call can be listed from the
+usage ledger:
+
+```sql
+SELECT ts, alias, tier, attempts, provider_name, status
+FROM usage_ledger WHERE session = 'call-42' ORDER BY ts;
+```
 
 ## Provider kinds
 

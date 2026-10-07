@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -138,6 +139,22 @@ func ParseTargetOptions(raw []byte) (TargetOptions, error) {
 	return o, nil
 }
 
+// DefaultAffinityTTL is how long a session stays pinned to a backup tier
+// when the alias does not set its own TTL: longer than any phone call.
+const DefaultAffinityTTL = 4 * time.Hour
+
+// MaxAffinityTTLSeconds bounds an alias's own session pin TTL (one week).
+const MaxAffinityTTLSeconds = 7 * 24 * 3600
+
+// AffinityTTL is the pin TTL an alias's stored session_affinity_ttl_s means:
+// 0 (unset) is DefaultAffinityTTL.
+func AffinityTTL(seconds int) time.Duration {
+	if seconds <= 0 {
+		return DefaultAffinityTTL
+	}
+	return time.Duration(seconds) * time.Second
+}
+
 // ErrModelNotFound is what Resolve's error wraps when the requested model
 // is not an alias.
 var ErrModelNotFound = errors.New("model not found")
@@ -156,6 +173,11 @@ type Plan struct {
 	ExposeBackendHeaders bool       // set X-Backend-Provider/-Model on the response
 	DLPAudioScan         bool       // run layer-1 DLP scanning on audio text for this alias
 	Tiers                [][]Target // index 0 = highest priority (tried first)
+	// SessionAffinity keeps a client session that a backup tier served on
+	// that tier for its later requests; SessionAffinityTTL is how long the
+	// pin lasts after the session's last request served there.
+	SessionAffinity    bool
+	SessionAffinityTTL time.Duration
 }
 
 // Ordered flattens the tiers into the try-order for one request: tier by tier,
@@ -248,8 +270,11 @@ func (r *Router) Resolve(ctx context.Context, model string, allowPassthrough boo
 // resolveAlias expands an alias from the catalog into priority tiers.
 func (r *Router) resolveAlias(ctx context.Context, model string) (*Plan, error) {
 	var strategy string
-	var dlpModelScan, exposeBackendHeaders, dlpAudioScan bool
-	err := r.st.PG.QueryRow(ctx, `SELECT strategy, dlp_model_scan, expose_backend_headers, dlp_audio_scan FROM model_aliases WHERE alias = $1`, model).Scan(&strategy, &dlpModelScan, &exposeBackendHeaders, &dlpAudioScan)
+	var dlpModelScan, exposeBackendHeaders, dlpAudioScan, sessionAffinity bool
+	var affinityTTLSeconds int
+	err := r.st.PG.QueryRow(ctx, `
+		SELECT strategy, dlp_model_scan, expose_backend_headers, dlp_audio_scan, session_affinity, session_affinity_ttl_s
+		FROM model_aliases WHERE alias = $1`, model).Scan(&strategy, &dlpModelScan, &exposeBackendHeaders, &dlpAudioScan, &sessionAffinity, &affinityTTLSeconds)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, lookupcache.Miss(modelNotFoundError{model})
@@ -308,7 +333,10 @@ func (r *Router) resolveAlias(ctx context.Context, model string) (*Plan, error) 
 	if len(tiers) == 0 {
 		return nil, lookupcache.Miss(fmt.Errorf("model %q has no available targets", model))
 	}
-	return &Plan{Alias: model, Strategy: strategy, DLPModelScan: dlpModelScan, ExposeBackendHeaders: exposeBackendHeaders, DLPAudioScan: dlpAudioScan, Tiers: tiers}, nil
+	return &Plan{
+		Alias: model, Strategy: strategy, DLPModelScan: dlpModelScan, ExposeBackendHeaders: exposeBackendHeaders, DLPAudioScan: dlpAudioScan,
+		SessionAffinity: sessionAffinity, SessionAffinityTTL: AffinityTTL(affinityTTLSeconds), Tiers: tiers,
+	}, nil
 }
 
 func (r *Router) passthroughTarget(ctx context.Context, provider, upstreamModel string) (Target, error) {

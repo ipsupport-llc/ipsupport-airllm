@@ -198,11 +198,13 @@ func runAttempt(ctx context.Context, provider string, budget time.Duration, call
 }
 
 // execResult is what executing a plan did: the target that served the
-// request (or, on failure, the last one attempted) and how many upstream
-// calls it took. Both go to the usage ledger.
+// request (or, on failure, the last one attempted), how many upstream calls
+// it took and the client session it belonged to. All go to the usage ledger.
 type execResult struct {
 	routing.Target
 	Attempts int
+	// Session is the request's client session header, or "".
+	Session string
 }
 
 // attemptCall makes one upstream call to target t through provider p. commit
@@ -222,6 +224,9 @@ type attemptCall func(ctx context.Context, p providers.Provider, t routing.Targe
 // only targets left were in open tiers the request fails fast with
 // errAllQuarantined.
 //
+// On an alias with session affinity, a session that a backup tier served
+// starts at that tier: earlier tiers are not tried, later ones still are.
+//
 // started reports that a streaming call committed output, after which no
 // error can be recovered by another target. A cancellation of ctx itself —
 // the client went away — is never a target failure: it ends the request
@@ -230,6 +235,8 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 	reg := s.reg()
 	free := s.freeFunc(reg)
 	session := clientSessionFrom(ctx)
+	res.Session = session
+	floor, pinned := s.sessionFloor(ctx, plan, session)
 	var lastErr error
 	// skipErr is why a target was skipped as unable to serve the call. It
 	// is the answer only when nothing else happened: a capable target that
@@ -254,12 +261,18 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 			served = &res.Tier
 		}
 		s.recordTierFallbacks(plan.Alias, moved, served)
+		if err == nil || started {
+			s.pinSession(ctx, plan, session, res.Tier)
+		}
 	}()
 
 	sawBusy := false
 	for retry := 0; retry <= busyRetries; retry++ {
 		anyBusy := false
 		for _, t := range plan.Ordered(s.router.NextRR(plan.Alias), free) {
+			if pinned && t.Tier < floor {
+				continue
+			}
 			res.Target = t
 			e, ok := reg.Get(t.Provider)
 			if !ok {

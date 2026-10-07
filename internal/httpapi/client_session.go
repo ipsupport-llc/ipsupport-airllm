@@ -7,7 +7,8 @@ import (
 
 // clientSessionHeader is the optional request header a client uses to tie
 // its requests together (e.g. every turn of one phone call). The gateway
-// only logs it today.
+// logs it, records it in the usage ledger and, on an alias with session
+// affinity, keeps the session on the tier a fallback moved it to.
 const clientSessionHeader = "X-Session-Id"
 
 // maxClientSessionLen bounds what a client can make the gateway log.

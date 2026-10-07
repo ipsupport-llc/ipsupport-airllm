@@ -117,3 +117,29 @@ func TestTierAndAttemptsArePersisted(t *testing.T) {
 		t.Errorf("tier=%d attempts=%d, want 2 and 3", tier, attempts)
 	}
 }
+
+// TestSessionIsPersisted proves the client session reaches the usage row, so
+// every request of one call can be listed together, and that a request
+// without one stores NULL.
+func TestSessionIsPersisted(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	const provider = "ledger-test-session"
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM usage_ledger WHERE provider_name = $1`, provider)
+	})
+	l := New(&store.Store{PG: pool})
+	l.Start()
+	l.Record(ctx, Entry{ProviderName: provider, Alias: "voice-reply", Status: 200, Session: "call-42"})
+	l.Record(ctx, Entry{ProviderName: provider, Alias: "voice-reply", Status: 200, Session: "call-42"})
+	l.Record(ctx, Entry{ProviderName: provider, Alias: "voice-reply", Status: 200})
+	l.Stop()
+
+	var inCall, without int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE session = 'call-42'), count(*) FILTER (WHERE session IS NULL) FROM usage_ledger WHERE provider_name = $1`, provider).Scan(&inCall, &without); err != nil {
+		t.Fatalf("read rows: %v", err)
+	}
+	if inCall != 2 || without != 1 {
+		t.Errorf("rows in call-42 = %d, without a session = %d; want 2 and 1", inCall, without)
+	}
+}

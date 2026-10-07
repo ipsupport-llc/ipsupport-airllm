@@ -71,7 +71,10 @@ than failing.
 
 A client may send an `X-Session-Id` header (up to 128 characters) to tie its
 requests together, e.g. every turn of one phone call. The gateway logs it on
-each failed target attempt so one session's failovers can be traced.
+each failed target attempt and records it in the usage ledger's `session`
+column, so one session's requests and failovers can be traced together. On an
+alias with session affinity on, it also keeps a session that a fallback tier
+served on that tier — see [Call affinity](configuration.md#call-affinity).
 
 ### Reasoning tokens
 
@@ -127,7 +130,7 @@ to it — adding the two double-counts. Operators see the same split as
 | `GET` | `/api/admin/usage` | Usage across all keys |
 | `GET` | `/api/admin/usage/breakdown` | Usage across all keys grouped by provider and by model over the last `hours` (default 24, max 168). Returns `{"providers":[...],"models":[...]}`; each row carries `tokens_in`, `tokens_out` and `tokens_reasoning` — see [Reasoning tokens](#reasoning-tokens) |
 | `GET`/`PUT` | `/api/admin/roles` · `/api/admin/roles/{role}` | Role policies (allowed models, passthrough, limits) |
-| `GET`/`PUT`/`DELETE` | `/api/admin/aliases` · `/api/admin/aliases/{alias}` | Model alias catalog (targets, strategy, fallback tiers). Each target carries a free-form `options` object (`timeout_ms`, `fallback_on_auth`, `breaker`, `thinking`, …) — see [Failover policy](configuration.md#failover-policy-getput-apiadminfailover) |
+| `GET`/`PUT`/`DELETE` | `/api/admin/aliases` · `/api/admin/aliases/{alias}` | Model alias catalog (targets, strategy, fallback tiers). Each target carries a free-form `options` object (`timeout_ms`, `fallback_on_auth`, `breaker`, `thinking`, …) — see [Failover policy](configuration.md#failover-policy-getput-apiadminfailover). The alias itself carries `session_affinity` (default `false`) and `session_affinity_ttl_s` (`0` = the 4-hour default, at most 604800) — see [Call affinity](configuration.md#call-affinity) |
 | `GET` | `/api/admin/aliases/{alias}/health` | Circuit breaker of every tier of the alias: `state` (`closed`/`open`/`half_open`), `reason`, `open_until`, `cooldown_ms`, `trips`, failure counters and the tier's targets — see [Circuit breaker](configuration.md#circuit-breaker) |
 | `POST` | `/api/admin/aliases/{alias}/tiers/{tier}/release` | Close a quarantined tier by hand (`tier` = its configured priority) and forget its trip history; audited as `alias.tier.release` |
 | `GET`/`PUT` | `/api/admin/providers` · `/api/admin/providers/{name}` | Providers (kind, base URL, structured `config`, sealed credential, max concurrency, enabled). See [Provider fields](#provider-fields) below and [Provider kinds](configuration.md#provider-kinds). |
