@@ -278,13 +278,25 @@ func (p *OpenAICompat) Transcribe(ctx context.Context, in audio.TranscriptionReq
 		Language string  `json:"language"`
 		Duration float64 `json:"duration"`
 		Segments []struct {
+			Text       string  `json:"text"`
 			AvgLogprob float64 `json:"avg_logprob"`
 		} `json:"segments"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&w); err != nil {
 		return audio.TranscriptionResponse{}, err
 	}
-	out := audio.TranscriptionResponse{Text: w.Text, Language: audio.LanguageFromName(w.Language), DurationSeconds: w.Duration}
+	// The transcript is the segments' texts run together: each carries its
+	// own leading space, while whisper.cpp's server joins them with newlines
+	// in the verbose text even where a segment ends mid-word.
+	var spoken strings.Builder
+	for _, seg := range w.Segments {
+		spoken.WriteString(seg.Text)
+	}
+	text := w.Text
+	if spoken.Len() > 0 {
+		text = spoken.String()
+	}
+	out := audio.TranscriptionResponse{Text: strings.TrimSpace(text), Language: audio.LanguageFromName(w.Language), DurationSeconds: w.Duration}
 	// The Whisper family reports no confidence, only each segment's mean
 	// token log-probability (-∞..0). Its mean maps onto 0..1 as 1 + lp/5,
 	// clamped — the same heuristic the in-process Whisper recognisers use,
