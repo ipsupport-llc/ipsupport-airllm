@@ -62,6 +62,27 @@ func TestOpenAICompatTranscribe(t *testing.T) {
 	}
 }
 
+// whisper.cpp's server joins its segments' texts with newlines in the
+// verbose text, and a segment can end mid-word. The segments carry their own
+// leading spaces, so the transcript is their plain concatenation.
+func TestOpenAICompatTranscribeJoinsSegmentsAsSpoken(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"text":" Я хотел бы узнать, чем занимается ваша комп\nания.\n","language":"russian","duration":4.6,
+			"segments":[{"text":" Я хотел бы узнать, чем занимается ваша комп","avg_logprob":-0.1},{"text":"ания.","avg_logprob":-0.1}]}`))
+	}))
+	defer ts.Close()
+
+	p := NewOpenAICompat("up", "openai", ts.URL, "")
+	resp, err := p.Transcribe(context.Background(), audio.TranscriptionRequest{Model: "whisper", Audio: []byte("x"), Filename: "a.wav"})
+	if err != nil {
+		t.Fatalf("Transcribe: %v", err)
+	}
+	if want := "Я хотел бы узнать, чем занимается ваша компания."; resp.Text != want {
+		t.Errorf("Text = %q, want %q", resp.Text, want)
+	}
+}
+
 func TestOpenAICompatTranscribeNon200(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"bad file"}`, http.StatusBadRequest)
