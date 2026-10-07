@@ -397,6 +397,18 @@ func TestReadyThroughABriefDatabaseOutage(t *testing.T) {
 	}
 }
 
+func TestNotReadyWhileDrainingButStillServing(t *testing.T) {
+	f := newCacheFixture(t, nil)
+	f.startLedger(t)
+	f.srv.SetDraining()
+	rec := httptest.NewRecorder()
+	f.srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("readyz while draining = %d, want 503", rec.Code)
+	}
+	wantStatus(t, f.chat(t, f.token), http.StatusOK, "request while draining")
+}
+
 func TestFailedControlPlaneWriteKeepsTheCache(t *testing.T) {
 	f := newCacheFixture(t, nil)
 	wantStatus(t, f.chat(t, f.token), http.StatusOK, "warm-up")

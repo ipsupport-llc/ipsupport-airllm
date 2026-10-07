@@ -34,9 +34,12 @@ func defaultSecondpassConfig() secondpassConfig {
 }
 
 // loadSecondpass reads the second-pass config from settings into the atomic cache.
-func (s *Server) loadSecondpass(ctx context.Context) {
+func (s *Server) loadSecondpass(ctx context.Context) { s.loadSetting(ctx, "secondpass") }
+
+// applySecondpass installs the second-pass config from a raw settings value (nil = defaults).
+func (s *Server) applySecondpass(raw []byte) {
 	cfg := defaultSecondpassConfig()
-	if raw, err := s.st.GetSetting(ctx, "secondpass"); err == nil && len(raw) > 0 {
+	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &cfg)
 	}
 	if cfg.MinScore < 0 {

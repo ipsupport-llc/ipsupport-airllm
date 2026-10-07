@@ -101,7 +101,11 @@ Schema migrations are embedded and applied automatically on boot, in order.
 
 ## Concurrency, balancing, fallback
 
-- Each provider has an optional `max_concurrency` semaphore.
+- Each provider has an optional `max_concurrency` semaphore. It is held in
+  each replica's memory, so the cap applies per replica: N replicas let up to
+  N × `max_concurrency` requests reach the provider at once. Round-robin
+  counters are per replica too (each one spreads its own traffic). The DLP
+  sidecar's `model_max_concurrency` is likewise per replica.
 - A model alias lists targets across priority tiers; within a tier the strategy
   is `round_robin` or `least_busy`. Lower tiers are the fallback chain.
 - When every eligible target is saturated the gateway returns `429` instead of
@@ -126,6 +130,13 @@ DLP, capture, second-pass and failover policy are cached behind atomic pointers 
 reloaded when saved via the admin API, so policy changes take effect on the
 next request or job without a restart. Provider edits rebuild the registry the
 same way.
+
+That reload happens on the replica that served the save. Every replica also
+re-reads providers and those settings every `CONFIG_REFRESH_INTERVAL` (10 s)
+and installs whatever changed, so a save reaches the other replicas within
+one interval. The registry is rebuilt only when the provider rows changed —
+a rebuild hands every provider a fresh set of concurrency slots — and a
+refresh that cannot reach Postgres keeps the last good configuration.
 
 ## Observability
 

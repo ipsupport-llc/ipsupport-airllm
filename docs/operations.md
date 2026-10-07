@@ -171,6 +171,14 @@ prints the in-cluster Sidecar URL to paste into **Admin → DLP**:
   `app.capture.persistence`, its PVC is `ReadWriteOnce` (single writer) — either
   disable app autoscaling or set `persistence.accessMode: ReadWriteMany`, else
   replicas 2+ can't mount it.
+- **Disruptions and shutdown** — a PodDisruptionBudget
+  (`app.podDisruptionBudget`, on, `maxUnavailable: 1`) keeps a node drain from
+  taking every gateway pod at once. A terminating pod keeps accepting requests
+  for `config.shutdownDrain` (5 s) while the Service and ingress stop routing
+  to it, then gives in-flight requests and streams up to
+  `config.shutdownTimeout` (20 s); `app.terminationGracePeriodSeconds` (30)
+  must cover both. Provider concurrency caps are per pod — see
+  [Concurrency](architecture.md#concurrency-balancing-fallback).
 - **BERT pool** — `dlpBert.autoscaling.kind`:
   - `hpa` (default) — HPA on CPU. Works on any cluster, no extra operator.
   - `keda` — a `ScaledObject` driven by the **skip-rate** Prometheus signal

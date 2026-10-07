@@ -388,7 +388,7 @@ func (s *Server) handleAdminPutProvider(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Apply immediately (rebuild the registry with new creds/limits/clients).
-	if err := s.reloadProviders(r.Context()); err != nil {
+	if err := s.ReloadProviders(r.Context()); err != nil {
 		slog.Error("provider reload failed", "err", err)
 	}
 

@@ -53,9 +53,12 @@ const (
 
 // loadFailover reads the failover defaults from settings into the atomic
 // cache. A missing or unreadable row leaves the zero value in place.
-func (s *Server) loadFailover(ctx context.Context) {
+func (s *Server) loadFailover(ctx context.Context) { s.loadSetting(ctx, "failover") }
+
+// applyFailover installs the failover defaults from a raw settings value (nil = defaults).
+func (s *Server) applyFailover(raw []byte) {
 	var cfg failoverConfig
-	if raw, err := s.st.GetSetting(ctx, "failover"); err == nil && len(raw) > 0 {
+	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &cfg)
 	}
 	if cfg.TimeoutMS < 0 {

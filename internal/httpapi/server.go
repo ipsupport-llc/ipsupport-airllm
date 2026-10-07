@@ -37,7 +37,7 @@ type oidcHandler interface {
 
 // Deps are the runtime dependencies wired into the server.
 type Deps struct {
-	Providers *providers.Registry
+	Providers *providers.Registry // nil = empty until ReloadProviders
 	Limiter   *limits.Limiter
 	Pricing   *pricing.Table
 	Sealer    *secrets.Sealer
@@ -59,11 +59,13 @@ type Server struct {
 	capturePtr    atomic.Pointer[captureConfig]      // swapped on capture config changes
 	secondpassPtr atomic.Pointer[secondpassConfig]   // swapped on secondpass config changes
 	failoverPtr   atomic.Pointer[failoverConfig]     // swapped on failover config changes
+	config        configState                        // what the above were last loaded from; see RefreshConfig
 	router        *routing.Router
 	keyCache      *lookupcache.Cache[authedKey] // API keys by hash; nil = uncached
 	now           func() time.Time
 	pgSeenUp      atomic.Bool  // a /readyz ping has reached Postgres at least once
 	pgDownSince   atomic.Int64 // unix nanos of the first failed /readyz ping; 0 = up
+	draining      atomic.Bool  // shutting down: /readyz fails, requests are still served
 	limiter       *limits.Limiter
 	pricing       *pricing.Table
 	sealer        *secrets.Sealer
@@ -114,7 +116,11 @@ func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 		httpc:        &http.Client{},
 		metrics:      metrics.New(),
 	}
-	s.regPtr.Store(deps.Providers)
+	if deps.Providers != nil {
+		s.regPtr.Store(deps.Providers)
+	} else {
+		s.regPtr.Store(providers.NewRegistry()) // filled by ReloadProviders
+	}
 	s.loadDLP(context.Background())
 	s.modelPool = modelpool.New(func() ([]string, int) {
 		c := s.dlpCfg()
@@ -139,6 +145,11 @@ func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 	return s
 }
 
+// SetDraining makes /readyz fail from now on, while every other route keeps
+// serving — called when shutdown starts, so a load balancer that routes by
+// readiness moves new requests to the other replicas.
+func (s *Server) SetDraining() { s.draining.Store(true) }
+
 // Metrics exposes the server's metrics for wiring external gauge sources in main.
 func (s *Server) Metrics() *metrics.Metrics { return s.metrics }
 
@@ -152,16 +163,6 @@ func (s *Server) StartModelPool(ctx context.Context) { s.modelPool.Start(ctx) }
 
 // reg returns the current provider registry.
 func (s *Server) reg() *providers.Registry { return s.regPtr.Load() }
-
-// reloadProviders rebuilds the registry from the DB (after a provider change).
-func (s *Server) reloadProviders(ctx context.Context) error {
-	reg, err := providers.LoadFromStore(ctx, s.st, s.sealer)
-	if err != nil {
-		return err
-	}
-	s.regPtr.Store(reg)
-	return nil
-}
 
 // maxRequestBody caps request bodies to bound memory. It is generous enough
 // for large prompts but blocks pathological payloads.
@@ -297,6 +298,10 @@ func (s *Server) purgeLookupCaches() {
 // the Service would turn a database restart into a full outage. A pod that
 // has never reached Postgres has nothing cached and gets no such grace.
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	if s.draining.Load() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "draining"})
+		return
+	}
 	if err := s.st.PG.Ping(r.Context()); err != nil {
 		now := s.now().UnixNano()
 		s.pgDownSince.CompareAndSwap(0, now)

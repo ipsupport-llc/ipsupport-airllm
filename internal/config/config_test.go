@@ -374,3 +374,47 @@ func TestLookupCacheRejectsBadValues(t *testing.T) {
 		}
 	}
 }
+
+func TestReplicaKnobDefaults(t *testing.T) {
+	setBase(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.ConfigRefreshInterval != 10*time.Second {
+		t.Errorf("config refresh = %v, want 10s", c.ConfigRefreshInterval)
+	}
+	if c.ShutdownDrain != 0 || c.ShutdownTimeout != 10*time.Second {
+		t.Errorf("shutdown drain/timeout = %v/%v, want 0s/10s", c.ShutdownDrain, c.ShutdownTimeout)
+	}
+}
+
+func TestReplicaKnobsFromEnv(t *testing.T) {
+	setBase(t)
+	t.Setenv("CONFIG_REFRESH_INTERVAL", "3s")
+	t.Setenv("SHUTDOWN_DRAIN", "5s")
+	t.Setenv("SHUTDOWN_TIMEOUT", "20s")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.ConfigRefreshInterval != 3*time.Second || c.ShutdownDrain != 5*time.Second || c.ShutdownTimeout != 20*time.Second {
+		t.Errorf("refresh/drain/timeout = %v/%v/%v, want 3s/5s/20s", c.ConfigRefreshInterval, c.ShutdownDrain, c.ShutdownTimeout)
+	}
+}
+
+func TestReplicaKnobsRejectBadValues(t *testing.T) {
+	for _, tc := range []struct{ key, val string }{
+		{"CONFIG_REFRESH_INTERVAL", "often"},
+		{"CONFIG_REFRESH_INTERVAL", "0s"}, // must be positive
+		{"SHUTDOWN_DRAIN", "-1s"},
+		{"SHUTDOWN_DRAIN", "a bit"},
+		{"SHUTDOWN_TIMEOUT", "0s"}, // must be positive
+	} {
+		setBase(t)
+		t.Setenv(tc.key, tc.val)
+		if _, err := Load(); err == nil {
+			t.Errorf("%s=%q: want an error", tc.key, tc.val)
+		}
+	}
+}

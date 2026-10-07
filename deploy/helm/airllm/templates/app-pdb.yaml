@@ -1,0 +1,18 @@
+{{- if .Values.app.podDisruptionBudget.enabled }}
+# Keeps a voluntary disruption (node drain, cluster upgrade) from taking more
+# than maxUnavailable gateway pods down at once. With a single replica it
+# blocks nothing — it only protects a release that runs two or more.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "airllm.fullname" . }}
+  labels:
+    {{- include "airllm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  maxUnavailable: {{ .Values.app.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "airllm.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: gateway
+{{- end }}
