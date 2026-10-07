@@ -52,8 +52,8 @@ func (p *OpenAICompat) Protocol() string { return "openai" }
 // the Transcriber/Synthesizer type assertion regardless of whether the
 // configured vendor/base_url has these endpoints, so a misconfigured audio
 // alias reaches this point instead of failing a local capability check.
-func audioHTTPError(name string, status int, body []byte) error {
-	err := httpError(name, status, body)
+func audioHTTPError(name string, status int, body []byte, header http.Header) error {
+	err := httpError(name, status, body, header)
 	if status == http.StatusNotFound {
 		if pe, ok := err.(*Error); ok {
 			pe.Message += " (this provider/model may not support the OpenAI audio API)"
@@ -132,7 +132,7 @@ func (p *OpenAICompat) ListModels(ctx context.Context) ([]string, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return nil, httpError(p.name, resp.StatusCode, b)
+		return nil, httpError(p.name, resp.StatusCode, b, resp.Header)
 	}
 	var out struct {
 		Data []struct {
@@ -175,7 +175,7 @@ func (p *OpenAICompat) ListModelPricing(ctx context.Context) ([]ModelPrice, erro
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return nil, httpError(p.name, resp.StatusCode, b)
+		return nil, httpError(p.name, resp.StatusCode, b, resp.Header)
 	}
 	var out struct {
 		Data []struct {
@@ -268,7 +268,7 @@ func (p *OpenAICompat) Transcribe(ctx context.Context, in audio.TranscriptionReq
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return audio.TranscriptionResponse{}, audioHTTPError(p.name, resp.StatusCode, b)
+		return audio.TranscriptionResponse{}, audioHTTPError(p.name, resp.StatusCode, b, resp.Header)
 	}
 
 	var w struct {
@@ -310,7 +310,7 @@ func (p *OpenAICompat) Synthesize(ctx context.Context, in audio.SpeechRequest) (
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return audio.SpeechResponse{}, audioHTTPError(p.name, resp.StatusCode, b)
+		return audio.SpeechResponse{}, audioHTTPError(p.name, resp.StatusCode, b, resp.Header)
 	}
 	audioBytes, err := io.ReadAll(resp.Body)
 	if err != nil {

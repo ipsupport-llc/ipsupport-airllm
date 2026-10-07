@@ -19,6 +19,24 @@ import (
 // stay out of logs.
 var debugUpstreamSSE = os.Getenv("DEBUG_UPSTREAM_SSE") == "1"
 
+// logRateLimitHeaders records a vendor's OpenAI-style rate-limit headers
+// when present, on every attempt (success or failure) — observability only,
+// nothing in this codebase acts on these values yet. Header.Get is already
+// case-insensitive (CanonicalHeaderKey), so the exact casing here doesn't
+// matter.
+func logRateLimitHeaders(name string, header http.Header) {
+	limReq := header.Get("X-RateLimit-Limit-Requests")
+	remReq := header.Get("X-RateLimit-Remaining-Requests")
+	limTok := header.Get("X-RateLimit-Limit-Tokens")
+	remTok := header.Get("X-RateLimit-Remaining-Tokens")
+	if limReq == "" && remReq == "" && limTok == "" && remTok == "" {
+		return
+	}
+	slog.Debug("upstream rate limit headers", "provider", name,
+		"limit_requests", limReq, "remaining_requests", remReq,
+		"limit_tokens", limTok, "remaining_tokens", remTok)
+}
+
 // sendChatCompletions posts an encoded body to an OpenAI-shaped
 // /chat/completions endpoint and hands back a 2xx response for the caller to
 // decode; the caller closes its body.
@@ -52,10 +70,11 @@ func sendChatCompletions(ctx context.Context, hc *http.Client, name, baseURL, be
 	if err != nil {
 		return nil, transportError(err)
 	}
+	logRateLimitHeaders(name, resp.Header)
 	if resp.StatusCode/100 != 2 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		resp.Body.Close()
-		return nil, httpError(name, resp.StatusCode, b)
+		return nil, httpError(name, resp.StatusCode, b, resp.Header)
 	}
 	return resp, nil
 }

@@ -1,8 +1,13 @@
 package providers
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
@@ -42,6 +47,67 @@ func usage(prompt, completion, total int) *llm.Usage {
 // in the wild. It asserts whole chunks, not selected fields, so any drift in
 // the extracted decoder — a reordered usage chunk, a stray empty chunk, a
 // finish reason that stops being synthesized — fails here.
+// TestSendChatCompletionsLogsRateLimitHeaders is observability-only (per
+// operator direction: "log it for now, don't act on it") — a vendor's
+// OpenAI-style rate-limit headers, when present, are logged at Debug level
+// on every attempt, success included. Nothing in the codebase reads these
+// values yet; this only proves they aren't silently dropped.
+func TestSendChatCompletionsLogsRateLimitHeaders(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Limit-Requests", "3000")
+		w.Header().Set("X-RateLimit-Remaining-Requests", "2998")
+		w.Header().Set("X-RateLimit-Limit-Tokens", "4000000")
+		w.Header().Set("X-RateLimit-Remaining-Tokens", "4000000")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[],"model":"m"}`))
+	}))
+	defer srv.Close()
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+
+	resp, err := sendChatCompletions(context.Background(), srv.Client(), "muse", srv.URL, "", []byte(`{}`), false)
+	if err != nil {
+		t.Fatalf("sendChatCompletions: %v", err)
+	}
+	resp.Body.Close()
+
+	logged := buf.String()
+	for _, want := range []string{"provider=muse", "limit_requests=3000", "remaining_requests=2998", "limit_tokens=4000000", "remaining_tokens=4000000"} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("expected log output to contain %q, got: %s", want, logged)
+		}
+	}
+}
+
+// TestSendChatCompletionsNoRateLimitHeadersLogsNothing proves the helper
+// stays silent (no log line at all) when the upstream sends none of these
+// headers — logRateLimitHeaders must not fabricate empty-string fields.
+func TestSendChatCompletionsNoRateLimitHeadersLogsNothing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[],"model":"m"}`))
+	}))
+	defer srv.Close()
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+
+	resp, err := sendChatCompletions(context.Background(), srv.Client(), "muse", srv.URL, "", []byte(`{}`), false)
+	if err != nil {
+		t.Fatalf("sendChatCompletions: %v", err)
+	}
+	resp.Body.Close()
+
+	if buf.Len() != 0 {
+		t.Errorf("expected no log output with no rate-limit headers present, got: %s", buf.String())
+	}
+}
+
 func TestDecodeSSEStreamNonCoalescingOutput(t *testing.T) {
 	toolCall := []llm.ToolCallDelta{{
 		Index:    0,

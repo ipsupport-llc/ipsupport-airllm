@@ -26,6 +26,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/secrets"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/unavail"
 )
 
 // oidcHandler is the interface for OIDC SSO handlers (optional — nil = no SSO routes).
@@ -79,6 +80,7 @@ type Server struct {
 	modelPool     *modelpool.Pool
 	catalog       catalogCache     // per-provider upstream model list micro-cache
 	breaker       *breaker.Breaker // per-tier circuit breaker; nil admits everything
+	unavail       *unavail.Store   // per-(provider,model) Retry-After-aware skip; nil Check never skips
 
 	// Test hooks: non-nil values replace the real implementations in tests.
 	auditHook    func(ctx context.Context, actor, action, target string, detail any)
@@ -124,6 +126,7 @@ func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 	s.loadSecondpass(context.Background())
 	s.loadFailover(context.Background())
 	s.breaker = s.newBreaker(st.RDB)
+	s.unavail = unavail.New(st.RDB)
 	s.metrics.RegisterBreakerStates(s.breakerStates)
 	if deps.Capture != nil {
 		s.capturePl = deps.Capture

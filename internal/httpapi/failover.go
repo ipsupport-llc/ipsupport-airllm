@@ -14,6 +14,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/breaker"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/unavail"
 )
 
 // failoverConfig is the gateway-wide failover policy (settings name
@@ -28,7 +29,27 @@ type failoverConfig struct {
 	// Breaker holds the default circuit breaker knobs; an unset one takes
 	// breaker.Defaults. The breaker is off unless enabled here or per tier.
 	Breaker routing.BreakerOptions `json:"breaker"`
+	// UnavailableInitialMS/UnavailableMaxMS configure the backoff
+	// unavail.Store falls back to when a tier-attributable failure carries
+	// no Retry-After header: the first mark uses UnavailableInitialMS,
+	// each repeat doubles, capped at UnavailableMaxMS. Unlike Breaker, this
+	// is always on — see unavail.Store's own doc comment for why marking a
+	// specific (provider, model) unavailable for a bounded, vendor-informed
+	// span is safe to default on rather than requiring opt-in. <= 0 (unset,
+	// including a never-saved settings row) takes the built-in default.
+	UnavailableInitialMS int `json:"unavailable_initial_ms"`
+	UnavailableMaxMS     int `json:"unavailable_max_ms"`
 }
+
+// Built-in defaults for the fields above when unset: 200ms doubling to a
+// ~25.6s ceiling (8 doublings) — fast enough that a request-driven retry
+// probes again almost immediately, bounded so a persistently failing
+// target isn't retried faster than roughly once every half-minute once it
+// settles at the ceiling.
+const (
+	defaultUnavailableInitialMS = 200
+	defaultUnavailableMaxMS     = 25600
+)
 
 // loadFailover reads the failover defaults from settings into the atomic
 // cache. A missing or unreadable row leaves the zero value in place.
@@ -42,6 +63,12 @@ func (s *Server) loadFailover(ctx context.Context) {
 	}
 	if cfg.Breaker.Validate() != nil {
 		cfg.Breaker = routing.BreakerOptions{}
+	}
+	if cfg.UnavailableInitialMS <= 0 {
+		cfg.UnavailableInitialMS = defaultUnavailableInitialMS
+	}
+	if cfg.UnavailableMaxMS <= 0 {
+		cfg.UnavailableMaxMS = defaultUnavailableMaxMS
 	}
 	s.failoverPtr.Store(&cfg)
 }
@@ -255,6 +282,19 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 				s.metrics.TierOutcome(plan.Alias, tierLabel, "quarantined")
 				continue
 			}
+			unavailKey := unavail.Key{Provider: t.Provider, UpstreamModel: t.UpstreamModel}
+			if _, skip := s.unavail.Check(ctx, unavailKey); skip {
+				// A prior attempt at this exact (provider, model) — from
+				// ANY alias/tier that references it — already learned it's
+				// down, within the window it (or our own default backoff)
+				// said to wait. No call is made; the next real request
+				// past that window is itself the retry (see internal/
+				// unavail's doc comment for why there's no separate
+				// prober).
+				moved = append(moved, tierFallback{tier: t.Tier, reason: "unavailable"})
+				s.metrics.TierOutcome(plan.Alias, tierLabel, "unavailable")
+				continue
+			}
 			if !e.Acquire() {
 				if adm.Probe {
 					s.breaker.AbandonProbe(context.WithoutCancel(ctx), key, set)
@@ -298,6 +338,7 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 			case countsAgainstTier(pol, callErr):
 				s.breaker.Record(ctx, key, set, true, adm.Probe)
 				s.metrics.TierOutcome(plan.Alias, tierLabel, "failure")
+				s.markUnavailable(ctx, unavailKey, callErr)
 			default:
 				// The request itself was the problem: no verdict on the tier.
 				if adm.Probe {
@@ -357,6 +398,49 @@ func logAttemptFailure(alias string, t routing.Target, err error, latency time.D
 		attrs = append(attrs, "session", session)
 	}
 	slog.Warn("tier attempt failed", attrs...)
+}
+
+// markUnavailable marks k unavailable after a tier-attributable failure:
+// the upstream's own Retry-After when callErr carries one, else the
+// gateway's configured default backoff (doubling from this target's own
+// last mark, capped). Logs the duration actually used, so an operator sees
+// exactly how long a target is being skipped and why.
+func (s *Server) markUnavailable(ctx context.Context, k unavail.Key, callErr error) {
+	if s.unavail == nil {
+		return
+	}
+	var pe *providers.Error
+	var retryAfter *time.Duration
+	if errors.As(callErr, &pe) {
+		retryAfter = pe.RetryAfter
+	}
+	cfg := s.failoverCfg()
+	initialMS, maxMS := cfg.UnavailableInitialMS, cfg.UnavailableMaxMS
+	// loadFailover applies these same built-in defaults whenever settings
+	// were never saved — but a *Server a test builds directly, bypassing
+	// NewServer's init sequence, never calls it at all. Applying the
+	// defaults here too means a real failure never marks a target
+	// unavailable for a degenerate 0ms no matter how the Server was built.
+	if initialMS <= 0 {
+		initialMS = defaultUnavailableInitialMS
+	}
+	if maxMS <= 0 {
+		maxMS = defaultUnavailableMaxMS
+	}
+	initial := time.Duration(initialMS) * time.Millisecond
+	max := time.Duration(maxMS) * time.Millisecond
+	dur := s.unavail.Mark(ctx, k, retryAfter, initial, max)
+	slog.Warn("target marked unavailable", "provider", k.Provider, "upstream_model", k.UpstreamModel,
+		"duration_ms", dur.Milliseconds(), "source", unavailSource(retryAfter))
+}
+
+// unavailSource names where markUnavailable's duration came from, for the
+// log line above.
+func unavailSource(retryAfter *time.Duration) string {
+	if retryAfter != nil {
+		return "retry_after"
+	}
+	return "default_backoff"
 }
 
 // attemptFailureReason is a short, stable label for why an attempt failed:

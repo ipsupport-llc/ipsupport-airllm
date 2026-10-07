@@ -179,7 +179,7 @@ func TestChatStreamSynthesizesAtStreamEndWithNoUsageChunk(t *testing.T) {
 
 func TestHTTPErrorParsesOpenAIStyleContextLengthExceeded(t *testing.T) {
 	body := []byte(`{"error":{"message":"This model's maximum context length is 8192 tokens.","type":"invalid_request_error","code":"context_length_exceeded"}}`)
-	err := httpError("openai", 400, body)
+	err := httpError("openai", 400, body, nil)
 	pe, ok := err.(*Error)
 	if !ok {
 		t.Fatalf("want *Error, got %T", err)
@@ -194,7 +194,7 @@ func TestHTTPErrorParsesOpenAIStyleContextLengthExceeded(t *testing.T) {
 
 func TestHTTPErrorParsesOpenAIStyleModelNotFound(t *testing.T) {
 	body := []byte(`{"error":{"message":"The model does not exist","type":"invalid_request_error","code":"model_not_found"}}`)
-	err := httpError("groq", 404, body)
+	err := httpError("groq", 404, body, nil)
 	pe := err.(*Error)
 	if pe.Code != ErrCodeModelNotFound {
 		t.Errorf("Code = %q, want %q", pe.Code, ErrCodeModelNotFound)
@@ -203,7 +203,7 @@ func TestHTTPErrorParsesOpenAIStyleModelNotFound(t *testing.T) {
 
 func TestHTTPErrorParsesLlamaCppStyleContextSizeExceeded(t *testing.T) {
 	body := []byte(`{"error":{"code":400,"message":"the request exceeds the available context size, try increasing it","type":"exceed_context_size_error","n_prompt_tokens":94520,"n_ctx":8192}}`)
-	err := httpError("ollama-local", 400, body)
+	err := httpError("ollama-local", 400, body, nil)
 	pe := err.(*Error)
 	if pe.Code != ErrCodeContextLengthExceeded {
 		t.Errorf("Code = %q, want %q", pe.Code, ErrCodeContextLengthExceeded)
@@ -216,7 +216,7 @@ func TestHTTPErrorParsesOllamaMultimodalRejection(t *testing.T) {
 	// own code is null and its message is a JSON-encoded string holding the
 	// real error.
 	body := []byte(`{"error":{"message":"{\"error\":{\"code\":400,\"message\":\"Multimodal data provided, but model does not support multimodal requests.\",\"type\":\"invalid_request_error\"}}","type":"invalid_request_error","param":null,"code":null}}`)
-	err := httpError("ollama-local", 400, body)
+	err := httpError("ollama-local", 400, body, nil)
 	pe := err.(*Error)
 	if pe.Code != ErrCodeMultimodalNotSupported {
 		t.Errorf("Code = %q, want %q", pe.Code, ErrCodeMultimodalNotSupported)
@@ -230,7 +230,7 @@ func TestHTTPErrorParsesReasoningEffortUnsupported(t *testing.T) {
 	// Real body captured live from OpenAI rejecting tool calls combined with
 	// a client-supplied reasoning_effort on gpt-6-astra via /v1/chat/completions.
 	body := []byte(`{"error":{"message":"Function tools with reasoning_effort are not supported for gpt-6-astra in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'.","type":"invalid_request_error","param":"reasoning_effort","code":null}}`)
-	err := httpError("openai", 400, body)
+	err := httpError("openai", 400, body, nil)
 	pe := err.(*Error)
 	if pe.Code != ErrCodeReasoningEffortUnsupported {
 		t.Errorf("Code = %q, want %q", pe.Code, ErrCodeReasoningEffortUnsupported)
@@ -255,7 +255,7 @@ func TestHTTPErrorUnrecognizedBodyLeavesCodeEmpty(t *testing.T) {
 		[]byte(`{"error":{"message":"Unknown parameter: 'foo'.","type":"invalid_request_error","param":"foo","code":null}}`),
 	}
 	for _, body := range cases {
-		err := httpError("x", 400, body)
+		err := httpError("x", 400, body, nil)
 		pe := err.(*Error)
 		if pe.Code != "" {
 			t.Errorf("body %q: Code = %q, want empty", body, pe.Code)
@@ -265,7 +265,7 @@ func TestHTTPErrorUnrecognizedBodyLeavesCodeEmpty(t *testing.T) {
 
 func TestHTTPErrorRetryableUnaffectedByCode(t *testing.T) {
 	body := []byte(`{"error":{"message":"rate limited","type":"rate_limit_error"}}`)
-	err := httpError("x", 429, body).(*Error)
+	err := httpError("x", 429, body, nil).(*Error)
 	if !err.Retryable {
 		t.Error("429 must remain Retryable=true regardless of Code parsing")
 	}
