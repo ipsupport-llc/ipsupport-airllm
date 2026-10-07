@@ -433,3 +433,125 @@ func TestAliasSynthesisCacheSettingsRoundTripAndDefaultOff(t *testing.T) {
 		t.Errorf("found %d of the two aliases in the list", found)
 	}
 }
+
+// twoTierAlias is an alias of a dead first tier, labelled primary-tier, and
+// a live second one behind it.
+type twoTierAlias struct {
+	dead, live, model string
+	expose, cache     bool
+	label             string // the live tier's display label; "" for none
+}
+
+// save stores the alias through the admin API, transcript scanning off.
+func (a twoTierAlias) save(t *testing.T, s *Server, alias string) {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{
+		"expose_backend_headers": a.expose, "synthesis_cache": a.cache, "dlp_audio_scan": false,
+		"targets": []map[string]any{
+			{"priority": 0, "provider": a.dead, "upstream_model": a.model, "display_label": "primary-tier"},
+			{"priority": 1, "provider": a.live, "upstream_model": a.model, "display_label": a.label},
+		},
+	})
+	if rec := putAlias(s, alias, string(body)); rec.Code != http.StatusOK {
+		t.Fatalf("put alias %s: %d %s", alias, rec.Code, rec.Body.String())
+	}
+}
+
+// backendLabelCases are the aliases whose replies must or must not name the
+// tier that served them.
+var backendLabelCases = []struct {
+	name, label, want string
+	expose            bool
+}{
+	{"exposed", "backup-tier", "backup-tier", true},
+	{"not exposed", "backup-tier", "", false},
+	{"unlabelled", "", "", true},
+}
+
+// seedBackendLabelAliases saves one two-tier alias per backendLabelCases
+// entry, in order, over the given providers.
+func seedBackendLabelAliases(t *testing.T, s *audioRig, dead, live, model string) []string {
+	t.Helper()
+	suffix := fmt.Sprint(time.Now().UnixNano())
+	var aliases []string
+	for i, c := range backendLabelCases {
+		alias := fmt.Sprintf("voice-label-%d-%s", i, suffix)
+		kinds := map[string]string{}
+		if i == 0 {
+			kinds = map[string]string{dead: "openai", live: "openai"}
+		}
+		seedAudioAlias(t, s, alias, kinds, "[]")
+		twoTierAlias{dead: dead, live: live, model: model, expose: c.expose, label: c.label}.save(t, s.Server, alias)
+		aliases = append(aliases, alias)
+	}
+	return aliases
+}
+
+// checkBackendLabel fails the test unless the reply carries want as its
+// X-Backend-Model, or no such header at all when want is "".
+func checkBackendLabel(t *testing.T, name string, rec *httptest.ResponseRecorder, want string) {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%s: status = %d: %s", name, rec.Code, rec.Body.String())
+	}
+	got, set := rec.Header()["X-Backend-Model"]
+	if want == "" && set || want != "" && rec.Header().Get("X-Backend-Model") != want {
+		t.Errorf("%s: X-Backend-Model = %q, want %q", name, got, want)
+	}
+}
+
+func TestTranscriptionRouteLabelsTheTierThatServedItAfterFailover(t *testing.T) {
+	whisper, _ := fakeWhisper(t, `{"text":"hi there","language":"en","duration":1}`)
+	suffix := fmt.Sprint(time.Now().UnixNano())
+	dead, live := "dead-"+suffix, "whisper-"+suffix
+	s := newAudioRig(t, providers.NewOpenAICompat(dead, "openai", "http://127.0.0.1:1", ""), providers.NewOpenAICompat(live, "openai", whisper.URL, ""))
+	aliases := seedBackendLabelAliases(t, s, dead, live, "large-v3-turbo")
+
+	for i, c := range backendLabelCases {
+		rec := httptest.NewRecorder()
+		s.handleAudioTranscriptions(rec, asKey(transcriptionRequest(t, [][2]string{{"model", aliases[i]}, {"language", "en-US"}}), aliases[i]))
+		checkBackendLabel(t, c.name, rec, c.want)
+	}
+}
+
+func TestSpeechRouteLabelsTheTierThatServedItAfterFailover(t *testing.T) {
+	up, _ := fakeOpenAISpeech(t, "audio/wav", pcmWAV(22050, 1))
+	suffix := fmt.Sprint(time.Now().UnixNano())
+	dead, live := "dead-"+suffix, "piper-"+suffix
+	s := newAudioRig(t, providers.NewOpenAICompat(dead, "openai", "http://127.0.0.1:1", ""), providers.NewOpenAICompat(live, "openai", up.URL, ""))
+	aliases := seedBackendLabelAliases(t, s, dead, live, "tts-1")
+
+	for i, c := range backendLabelCases {
+		rec := httptest.NewRecorder()
+		s.handleAudioSpeech(rec, asKey(speechRequest(fmt.Sprintf(`{"model":%q,"input":"Hello there","voice":"alloy"}`, aliases[i])), aliases[i]))
+		checkBackendLabel(t, c.name, rec, c.want)
+	}
+}
+
+func TestSpeechRouteLabelsACachedClipWithTheTierThatRenderedIt(t *testing.T) {
+	up, calls := fakeOpenAISpeech(t, "audio/wav", pcmWAV(22050, 1))
+	suffix := fmt.Sprint(time.Now().UnixNano())
+	dead, live, alias := "dead-"+suffix, "piper-"+suffix, "voice-tts-"+suffix
+	s := newAudioRig(t, providers.NewOpenAICompat(dead, "openai", "http://127.0.0.1:1", ""), providers.NewOpenAICompat(live, "openai", up.URL, ""))
+	s.speechCache = speechcache.New(nil)
+	seedAudioAlias(t, s, alias, map[string]string{dead: "openai", live: "openai"}, "[]")
+	a := twoTierAlias{dead: dead, live: live, model: "tts-1", expose: true, cache: true, label: "backup-tier"}
+	a.save(t, s.Server, alias)
+
+	speak := func(name string) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		s.handleAudioSpeech(rec, asKey(speechRequest(fmt.Sprintf(`{"model":%q,"input":"Hello there","voice":"alloy"}`, alias)), alias))
+		checkBackendLabel(t, name, rec, "backup-tier")
+	}
+	speak("rendered")
+	speak("cached")
+	// Renaming the label leaves the clip's key alone: a hit names the label
+	// the clip was rendered under.
+	a.label = "renamed-tier"
+	a.save(t, s.Server, alias)
+	speak("cached after the rename")
+	if n := len(calls()); n != 1 {
+		t.Errorf("upstream asked %d times, want every repeat answered from the cache", n)
+	}
+}

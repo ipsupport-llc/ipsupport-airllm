@@ -122,6 +122,7 @@ func (s *Server) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reques
 	}
 	s.enqueueCapture(ak, "openai", model, target, upstreamModel, http.StatusOK, 0, 0, float64(costMicro)/1e6, dlpRes, nil, redactedText)
 
+	setBackendLabel(w, res.Target, plan.ExposeBackendHeaders)
 	if r.FormValue("response_format") == "verbose_json" {
 		writeJSON(w, http.StatusOK, verboseTranscription{
 			Task: "transcribe", Text: redactedText, Language: resp.Language,
@@ -364,6 +365,7 @@ func (s *Server) handleAudioSpeech(w http.ResponseWriter, r *http.Request) {
 	s.enqueueCapture(ak, "openai", body.Model, target, upstreamModel, http.StatusOK, 0, 0, float64(costMicro)/1e6, dlpRes,
 		[]llm.Message{{Role: "user", Content: redactedInput}}, "")
 
+	setBackendLabel(w, res.Target, plan.ExposeBackendHeaders)
 	if resp.ContentType != "" {
 		w.Header().Set("Content-Type", resp.ContentType)
 	}
@@ -428,10 +430,13 @@ func (s *Server) runTranscribe(ctx context.Context, plan *routing.Plan, req audi
 // tier is chosen before the cache is asked and a clip is only ever served
 // for the provider and voice that spoke it. A hit answers without calling
 // the provider and is not counted as an attempt; a clip a provider renders
-// is stored for the next request.
+// is stored for the next request, with the display label of the target that
+// rendered it: the result of a hit carries that label, not the current one
+// of the target whose attempt found it, so X-Backend-Model names the tier
+// that made the audio (and none for a clip stored before labels were kept).
 func (s *Server) runSynthesize(ctx context.Context, plan *routing.Plan, req audio.SpeechRequest) (audio.SpeechResponse, execResult, error) {
 	var resp audio.SpeechResponse
-	var served string
+	var served, label string
 	var cache cacheOutcome
 	var key speechcache.Key
 	supports := func(p providers.Provider) error {
@@ -459,7 +464,7 @@ func (s *Server) runSynthesize(ctx context.Context, plan *routing.Plan, req audi
 			switch {
 			case hit:
 				resp = audio.SpeechResponse{Audio: clip.Audio, ContentType: clip.ContentType}
-				served, cache = clip.Model, cacheHit
+				served, label, cache = clip.Model, clip.Label, cacheHit
 				return errServedWithoutCall
 			case err != nil:
 				if !errors.Is(err, speechcache.ErrUnavailable) {
@@ -481,7 +486,7 @@ func (s *Server) runSynthesize(ctx context.Context, plan *routing.Plan, req audi
 			}
 			out.ContentType = "audio/wav"
 		}
-		resp, served = out, in.Model
+		resp, served, label = out, in.Model, t.DisplayLabel
 		if out.Model != "" {
 			served = out.Model
 		}
@@ -490,10 +495,10 @@ func (s *Server) runSynthesize(ctx context.Context, plan *routing.Plan, req audi
 	if err != nil {
 		return audio.SpeechResponse{}, res, err
 	}
-	res.UpstreamModel, res.Cache = served, cache
+	res.UpstreamModel, res.DisplayLabel, res.Cache = served, label, cache
 	if cache == cacheMiss {
 		// Stored even if the client has gone: the clip is already paid for.
-		clip := speechcache.Clip{Audio: resp.Audio, ContentType: resp.ContentType, Model: served}
+		clip := speechcache.Clip{Audio: resp.Audio, ContentType: resp.ContentType, Model: served, Label: label}
 		if err := s.speechCache.Put(context.WithoutCancel(ctx), key, clip, plan.SynthesisCacheTTL); err != nil && !errors.Is(err, speechcache.ErrUnavailable) {
 			slog.Warn("synthesis cache store failed", "alias", plan.Alias, "provider", res.Provider, "err", err)
 		}
