@@ -30,7 +30,24 @@ async function api(method, path, body) {
   const res = await fetch(path, opts);
   let data = null;
   try { data = await res.json(); } catch (_) { /* no body */ }
+  // On a signed-in console the control API only answers 401 when the session
+  // is gone (cookie past its TTL, or the account was disabled). Without this
+  // every view kept rendering empty until a manual reload revealed the login
+  // form. While signed out (me === null) a 401 is the login form's own
+  // "invalid credentials" and is left to the caller. The returned promise
+  // never settles, so the calling view stops instead of writing into (or
+  // toasting errors over) the shell it no longer owns.
+  if (res.status === 401 && me) { sessionExpired(); return new Promise(() => {}); }
   return { ok: res.ok, status: res.status, data };
+}
+
+// sessionExpired drops back to the login form, keeping location.hash so a
+// fresh sign-in (init -> renderShell -> route) reopens the same page.
+function sessionExpired() {
+  me = null;
+  window.onhashchange = null;
+  renderLogin();
+  toast("Session expired — please sign in again", "err");
 }
 
 function toast(msg, kind = "ok") {
