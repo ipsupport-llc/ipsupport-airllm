@@ -21,6 +21,10 @@ import (
 // the request sits in an open tier.
 var errAllQuarantined = errors.New("every tier of this model is temporarily quarantined")
 
+// errAllUnavailable is returned when every target that could have served the
+// request is marked unavailable.
+var errAllUnavailable = errors.New("every target of this model is temporarily unavailable")
+
 // newBreaker builds the tier breaker with this server's logs and metrics as
 // its observer. rdb nil keeps breaker state in this process only.
 func (s *Server) newBreaker(rdb *redis.Client, opts ...breaker.Option) *breaker.Breaker {
@@ -36,6 +40,11 @@ func (s *Server) onBreakerTransition(t breaker.Transition) {
 		slog.Warn("tier breaker opened", "alias", t.Key.Alias, "tier", t.Key.Tier, "reason", t.Cause,
 			"cooldown_ms", t.Cooldown.Milliseconds(), "open_until", t.OpenUntil.UTC().Format(time.RFC3339))
 	case breaker.HalfOpen:
+		if t.Cause == "forced" {
+			s.metrics.BreakerForcedProbe(t.Key.Alias, tier)
+			slog.Warn("tier breaker forced probe", "alias", t.Key.Alias, "tier", t.Key.Tier)
+			break
+		}
 		slog.Info("tier breaker probe", "alias", t.Key.Alias, "tier", t.Key.Tier)
 	case breaker.Closed:
 		slog.Info("tier breaker closed", "alias", t.Key.Alias, "tier", t.Key.Tier, "via", t.Cause)

@@ -340,8 +340,12 @@ environment-specific.
 
 `AirLLMTierQuarantined` fires when one tier of an alias has stayed open or
 probing for longer than `metrics.prometheusRule.tierQuarantinedFor` (15 min by
-default): its provider keeps failing, and the alias answers from a later tier —
-or fails fast, if every tier is open. Where to look:
+default): its provider keeps failing, and the alias answers from a later tier.
+If every tier is open, each request forces one probe into the tier whose
+cooldown ends first (`tier breaker forced probe`,
+`airllm_breaker_forced_probes_total`) and the rest fail fast with `503` — a
+steady rate of forced probes means every provider behind the alias is down.
+Where to look:
 
 1. **Dashboard — AirLLM Failover**, filtered to the alias. Breaker state per
    tier; transitions (a run of `open → half_open → open` is a probe failing

@@ -227,8 +227,17 @@ alias, with its own budgets, is unaffected.
   on the tier: it neither counts as a failure nor breaks a run of them, and
   neither does a client hanging up. The error-rate window is fixed, not
   sliding: it starts with the first request after the previous one ran out.
-- **Open.** Every request skips the tier at once, without a call. When every
-  tier a request could use is open it fails fast with `503`.
+- **Open.** Every request skips the tier at once, without a call.
+- **Every tier open.** A request with no tier left does not fail at once: it
+  forces the probe (below) of the open tier whose cooldown ends first — the
+  lowest priority on a tie — without waiting for that cooldown, so tiers that
+  tripped together on a gateway-side blip (network, DNS) do not keep the
+  alias down once the providers answer again. Only one probe is out on a tier
+  at a time, across all replicas: a request that finds it taken fails fast
+  with `503`, and so does one whose forced target is still marked
+  unavailable (see below), which spaces forced calls to a dead provider by
+  that backoff. A forced probe handed back without a call leaves the tier
+  open for the rest of its cooldown.
 - **Probe.** When the cooldown runs out exactly one request — across all
   replicas — is let through; a stream counts as answered at its first chunk.
   If the probe's request turns out to be no verdict on the tier, the next
@@ -274,6 +283,7 @@ probe` and `tier breaker closed` (with `via`: `probe` or `manual`). Metrics:
 |--------|--------|---------|
 | `airllm_breaker_state` | `alias`, `tier` | `0` closed, `1` open, `2` half-open (probing); read from the shared state at scrape time, for the tiers this replica has served since it started. |
 | `airllm_breaker_transitions_total` | `alias`, `tier`, `to` | State changes, counted once by the replica that made them. |
+| `airllm_breaker_forced_probes_total` | `alias`, `tier` | Probes forced into an open tier before its cooldown ran out because every tier of the alias was open. Also logged as `tier breaker forced probe`. |
 | `airllm_tier_fallbacks_total` | `alias`, `from_tier`, `to_tier`, `reason` | Requests that moved past `from_tier`, served in the end by `to_tier` (`none` if nothing served them); `reason` is a failure reason, `quarantined` or `unavailable`. |
 | `airllm_tier_outcomes_total` | `alias`, `tier`, `outcome` | Attempts per tier: `success`, `failure`, `request_error` (failed because of the request, no verdict on the tier) `quarantined` (skipped while open) or `unavailable` (skipped while its provider and model are marked down). |
 | `airllm_tier_attempt_duration_seconds` | `alias`, `tier`, `outcome` | Histogram of the time from an attempt's start to its verdict — for a stream, its first chunk, not its end. Same outcomes as above except `quarantined` and `unavailable`, which make no call. |
@@ -321,7 +331,9 @@ before this existed) rather than blocking traffic.
 Logs `target marked unavailable` with `provider`, `upstream_model`,
 `duration_ms` and `source` (`retry_after` or `default_backoff`). A skipped
 attempt counts in the `tier attempt failed` / fallback bookkeeping with
-reason `unavailable`, the same as a `quarantined` breaker skip.
+reason `unavailable`, the same as a `quarantined` breaker skip. A request
+whose every target is marked unavailable fails with `503`, as when every tier
+is quarantined.
 
 #### Call affinity
 

@@ -241,8 +241,12 @@ type attemptCall func(ctx context.Context, p providers.Provider, t routing.Targe
 //
 // Each tier sits behind its circuit breaker: an open tier is skipped without
 // a call, and every attempt's outcome is recorded against its tier. When the
-// only targets left were in open tiers the request fails fast with
-// errAllQuarantined.
+// only targets left were in open tiers the request does not fail at once: it
+// forces the probe of the open tier whose cooldown ends first (lowest
+// priority on a tie), so tiers that tripped together on a gateway-side blip
+// do not keep the alias down for a whole cooldown. Only when that tier is
+// already being probed, or the forced attempt makes no call, does the
+// request fail fast with errAllQuarantined.
 //
 // On an alias with session affinity, a session that a backup tier served
 // starts at that tier: earlier tiers are not tried, later ones still are.
@@ -263,9 +267,13 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 	// was merely busy makes the request a 429, not a "does not support".
 	var skipErr error
 	// moved is every tier this request went past, for the fallback metric;
-	// quarantined is whether any of them was skipped by its breaker.
+	// quarantined is whether any of them was skipped by its breaker, and
+	// unavailable whether any target was skipped as marked down.
 	var moved []tierFallback
-	quarantined := false
+	quarantined, unavailable := false, false
+	// openUntil is when the cooldown of each open tier the breaker turned
+	// this request away from runs out: the candidates for a forced probe.
+	openUntil := map[int]time.Time{}
 	settings := map[int]breaker.Settings{}
 	tierSettings := func(tier int) breaker.Settings {
 		set, ok := settings[tier]
@@ -287,129 +295,167 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 	}()
 
 	sawBusy := false
-	for retry := 0; retry <= busyRetries; retry++ {
-		anyBusy := false
-		for _, t := range plan.Ordered(s.router.NextRR(plan.Alias), free) {
-			if pinned && t.Tier < floor {
-				continue
+	// forced is the tier the last-resort pass forces a probe on, -1 on the
+	// first pass; forcedCall is whether that pass made its one call.
+	forced, forcedCall := -1, false
+	for pass := 0; pass < 2; pass++ {
+		if pass == 1 {
+			// Only a request that made no call and found no busy
+			// target is out of options because of the breaker.
+			if sawBusy || res.Attempts > 0 {
+				break
 			}
-			res.Target = t
-			e, ok := reg.Get(t.Provider)
+			tier, ok := soonestOpen(openUntil)
 			if !ok {
-				warnUnregisteredTarget(plan.Alias, t.Provider)
-				lastErr = fmt.Errorf("provider %q not registered", t.Provider)
-				continue
+				break
 			}
-			if supports != nil {
-				if err := supports(e.Provider); err != nil {
-					skipErr = err
+			forced = tier
+		}
+		for retry := 0; retry <= busyRetries; retry++ {
+			anyBusy := false
+			for _, t := range plan.Ordered(s.router.NextRR(plan.Alias), free) {
+				if pinned && t.Tier < floor {
 					continue
 				}
-			}
-			pol := s.policyFor(t)
-			key, set := breaker.Key{Alias: plan.Alias, Tier: t.Tier}, tierSettings(t.Tier)
-			// A probe holds the tier for as long as its attempt may run.
-			set.ProbeLease = pol.budget + time.Second
-			tierLabel := strconv.Itoa(t.Tier)
-			adm := s.breaker.Admit(ctx, key, set)
-			if adm.Skip {
-				quarantined = true
-				moved = append(moved, tierFallback{tier: t.Tier, reason: "quarantined"})
-				s.metrics.TierSkipped(plan.Alias, tierLabel, "quarantined")
-				continue
-			}
-			unavailKey := unavail.Key{Provider: t.Provider, UpstreamModel: t.UpstreamModel}
-			if _, skip := s.unavail.Check(ctx, unavailKey); skip {
-				// A prior attempt at this exact (provider, model) — from
-				// ANY alias/tier that references it — already learned it's
-				// down, within the window it (or our own default backoff)
-				// said to wait. No call is made; the next real request
-				// past that window is itself the retry (see internal/
-				// unavail's doc comment for why there's no separate
-				// prober).
-				moved = append(moved, tierFallback{tier: t.Tier, reason: "unavailable"})
-				s.metrics.TierSkipped(plan.Alias, tierLabel, "unavailable")
-				continue
-			}
-			if !e.Acquire() {
-				if adm.Probe {
-					s.breaker.AbandonProbe(context.WithoutCancel(ctx), key, set)
+				if forced >= 0 && (t.Tier != forced || forcedCall) {
+					continue
 				}
-				anyBusy, sawBusy = true, true
-				continue
-			}
-			res.Attempts++
-			began := time.Now()
-			// A stream that delivers its first chunk has answered: that is
-			// the tier's success, recorded then rather than when a long
-			// stream finally ends, so a probe resolves at once.
-			var recorded atomic.Bool
-			recordSuccess := func() {
-				if recorded.CompareAndSwap(false, true) {
-					s.breaker.Record(ctx, key, set, false, adm.Probe)
-					s.metrics.TierAttempt(plan.Alias, tierLabel, "success", time.Since(began))
+				res.Target = t
+				e, ok := reg.Get(t.Provider)
+				if !ok {
+					warnUnregisteredTarget(plan.Alias, t.Provider)
+					lastErr = fmt.Errorf("provider %q not registered", t.Provider)
+					continue
 				}
-			}
-			committed, callErr := runAttempt(ctx, t.Provider, pol.budget, func(actx context.Context, commit func() bool) error {
-				return call(actx, e.Provider, t, func() bool {
-					ok := commit()
-					if ok {
-						recordSuccess()
+				if supports != nil {
+					if err := supports(e.Provider); err != nil {
+						skipErr = err
+						continue
 					}
-					return ok
+				}
+				pol := s.policyFor(t)
+				key, set := breaker.Key{Alias: plan.Alias, Tier: t.Tier}, tierSettings(t.Tier)
+				// A probe holds the tier for as long as its attempt may run.
+				set.ProbeLease = pol.budget + time.Second
+				tierLabel := strconv.Itoa(t.Tier)
+				var adm breaker.Admission
+				if forced >= 0 {
+					adm = s.breaker.Force(ctx, key, set)
+				} else {
+					adm = s.breaker.Admit(ctx, key, set)
+				}
+				if adm.Skip {
+					if forced >= 0 {
+						// Another request holds the probe; this one was
+						// already counted as skipping the tier.
+						continue
+					}
+					quarantined = true
+					moved = append(moved, tierFallback{tier: t.Tier, reason: "quarantined"})
+					s.metrics.TierSkipped(plan.Alias, tierLabel, "quarantined")
+					if !adm.OpenUntil.IsZero() {
+						openUntil[t.Tier] = adm.OpenUntil
+					}
+					continue
+				}
+				unavailKey := unavail.Key{Provider: t.Provider, UpstreamModel: t.UpstreamModel}
+				if _, skip := s.unavail.Check(ctx, unavailKey); skip {
+					// A prior attempt at this exact (provider, model) — from
+					// ANY alias/tier that references it — already learned it's
+					// down, within the window it (or our own default backoff)
+					// said to wait. No call is made; the next real request
+					// past that window is itself the retry (see internal/
+					// unavail's doc comment for why there's no separate
+					// prober).
+					if adm.Probe {
+						s.breaker.AbandonProbe(context.WithoutCancel(ctx), key, set)
+					}
+					unavailable = true
+					moved = append(moved, tierFallback{tier: t.Tier, reason: "unavailable"})
+					s.metrics.TierSkipped(plan.Alias, tierLabel, "unavailable")
+					continue
+				}
+				if !e.Acquire() {
+					if adm.Probe {
+						s.breaker.AbandonProbe(context.WithoutCancel(ctx), key, set)
+					}
+					anyBusy, sawBusy = true, true
+					continue
+				}
+				res.Attempts++
+				forcedCall = forced >= 0
+				began := time.Now()
+				// A stream that delivers its first chunk has answered: that is
+				// the tier's success, recorded then rather than when a long
+				// stream finally ends, so a probe resolves at once.
+				var recorded atomic.Bool
+				recordSuccess := func() {
+					if recorded.CompareAndSwap(false, true) {
+						s.breaker.Record(ctx, key, set, false, adm.Probe)
+						s.metrics.TierAttempt(plan.Alias, tierLabel, "success", time.Since(began))
+					}
+				}
+				committed, callErr := runAttempt(ctx, t.Provider, pol.budget, func(actx context.Context, commit func() bool) error {
+					return call(actx, e.Provider, t, func() bool {
+						ok := commit()
+						if ok {
+							recordSuccess()
+						}
+						return ok
+					})
 				})
-			})
-			e.Release()
+				e.Release()
 
-			if errors.Is(callErr, errServedWithoutCall) {
-				if adm.Probe {
-					s.breaker.AbandonProbe(ctx, key, set)
+				if errors.Is(callErr, errServedWithoutCall) {
+					if adm.Probe {
+						s.breaker.AbandonProbe(ctx, key, set)
+					}
+					res.Attempts--
+					return res, committed, nil
 				}
-				res.Attempts--
-				return res, committed, nil
-			}
-			switch {
-			case recorded.Load():
-			case callErr == nil:
-				recordSuccess()
-			case ctx.Err() != nil:
-				// The client went away: nothing was learnt about the tier.
-				if adm.Probe {
-					s.breaker.AbandonProbe(context.WithoutCancel(ctx), key, set)
+				switch {
+				case recorded.Load():
+				case callErr == nil:
+					recordSuccess()
+				case ctx.Err() != nil:
+					// The client went away: nothing was learnt about the tier.
+					if adm.Probe {
+						s.breaker.AbandonProbe(context.WithoutCancel(ctx), key, set)
+					}
+					return res, committed, callErr
+				case countsAgainstTier(pol, callErr):
+					s.breaker.Record(ctx, key, set, true, adm.Probe)
+					s.metrics.TierAttempt(plan.Alias, tierLabel, "failure", time.Since(began))
+					s.markUnavailable(ctx, unavailKey, callErr)
+				default:
+					// The request itself was the problem: no verdict on the tier.
+					if adm.Probe {
+						s.breaker.AbandonProbe(ctx, key, set)
+					}
+					s.metrics.TierAttempt(plan.Alias, tierLabel, "request_error", time.Since(began))
 				}
-				return res, committed, callErr
-			case countsAgainstTier(pol, callErr):
-				s.breaker.Record(ctx, key, set, true, adm.Probe)
-				s.metrics.TierAttempt(plan.Alias, tierLabel, "failure", time.Since(began))
-				s.markUnavailable(ctx, unavailKey, callErr)
-			default:
-				// The request itself was the problem: no verdict on the tier.
-				if adm.Probe {
-					s.breaker.AbandonProbe(ctx, key, set)
-				}
-				s.metrics.TierAttempt(plan.Alias, tierLabel, "request_error", time.Since(began))
-			}
 
-			if callErr == nil {
-				return res, committed, nil
+				if callErr == nil {
+					return res, committed, nil
+				}
+				if committed {
+					return res, true, callErr
+				}
+				lastErr = callErr
+				logAttemptFailure(plan.Alias, t, callErr, time.Since(began), session)
+				if !pol.fallsThrough(callErr) {
+					return res, false, callErr
+				}
+				moved = append(moved, tierFallback{tier: t.Tier, reason: attemptFailureReason(callErr)})
 			}
-			if committed {
-				return res, true, callErr
+			if !anyBusy {
+				break
 			}
-			lastErr = callErr
-			logAttemptFailure(plan.Alias, t, callErr, time.Since(began), session)
-			if !pol.fallsThrough(callErr) {
-				return res, false, callErr
+			select {
+			case <-ctx.Done():
+				return res, false, ctx.Err()
+			case <-time.After(busyBackoff):
 			}
-			moved = append(moved, tierFallback{tier: t.Tier, reason: attemptFailureReason(callErr)})
-		}
-		if !anyBusy {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return res, false, ctx.Err()
-		case <-time.After(busyBackoff):
 		}
 	}
 	if lastErr == nil {
@@ -418,6 +464,8 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 			lastErr = errAllBusy
 		case quarantined:
 			lastErr = errAllQuarantined
+		case unavailable:
+			lastErr = errAllUnavailable
 		case skipErr != nil:
 			lastErr = skipErr
 		default:
@@ -428,6 +476,18 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 		s.metrics.IncRateLimited("provider_busy")
 	}
 	return res, false, lastErr
+}
+
+// soonestOpen picks the open tier whose cooldown runs out first, the lowest
+// priority on a tie.
+func soonestOpen(openUntil map[int]time.Time) (int, bool) {
+	tier, ok := 0, false
+	for t, at := range openUntil {
+		if !ok || at.Before(openUntil[tier]) || (at.Equal(openUntil[tier]) && t < tier) {
+			tier, ok = t, true
+		}
+	}
+	return tier, ok
 }
 
 // logAttemptFailure emits one line per failed upstream attempt, so an
