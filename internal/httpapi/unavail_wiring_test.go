@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -130,5 +131,23 @@ func TestUnavailableMarkIsPerProviderModelNotPerAliasTier(t *testing.T) {
 	}
 	if up.calls.Load() != 1 {
 		t.Fatalf("flaky called %d times after alias-b's request, want still 1 (the mark from alias-a must protect alias-b too)", up.calls.Load())
+	}
+}
+
+func TestEveryTargetUnavailableIsA503(t *testing.T) {
+	up := newSwitchableUpstream(t, true)
+	clk := newFakeClock()
+	s := newUnavailTestServer(t, clk, providers.NewOpenAICompat("flaky", "openai", up.URL, ""))
+	plan := &routing.Plan{Alias: "single", Strategy: "round_robin", Tiers: [][]routing.Target{
+		{{Provider: "flaky", UpstreamModel: "m"}},
+	}}
+	_, _, _ = s.runChat(context.Background(), plan, hiReq)
+
+	_, res, err := s.runChat(context.Background(), plan, hiReq)
+	if up.calls.Load() != 1 || res.Attempts != 0 {
+		t.Fatalf("calls=%d attempts=%d, want the marked target skipped", up.calls.Load(), res.Attempts)
+	}
+	if code, _ := classifyUpstreamErr(err); code != http.StatusServiceUnavailable {
+		t.Errorf("error %v maps to %d, want 503: nothing is busy, the targets are down", err, code)
 	}
 }

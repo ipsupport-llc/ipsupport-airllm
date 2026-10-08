@@ -30,13 +30,14 @@ const (
 // 429 (back off and retry); a recognized context-length/model-not-found/
 // multimodal-not-supported/reasoning-effort-unsupported/voice-not-supported
 // error that still failed on every fallback tier is a 400 the client can act
-// on; every tier quarantined by its breaker is a 503; anything else is a 502
+// on; every tier quarantined by its breaker, or every target marked
+// unavailable, is a 503; anything else is a 502
 // upstream error.
 func classifyUpstreamErr(err error) (int, string) {
 	if errors.Is(err, errAllBusy) {
 		return http.StatusTooManyRequests, "rate_limit_error"
 	}
-	if errors.Is(err, errAllQuarantined) {
+	if errors.Is(err, errAllQuarantined) || errors.Is(err, errAllUnavailable) {
 		return http.StatusServiceUnavailable, "upstream_error"
 	}
 	if providers.IsTargetMismatch(err) {

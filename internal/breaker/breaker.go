@@ -116,6 +116,9 @@ type Admission struct {
 	// ran out. Its outcome must be recorded with Record(probe=true), or
 	// handed back with AbandonProbe if no call was made.
 	Probe bool
+	// OpenUntil is when the cooldown of a skipped open tier runs out; zero
+	// for a tier skipped because another request holds its probe.
+	OpenUntil time.Time
 }
 
 // Status is a tier's breaker as an operator sees it.
@@ -137,7 +140,8 @@ type Transition struct {
 	From State
 	To   State
 	// Cause is the trip reason for an opening, "probe" or "manual" for a
-	// closing, and empty for a probe admission.
+	// closing, empty for a probe admission and "forced" for a probe Force
+	// let through before the cooldown ran out.
 	Cause    string
 	Cooldown time.Duration
 	// OpenUntil is set for an opening.
@@ -214,6 +218,20 @@ func New(rdb *redis.Client, opts ...Option) *Breaker {
 
 // Admit decides whether one attempt may call the tier.
 func (b *Breaker) Admit(ctx context.Context, k Key, set Settings) Admission {
+	return b.admit(ctx, k, set, false)
+}
+
+// Force is Admit for a request with nowhere else to go: every tier it could
+// use is open. An open tier lets the single probe through before its
+// cooldown runs out, so an alias whose tiers all tripped at once (a network
+// blip on the gateway's side) is not down until the shortest cooldown ends.
+// A probe already out on the tier still makes it a skip, so a dead tier sees
+// at most one forced request at a time.
+func (b *Breaker) Force(ctx context.Context, k Key, set Settings) Admission {
+	return b.admit(ctx, k, set, true)
+}
+
+func (b *Breaker) admit(ctx context.Context, k Key, set Settings, force bool) Admission {
 	if b == nil || !set.Enabled {
 		return Admission{}
 	}
@@ -226,11 +244,11 @@ func (b *Breaker) Admit(ctx context.Context, k Key, set Settings) Admission {
 	if cur.state() == Closed {
 		return Admission{}
 	}
-	if cur.coolingDown(now) {
-		return Admission{Skip: true}
+	if cur.blocks(now, force) {
+		return cur.skip()
 	}
-	// The cooldown (or a lost probe's lease) has run out: race the other
-	// requests for the single probe.
+	// The cooldown (or a lost probe's lease) has run out, or the request is
+	// forced: race the other requests for the single probe.
 	var adm Admission
 	var tr *Transition
 	err = b.update(ctx, k, set, func(r *record) bool {
@@ -238,11 +256,16 @@ func (b *Breaker) Admit(ctx context.Context, k Key, set Settings) Admission {
 		if r.state() == Closed {
 			return false
 		}
-		if r.coolingDown(now) {
-			adm.Skip = true
+		if r.blocks(now, force) {
+			adm = r.skip()
 			return false
 		}
 		tr = &Transition{Key: k, From: r.state(), To: HalfOpen}
+		if force && r.coolingDown(now) {
+			tr.Cause = "forced"
+		}
+		// OpenUntil stays: a forced probe handed back unused re-opens the
+		// tier for the rest of its cooldown.
 		r.State = HalfOpen
 		r.ProbeUntil = now.Add(set.probeLease()).UnixMilli()
 		adm.Probe = true
@@ -258,6 +281,24 @@ func (b *Breaker) Admit(ctx context.Context, k Key, set Settings) Admission {
 	}
 	if tr != nil {
 		b.emit(*tr)
+	}
+	return adm
+}
+
+// blocks reports whether an attempt must skip the tier at now. A forced
+// attempt ignores an open tier's cooldown but not a running probe's lease.
+func (r *record) blocks(now time.Time, force bool) bool {
+	if force && r.state() == Open {
+		return false
+	}
+	return r.coolingDown(now)
+}
+
+// skip is the Admission for a tier blocks turned away.
+func (r *record) skip() Admission {
+	adm := Admission{Skip: true}
+	if r.state() == Open {
+		adm.OpenUntil = time.UnixMilli(r.OpenUntil)
 	}
 	return adm
 }
@@ -315,16 +356,22 @@ func (b *Breaker) Record(ctx context.Context, k Key, set Settings, failed, probe
 }
 
 // AbandonProbe hands back a probe that made no call (the tier was busy, or
-// the client went away first), so the next request can probe at once.
+// the client went away first), so the next request can probe at once. A
+// forced probe handed back before the tier's cooldown ran out re-opens it
+// for the rest of the cooldown instead.
 func (b *Breaker) AbandonProbe(ctx context.Context, k Key, set Settings) {
 	if b == nil || !set.Enabled {
 		return
 	}
+	now := b.now()
 	_ = b.update(ctx, k, set, func(r *record) bool {
 		if r.state() != HalfOpen {
 			return false
 		}
 		r.ProbeUntil = 0
+		if now.UnixMilli() < r.OpenUntil {
+			r.State = Open
+		}
 		return true
 	})
 }

@@ -27,6 +27,7 @@ type Metrics struct {
 	dlpDuration  prometheus.Histogram
 
 	breakerTransitions *prometheus.CounterVec
+	breakerForced      *prometheus.CounterVec
 	tierFallbacks      *prometheus.CounterVec
 	tierOutcomes       *prometheus.CounterVec
 	tierLatency        *prometheus.HistogramVec
@@ -67,6 +68,9 @@ func New() *Metrics {
 		breakerTransitions: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "airllm_breaker_transitions_total", Help: "Tier circuit breaker state changes by alias, tier and new state.",
 		}, []string{"alias", "tier", "to"}),
+		breakerForced: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "airllm_breaker_forced_probes_total", Help: "Probes let into an open tier before its cooldown ran out because every tier of the alias was open.",
+		}, []string{"alias", "tier"}),
 		tierFallbacks: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "airllm_tier_fallbacks_total", Help: "Requests that moved past a tier, by origin tier, the tier that served (none if nothing did) and reason.",
 		}, []string{"alias", "from_tier", "to_tier", "reason"}),
@@ -83,7 +87,7 @@ func New() *Metrics {
 		}, []string{"alias", "provider", "outcome"}),
 	}
 	m.reg.MustRegister(m.httpRequests, m.httpDuration, m.component, m.tokens, m.cost, m.rateLimited, m.dlpSkipped, m.dlpDuration,
-		m.breakerTransitions, m.tierFallbacks, m.tierOutcomes, m.tierLatency, m.synthesisCache)
+		m.breakerTransitions, m.breakerForced, m.tierFallbacks, m.tierOutcomes, m.tierLatency, m.synthesisCache)
 	return m
 }
 
@@ -227,6 +231,15 @@ func (m *Metrics) BreakerTransition(alias, tier, to string) {
 		return
 	}
 	m.breakerTransitions.WithLabelValues(alias, tier, to).Inc()
+}
+
+// BreakerForcedProbe counts a probe forced into an open tier because every
+// tier of the alias was open.
+func (m *Metrics) BreakerForcedProbe(alias, tier string) {
+	if m == nil {
+		return
+	}
+	m.breakerForced.WithLabelValues(alias, tier).Inc()
 }
 
 // TierFallback counts a request moving past tier from, served in the end by

@@ -322,24 +322,177 @@ func TestBreakerScopeIsTheAliasTierNotTheProvider(t *testing.T) {
 	}
 }
 
-func TestBreakerFailsFastWhenEveryTierIsQuarantined(t *testing.T) {
+// singleTierPlan is an alias whose only tier is breaker-guarded.
+func singleTierPlan(provider string, opts routing.TargetOptions) *routing.Plan {
+	return &routing.Plan{Alias: "single", Strategy: "round_robin", Tiers: [][]routing.Target{
+		{{Provider: provider, UpstreamModel: "m", Options: opts}},
+	}}
+}
+
+var hiReq = llm.ChatRequest{Messages: []llm.Message{{Role: "user", Content: "hi"}}}
+
+func TestBreakerForcesAProbeWhenEveryTierIsOpen(t *testing.T) {
 	up := newSwitchableUpstream(t, true)
 	clk := newFakeClock()
 	s := newBreakerTestServer(t, clk, providers.NewOpenAICompat("only", "openai", up.URL, ""))
-	plan := &routing.Plan{Alias: "single", Strategy: "round_robin", Tiers: [][]routing.Target{
-		{{Provider: "only", UpstreamModel: "m", Options: breakerOn()}},
-	}}
-	req := llm.ChatRequest{Messages: []llm.Message{{Role: "user", Content: "hi"}}}
+	plan := singleTierPlan("only", breakerOn())
 	for i := 0; i < 3; i++ {
-		_, _, _ = s.runChat(context.Background(), plan, req)
+		_, _, _ = s.runChat(context.Background(), plan, hiReq)
 	}
 
-	_, res, err := s.runChat(context.Background(), plan, req)
-	if up.calls.Load() != 3 || res.Attempts != 0 {
-		t.Errorf("calls=%d attempts=%d, want the open tier skipped", up.calls.Load(), res.Attempts)
+	// The provider is back long before the 60s cooldown ends: the alias
+	// must not stay down until then.
+	up.failing.Store(false)
+	clk.Advance(time.Second)
+	_, res, err := s.runChat(context.Background(), plan, hiReq)
+	if err != nil || res.Provider != "only" || up.calls.Load() != 4 {
+		t.Fatalf("err=%v served=%q calls=%d, want the open tier forced and answering", err, res.Provider, up.calls.Load())
+	}
+	// The forced probe succeeded: the tier is closed for everyone.
+	if st, _ := s.breaker.Status(context.Background(), breaker.Key{Alias: "single", Tier: 0}, s.breakerSettings(plan, 0)); st.State != breaker.Closed {
+		t.Errorf("tier state after a successful forced probe = %s, want closed", st.State)
+	}
+}
+
+func TestBreakerForcedProbeThatFailsReopensTheTier(t *testing.T) {
+	up := newSwitchableUpstream(t, true)
+	clk := newFakeClock()
+	s := newBreakerTestServer(t, clk, providers.NewOpenAICompat("only", "openai", up.URL, ""))
+	plan := singleTierPlan("only", breakerOn())
+	for i := 0; i < 3; i++ {
+		_, _, _ = s.runChat(context.Background(), plan, hiReq)
+	}
+
+	_, res, err := s.runChat(context.Background(), plan, hiReq)
+	if up.calls.Load() != 4 || res.Attempts != 1 {
+		t.Fatalf("calls=%d attempts=%d, want one forced call", up.calls.Load(), res.Attempts)
+	}
+	// The client sees the provider's own failure, not a quarantine.
+	if code, _ := classifyUpstreamErr(err); code != http.StatusBadGateway {
+		t.Errorf("error %v maps to %d, want 502", err, code)
+	}
+	st, _ := s.breaker.Status(context.Background(), breaker.Key{Alias: "single", Tier: 0}, s.breakerSettings(plan, 0))
+	if st.State != breaker.Open || st.CooldownMS != (2*time.Minute).Milliseconds() {
+		t.Errorf("after a failed forced probe: state=%s cooldown=%dms, want open for the doubled 120s", st.State, st.CooldownMS)
+	}
+}
+
+func TestBreakerForcesOneProbeAtATime(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	var calls atomic.Int32
+	var holding atomic.Bool
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if !holding.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		entered <- struct{}{}
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	t.Cleanup(up.Close)
+	clk := newFakeClock()
+	s := newBreakerTestServer(t, clk, providers.NewOpenAICompat("only", "openai", up.URL, ""))
+	plan := singleTierPlan("only", breakerOn())
+	for i := 0; i < 3; i++ {
+		_, _, _ = s.runChat(context.Background(), plan, hiReq)
+	}
+
+	holding.Store(true)
+	probe := make(chan error)
+	go func() {
+		_, _, err := s.runChat(context.Background(), plan, hiReq)
+		probe <- err
+	}()
+	<-entered
+	// While the forced probe is out, everyone else fails fast.
+	for i := 0; i < 3; i++ {
+		_, res, err := s.runChat(context.Background(), plan, hiReq)
+		if code, _ := classifyUpstreamErr(err); code != http.StatusServiceUnavailable || res.Attempts != 0 {
+			t.Fatalf("request during the forced probe: attempts=%d error %v maps to %d, want a 503 without a call", res.Attempts, err, code)
+		}
+	}
+	close(release)
+	if err := <-probe; err != nil {
+		t.Errorf("forced probe: %v", err)
+	}
+	if got := calls.Load(); got != 4 {
+		t.Errorf("upstream called %d times, want 3 failures and one forced probe", got)
+	}
+}
+
+func TestBreakerForcesTheTierWhoseCooldownEndsFirst(t *testing.T) {
+	slow, quick := newSwitchableUpstream(t, true), newSwitchableUpstream(t, true)
+	clk := newFakeClock()
+	s := newBreakerTestServer(t, clk,
+		providers.NewOpenAICompat("slow", "openai", slow.URL, ""),
+		providers.NewOpenAICompat("quick", "openai", quick.URL, ""))
+	plan := &routing.Plan{Alias: "pair", Strategy: "round_robin", Tiers: [][]routing.Target{
+		{{Provider: "slow", UpstreamModel: "m", Tier: 0, Options: breakerWith(routing.BreakerOptions{CooldownMS: ms(600000)})}},
+		{{Provider: "quick", UpstreamModel: "m", Tier: 1, Options: breakerOn()}},
+	}}
+	for i := 0; i < 3; i++ {
+		_, _, _ = s.runChat(context.Background(), plan, hiReq)
+	}
+
+	slow.failing.Store(false)
+	quick.failing.Store(false)
+	_, res, err := s.runChat(context.Background(), plan, hiReq)
+	if err != nil || res.Provider != "quick" {
+		t.Fatalf("err=%v served=%q, want tier 1 forced: its 60s cooldown ends before tier 0's 10m", err, res.Provider)
+	}
+	if slow.calls.Load() != 3 {
+		t.Errorf("tier 0 called %d times, want it left open", slow.calls.Load())
+	}
+}
+
+func TestSoonestOpenBreaksTiesOnPriority(t *testing.T) {
+	at := time.Unix(1_700_000_000, 0)
+	for _, tc := range []struct {
+		open map[int]time.Time
+		want int
+		ok   bool
+	}{
+		{open: map[int]time.Time{}, ok: false},
+		{open: map[int]time.Time{0: at.Add(time.Minute), 1: at}, want: 1, ok: true},
+		{open: map[int]time.Time{2: at, 0: at, 1: at.Add(-time.Second)}, want: 1, ok: true},
+		{open: map[int]time.Time{3: at, 1: at, 2: at}, want: 1, ok: true},
+	} {
+		if got, ok := soonestOpen(tc.open); got != tc.want || ok != tc.ok {
+			t.Errorf("soonestOpen(%v) = %d, %v, want %d, %v", tc.open, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+func TestBreakerForcedProbeRespectsAnUnavailableMark(t *testing.T) {
+	up := newSwitchableUpstream(t, true)
+	clk := newFakeClock()
+	s := newUnavailTestServer(t, clk, providers.NewOpenAICompat("only", "openai", up.URL, ""))
+	s.breaker = s.newBreaker(nil, breaker.WithClock(clk.Now))
+	plan := singleTierPlan("only", breakerOn())
+	for i := 0; i < 3; i++ {
+		_, _, _ = s.runChat(context.Background(), plan, hiReq)
+		clk.Advance(time.Second) // past each failure's unavailable mark
+	}
+
+	// The forced probe fails and marks the target down for 200ms.
+	_, _, _ = s.runChat(context.Background(), plan, hiReq)
+	if up.calls.Load() != 4 {
+		t.Fatalf("calls=%d, want the forced probe made", up.calls.Load())
+	}
+	_, res, err := s.runChat(context.Background(), plan, hiReq)
+	if up.calls.Load() != 4 || res.Attempts != 0 {
+		t.Errorf("calls=%d attempts=%d, want the marked target left alone", up.calls.Load(), res.Attempts)
 	}
 	if code, _ := classifyUpstreamErr(err); code != http.StatusServiceUnavailable {
 		t.Errorf("error %v maps to %d, want 503", err, code)
+	}
+	// The probe handed back while the tier was cooling down leaves it open.
+	if st, _ := s.breaker.Status(context.Background(), breaker.Key{Alias: "single", Tier: 0}, s.breakerSettings(plan, 0)); st.State != breaker.Open {
+		t.Errorf("tier state after an unused forced probe = %s, want open", st.State)
 	}
 }
 
@@ -741,6 +894,64 @@ func TestBreakerReplicasRacingForTheProbeLetOneThrough(t *testing.T) {
 	wg.Wait()
 	if got := calls.Load(); got != 4 {
 		t.Errorf("upstream called %d times, want 3 failures and exactly one probe across both replicas", got)
+	}
+}
+
+func TestBreakerReplicasRacingForAForcedProbeLetOneThrough(t *testing.T) {
+	rdb := testBreakerRedis(t)
+	release := make(chan struct{})
+	var calls atomic.Int32
+	var recovering atomic.Bool
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if !recovering.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	t.Cleanup(up.Close)
+	clk := newFakeClock()
+	var replicas []*Server
+	for i := 0; i < 2; i++ {
+		s := newRunChatTestServer(t, providers.NewOpenAICompat("only", "openai", up.URL, ""))
+		s.breaker = s.newBreaker(rdb, breaker.WithClock(clk.Now))
+		replicas = append(replicas, s)
+	}
+	plan := singleTierPlan("only", breakerOn())
+	plan.Alias = fmt.Sprintf("forced-race-%d", time.Now().UnixNano())
+	for i := 0; i < 3; i++ {
+		_, _, _ = replicas[0].runChat(context.Background(), plan, hiReq)
+	}
+	recovering.Store(true)
+
+	// Well inside the cooldown, every request is out of tiers: exactly one
+	// across both replicas is forced through, the rest fail fast.
+	var wg sync.WaitGroup
+	var served atomic.Int32
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(s *Server) {
+			defer wg.Done()
+			if _, _, err := s.runChat(context.Background(), plan, hiReq); err == nil {
+				served.Add(1)
+			}
+		}(replicas[i%2])
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for calls.Load() < 4 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	wg.Wait()
+	if got := calls.Load(); got != 4 {
+		t.Errorf("upstream called %d times, want 3 failures and exactly one forced probe across both replicas", got)
+	}
+	if served.Load() != 1 {
+		t.Errorf("%d requests served, want only the forced probe", served.Load())
 	}
 }
 
