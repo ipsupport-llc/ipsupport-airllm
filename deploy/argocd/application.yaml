@@ -14,6 +14,11 @@ spec:
     targetRevision: main
     path: deploy/helm/airllm
     helm:
+      # Image digests CI writes after every green main build — tracking main
+      # with this file means a merge to main is the rollout. To pin a release
+      # instead, set targetRevision to a tag and drop this file.
+      valueFiles:
+        - ../../argocd/values-main.yaml
       # Prefer a values file kept OUTSIDE this public repo (valueFiles / multiple
       # sources) over inline parameters. existingSecret must name a Secret you manage.
       parameters:

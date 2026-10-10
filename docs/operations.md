@@ -130,16 +130,30 @@ ordered-on-boot migrator.
 
 ## Releasing
 
-GitOps consumers may track the chart on `main` with an empty `image.tag`, in
-which case the image they deploy is the chart's `appVersion`. A release is
-therefore TWO steps, in order:
+A GitOps consumer has two ways to follow the chart:
 
-1. Bump `version` and `appVersion` in `deploy/helm/airllm/Chart.yaml` to the
-   release number, on `main` (part of the release PR).
-2. Tag `vX.Y.Z` and push the tag — the release workflow builds and pushes the
-   images. It refuses to run if `Chart.yaml` `appVersion` does not match the
-   tag, so a forgotten bump fails loudly instead of shipping a release that
-   main-tracking consumers never see.
+- **Track `main` (continuous).** After CI passes on `main`, the `Deploy main`
+  workflow builds the images from that commit, tags them with the commit sha
+  and `main`, and commits their digests to `deploy/argocd/values-main.yaml`
+  (`chore(deploy): bump main image digests`, with `built-from=<sha>` in the
+  body). List that file in the Application's Helm `valueFiles` and a merge to
+  `main` is the rollout — no chart bump, no tag. A digest wins over
+  `image.tag`. A docs-only change rebuilds nothing, and the dlp-bert image is
+  rebuilt only when `deploy/dlp-bert/` changed; run the workflow by hand to
+  rebuild both. Roll back by reverting on `main`. Between the merge and the
+  digest commit (one image build) the new chart templates run with the
+  previous images, so a template change that needs new code should stay
+  backward-compatible with the previous build.
+- **Pin a release tag.** Set `targetRevision` to a tag `vX.Y.Z`, leave
+  `values-main.yaml` out and `image.tag` empty, and the image is the chart's
+  `appVersion`. A release is then TWO steps, in order:
+
+  1. Bump `version` and `appVersion` in `deploy/helm/airllm/Chart.yaml` to the
+     release number, on `main` (part of the release PR).
+  2. Tag `vX.Y.Z` and push the tag — the release workflow builds and pushes
+     the images. It refuses to run if `Chart.yaml` `appVersion` does not match
+     the tag, so a forgotten bump fails loudly instead of shipping a release
+     whose image nobody deploys.
 
 ## Kubernetes (Helm chart)
 

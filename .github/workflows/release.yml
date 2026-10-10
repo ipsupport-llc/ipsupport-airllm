@@ -10,9 +10,10 @@ permissions:
   packages: write
 
 jobs:
-  # GitOps consumers track the chart on main with an empty image.tag, so the
-  # image they run is Chart.yaml's appVersion. A release whose tag doesn't
+  # A GitOps consumer pinned to a release tag leaves image.tag empty, so the
+  # image it runs is Chart.yaml's appVersion. A release whose tag doesn't
   # match the chart ships images nobody deploys — fail fast instead.
+  # (Consumers tracking main use deploy-main.yml's digests instead.)
   chart-version-guard:
     runs-on: ubuntu-latest
     timeout-minutes: 5

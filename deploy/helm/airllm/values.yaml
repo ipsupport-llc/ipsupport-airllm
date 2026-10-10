@@ -8,6 +8,7 @@ fullnameOverride: ""
 image:
   repository: ghcr.io/OWNER/ipsupport-airllm   # placeholder
   tag: ""                                       # defaults to .Chart.AppVersion
+  digest: ""                                    # sha256:… — pins the exact build, wins over tag
   pullPolicy: IfNotPresent
 imagePullSecrets: []                            # e.g. [{ name: regcred }]
 
@@ -108,6 +109,7 @@ dlpBert:
   image:
     repository: ghcr.io/OWNER/ipsupport-airllm-dlp-bert   # placeholder
     tag: ""                                     # defaults to the chart appVersion — pin explicitly (separate artifact from the gateway)
+    digest: ""                                  # sha256:… — pins the exact build, wins over tag
     pullPolicy: IfNotPresent
   service:
     headless: false                             # true → one pool endpoint per pod; false → kube-proxy LB
