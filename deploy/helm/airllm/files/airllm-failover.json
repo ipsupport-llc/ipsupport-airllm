@@ -406,6 +406,99 @@
         }
       ],
       "description": "Share of answered synthesis requests served from the cache; a cache error counts as a miss. Empty until a gateway with the synthesis cache serves an alias that has it switched on."
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 43
+      },
+      "id": 12,
+      "panels": [],
+      "title": "LCR routing",
+      "type": "row"
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 44
+      },
+      "id": 13,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "title": "Target price (USD / 1M tokens)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "max by (provider, upstream_model) (airllm_target_price_usd_per_1m{provider=~\"$provider\"})",
+          "legendFormat": "{{provider}} · {{upstream_model}}",
+          "refId": "A"
+        }
+      ],
+      "description": "LCR price proxy (input + output rate per 1M tokens) for each target an lcr-strategy alias has actually ranked; set when a request orders that tier, so a target with no recent lcr traffic has no line. Unpriced targets are excluded here (they sort last in ranking, never shown as free)."
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 44
+      },
+      "id": 14,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "title": "Target availability (live EWMA)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "max by (provider, upstream_model) (airllm_target_availability{provider=~\"$provider\"})",
+          "legendFormat": "{{provider}} · {{upstream_model}}",
+          "refId": "A"
+        }
+      ],
+      "description": "Live EWMA success rate per target, the same signal lcr_mode=availability/both ranks by; set when a request orders that tier. A cold-started target with no recent history reads 1.0, same as the ranking sees it."
     }
   ],
   "refresh": "30s",
@@ -441,6 +534,25 @@
         "query": {
           "query": "label_values(airllm_tier_outcomes_total, alias)",
           "refId": "alias"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {},
+        "datasource": "${DS_PROMETHEUS}",
+        "definition": "label_values(airllm_target_price_usd_per_1m, provider)",
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "Provider",
+        "multi": true,
+        "name": "provider",
+        "options": [],
+        "query": {
+          "query": "label_values(airllm_target_price_usd_per_1m, provider)",
+          "refId": "provider"
         },
         "refresh": 2,
         "sort": 1,
