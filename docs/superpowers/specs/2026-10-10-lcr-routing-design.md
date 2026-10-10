@@ -4,6 +4,12 @@
 > passes, `codex` and `muse` CLIs — both read the real code, findings below
 > are self-verified against it, not taken on faith). Not yet planned or
 > implemented.
+>
+> Numeric defaults (`lcr_min_availability=0.5`, EWMA `alpha=0.1`,
+> recovery `TTL=15min`) are the operator's explicitly accepted starting
+> point, not a tuned result — there is no production traffic to tune
+> against yet ("в бою не было, хз на что его менять"). Expect to revisit
+> once `lcr`-strategy aliases see real traffic.
 
 ## Goal
 
