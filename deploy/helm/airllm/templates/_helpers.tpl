@@ -41,10 +41,15 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s-dlp-bert" (include "airllm.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{/* Image ref with tag defaulting to the chart appVersion. */}}
+{{/* Image ref: a digest pins the exact build and wins over the tag; the tag
+     defaults to the chart appVersion. */}}
 {{- define "airllm.image" -}}
+{{- if .image.digest -}}
+{{- printf "%s@%s" .image.repository .image.digest -}}
+{{- else -}}
 {{- $tag := .image.tag | default .root.Chart.AppVersion -}}
 {{- printf "%s:%s" .image.repository $tag -}}
+{{- end -}}
 {{- end -}}
 
 {{/*

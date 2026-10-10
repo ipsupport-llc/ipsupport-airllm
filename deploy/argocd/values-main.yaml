@@ -1,0 +1,9 @@
+# Image digests built from main by .github/workflows/deploy-main.yml, which
+# rewrites this file after every green CI run on main. A GitOps consumer that
+# tracks main lists this file in its Helm valueFiles, so a merge to main is the
+# rollout. A digest wins over image.tag (see the chart's airllm.image helper).
+image:
+  digest: "sha256:ff3d84ccaba734ea720609e2942742a199b8a4d4c51c9e34ed5ce15a60aab146"
+dlpBert:
+  image:
+    digest: "sha256:28083c82b1eff753eb4abd2a934594a2dcf8d5237964e18fb420bef9bc754099"
