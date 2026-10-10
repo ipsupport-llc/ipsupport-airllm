@@ -7,9 +7,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/ipsupport-llc/ipsupport-airllm/internal/lcr"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
-	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
 )
 
 // secondpassConfig is the second-pass DLP scan policy.
@@ -87,28 +85,7 @@ func (s *Server) SecondpassChat(ctx context.Context, prompt string) (string, err
 		return "", fmt.Errorf("secondpass: resolve %q: %w", cfg.Model, err)
 	}
 	reg := s.reg()
-	var lcrRank func(routing.Target) routing.LCRRank
-	if plan.Strategy == "lcr" {
-		var keys []lcr.Key
-		for _, tier := range plan.Tiers {
-			for _, tgt := range tier {
-				keys = append(keys, lcr.Key{Provider: tgt.Provider, UpstreamModel: tgt.UpstreamModel})
-			}
-		}
-		avail := map[lcr.Key]float64{}
-		if plan.LCRMode != "price" {
-			avail = s.lcr.Snapshot(ctx, keys)
-		}
-		lcrRank = buildLCRRank(s.pricing.Rate, avail)
-		for _, k := range keys {
-			if rate, ok := s.pricing.Rate(k.Provider, k.UpstreamModel); ok {
-				s.metrics.SetTargetPrice(k.Provider, k.UpstreamModel, rate)
-			}
-			if a, ok := avail[k]; ok {
-				s.metrics.SetTargetAvailability(k.Provider, k.UpstreamModel, a)
-			}
-		}
-	}
+	lcrRank := s.lcrRank(ctx, plan)
 	// SecondpassChat has no breaker/unavail admission gate (unlike
 	// executePlan): lcr's own "both"-mode minimum-availability threshold is
 	// the only quality signal available on this path.

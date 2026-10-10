@@ -700,6 +700,12 @@ func TestAdminAliasHealthAndRelease(t *testing.T) {
 	if len(t0.Targets) != 1 || t0.Targets[0].Provider != prov {
 		t.Errorf("tier 0 targets = %+v, want the flaky provider", t0.Targets)
 	}
+	// This alias's strategy is round_robin (the default, never set above):
+	// no EWMA data is ever collected for it, so the health view must not
+	// fabricate a "100% available" figure nobody is actually measuring.
+	if t0.Targets[0].Availability != nil {
+		t.Errorf("tier 0 target availability = %v, want nil (strategy=round_robin collects no EWMA data)", *t0.Targets[0].Availability)
+	}
 	if t1.Tier != 10 || t1.BreakerEnabled || t1.State != "closed" {
 		t.Errorf("tier 10 = %+v, want a closed tier without a breaker", t1)
 	}

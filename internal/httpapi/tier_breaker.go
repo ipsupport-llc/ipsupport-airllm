@@ -216,8 +216,15 @@ func (s *Server) handleAdminAliasHealth(w http.ResponseWriter, r *http.Request) 
 			if rate, ok := s.pricing.Rate(t.Provider, t.UpstreamModel); ok {
 				target.PriceUSDPer1M = &rate
 			}
-			avail := s.lcr.Snapshot(r.Context(), []lcr.Key{{Provider: t.Provider, UpstreamModel: t.UpstreamModel}})[lcr.Key{Provider: t.Provider, UpstreamModel: t.UpstreamModel}]
-			target.Availability = &avail
+			// Only an lcr-strategy alias actually has EWMA data being
+			// collected for it (internal/lcr.Store.Record is only called
+			// when plan.Strategy == "lcr") — for any other strategy,
+			// Snapshot's cold-start 1.0 default would otherwise show up as
+			// a fabricated "100% available" on every target.
+			if plan.Strategy == "lcr" {
+				avail := s.lcr.Snapshot(r.Context(), []lcr.Key{{Provider: t.Provider, UpstreamModel: t.UpstreamModel}})[lcr.Key{Provider: t.Provider, UpstreamModel: t.UpstreamModel}]
+				target.Availability = &avail
+			}
 			if remaining, skip := s.unavail.Check(r.Context(), unavail.Key{Provider: t.Provider, UpstreamModel: t.UpstreamModel}); skip {
 				target.Unavailable = true
 				target.UnavailableRemainingMS = remaining.Milliseconds()
