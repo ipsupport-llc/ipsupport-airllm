@@ -100,6 +100,14 @@ func (s *Server) SecondpassChat(ctx context.Context, prompt string) (string, err
 			avail = s.lcr.Snapshot(ctx, keys)
 		}
 		lcrRank = buildLCRRank(s.pricing.Rate, avail)
+		for _, k := range keys {
+			if rate, ok := s.pricing.Rate(k.Provider, k.UpstreamModel); ok {
+				s.metrics.SetTargetPrice(k.Provider, k.UpstreamModel, rate)
+			}
+			if a, ok := avail[k]; ok {
+				s.metrics.SetTargetAvailability(k.Provider, k.UpstreamModel, a)
+			}
+		}
 	}
 	// SecondpassChat has no breaker/unavail admission gate (unlike
 	// executePlan): lcr's own "both"-mode minimum-availability threshold is
