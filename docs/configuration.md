@@ -377,7 +377,7 @@ targets. Two configurations this is meant to support cleanly:
   via LCR, with the local model as the always-available floor.
 
 Both are pure configuration — tier composition plus the existing
-`max_concurrency` cap — once an alias target's tier sets `strategy=lcr`; no
+`max_concurrency` cap — once the alias itself sets `strategy=lcr`; no
 additional mechanism is needed beyond the ordering rule above.
 
 #### Call affinity

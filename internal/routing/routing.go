@@ -1,6 +1,7 @@
 // Package routing resolves a client-requested model into a fallback/load-
 // balancing plan: targets grouped into priority tiers, with a within-tier
-// strategy (round-robin or least-busy). Lower-priority tiers are fallback.
+// strategy (round-robin, least-busy, or lcr cost/availability ranking).
+// Lower-priority tiers are fallback.
 package routing
 
 import (
