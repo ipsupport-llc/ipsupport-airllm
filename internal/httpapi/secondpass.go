@@ -85,7 +85,7 @@ func (s *Server) SecondpassChat(ctx context.Context, prompt string) (string, err
 		return "", fmt.Errorf("secondpass: resolve %q: %w", cfg.Model, err)
 	}
 	reg := s.reg()
-	for _, t := range plan.Ordered(0, s.freeFunc(reg)) {
+	for _, t := range plan.Ordered(0, s.freeFunc(reg), nil) {
 		e, ok := reg.Get(t.Provider)
 		if !ok {
 			continue

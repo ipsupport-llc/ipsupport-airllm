@@ -313,7 +313,7 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 		}
 		for retry := 0; retry <= busyRetries; retry++ {
 			anyBusy := false
-			for _, t := range plan.Ordered(s.router.NextRR(plan.Alias), free) {
+			for _, t := range plan.Ordered(s.router.NextRR(plan.Alias), free, nil) {
 				if pinned && t.Tier < floor {
 					continue
 				}
