@@ -12,9 +12,11 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/breaker"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/lcr"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/metrics"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/unavail"
 )
 
 // errAllQuarantined is returned when every target that could have served
@@ -175,9 +177,13 @@ type tierHealth struct {
 }
 
 type tierHealthTarget struct {
-	Provider      string `json:"provider"`
-	UpstreamModel string `json:"upstream_model"`
-	DisplayLabel  string `json:"display_label,omitempty"`
+	Provider               string   `json:"provider"`
+	UpstreamModel          string   `json:"upstream_model"`
+	DisplayLabel           string   `json:"display_label,omitempty"`
+	PriceUSDPer1M          *float64 `json:"price_usd_per_1m,omitempty"`
+	Availability           *float64 `json:"availability,omitempty"`
+	Unavailable            bool     `json:"unavailable"`
+	UnavailableRemainingMS int64    `json:"unavailable_remaining_ms,omitempty"`
 }
 
 // handleAdminAliasHealth reports the breaker of every tier of an alias.
@@ -206,7 +212,17 @@ func (s *Server) handleAdminAliasHealth(w http.ResponseWriter, r *http.Request) 
 		}
 		h := tierHealth{Tier: tier, Enabled: set.Enabled, Status: st}
 		for _, t := range ts {
-			h.Targets = append(h.Targets, tierHealthTarget{Provider: t.Provider, UpstreamModel: t.UpstreamModel, DisplayLabel: t.DisplayLabel})
+			target := tierHealthTarget{Provider: t.Provider, UpstreamModel: t.UpstreamModel, DisplayLabel: t.DisplayLabel}
+			if rate, ok := s.pricing.Rate(t.Provider, t.UpstreamModel); ok {
+				target.PriceUSDPer1M = &rate
+			}
+			avail := s.lcr.Snapshot(r.Context(), []lcr.Key{{Provider: t.Provider, UpstreamModel: t.UpstreamModel}})[lcr.Key{Provider: t.Provider, UpstreamModel: t.UpstreamModel}]
+			target.Availability = &avail
+			if remaining, skip := s.unavail.Check(r.Context(), unavail.Key{Provider: t.Provider, UpstreamModel: t.UpstreamModel}); skip {
+				target.Unavailable = true
+				target.UnavailableRemainingMS = remaining.Milliseconds()
+			}
+			h.Targets = append(h.Targets, target)
 		}
 		tiers = append(tiers, h)
 	}
