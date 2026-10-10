@@ -17,6 +17,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/breaker"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/capture"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/config"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/lcr"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/ledger"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/limits"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/lookupcache"
@@ -87,6 +88,7 @@ type Server struct {
 	unavail       *unavail.Store   // per-(provider,model) Retry-After-aware skip; nil Check never skips
 	affinity      *affinity.Store  // session pins to a backup tier; nil pins nothing
 	speechCache   *speechcache.Cache
+	lcr           *lcr.Store // per-(provider,model) EWMA availability for the lcr strategy; nil Snapshot returns all-1.0
 
 	// Test hooks: non-nil values replace the real implementations in tests.
 	auditHook    func(ctx context.Context, actor, action, target string, detail any)
@@ -138,6 +140,7 @@ func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 	s.loadFailover(context.Background())
 	s.breaker = s.newBreaker(st.RDB)
 	s.unavail = unavail.New(st.RDB)
+	s.lcr = lcr.New(st.RDB)
 	s.affinity = affinity.New(st.RDB)
 	s.metrics.RegisterBreakerStates(s.breakerStates)
 	if deps.Capture != nil {

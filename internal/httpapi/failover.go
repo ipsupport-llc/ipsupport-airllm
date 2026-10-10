@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"sync/atomic"
 	"time"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/breaker"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/lcr"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/unavail"
@@ -232,6 +234,24 @@ const (
 // chunk and stops if it reports false.
 type attemptCall func(ctx context.Context, p providers.Provider, t routing.Target, commit func() bool) error
 
+// buildLCRRank closes over a price lookup and a pre-fetched availability
+// snapshot to produce the pure routing.LCRRank function internal/routing
+// needs — keeping Redis and pricing lookups entirely in httpapi, per the
+// spec's "keeping internal/routing pure" section.
+func buildLCRRank(priceOf func(provider, model string) (float64, bool), avail map[lcr.Key]float64) func(routing.Target) routing.LCRRank {
+	return func(t routing.Target) routing.LCRRank {
+		price := math.Inf(1)
+		if rate, ok := priceOf(t.Provider, t.UpstreamModel); ok {
+			price = rate
+		}
+		a := 1.0
+		if v, ok := avail[lcr.Key{Provider: t.Provider, UpstreamModel: t.UpstreamModel}]; ok {
+			a = v
+		}
+		return routing.LCRRank{Price: price, Availability: a}
+	}
+}
+
 // executePlan walks the plan's targets in try-order, acquiring a concurrency
 // slot per attempt and running each under its target's time budget. A busy
 // target is skipped; a failure the target's policy deems fallback-worthy
@@ -261,6 +281,28 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 	session := clientSessionFrom(ctx)
 	res.Session = session
 	floor, pinned := s.sessionFloor(ctx, plan, session)
+	var lcrRank func(routing.Target) routing.LCRRank
+	if plan.Strategy == "lcr" {
+		var keys []lcr.Key
+		for _, tier := range plan.Tiers {
+			for _, tgt := range tier {
+				keys = append(keys, lcr.Key{Provider: tgt.Provider, UpstreamModel: tgt.UpstreamModel})
+			}
+		}
+		avail := map[lcr.Key]float64{}
+		if plan.LCRMode != "price" { // skip the read entirely when price alone decides
+			avail = s.lcr.Snapshot(ctx, keys)
+		}
+		lcrRank = buildLCRRank(s.pricing.Rate, avail)
+		for _, k := range keys {
+			if rate, ok := s.pricing.Rate(k.Provider, k.UpstreamModel); ok {
+				s.metrics.SetTargetPrice(k.Provider, k.UpstreamModel, rate)
+			}
+			if a, ok := avail[k]; ok {
+				s.metrics.SetTargetAvailability(k.Provider, k.UpstreamModel, a)
+			}
+		}
+	}
 	var lastErr error
 	// skipErr is why a target was skipped as unable to serve the call. It
 	// is the answer only when nothing else happened: a capable target that
@@ -313,7 +355,7 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 		}
 		for retry := 0; retry <= busyRetries; retry++ {
 			anyBusy := false
-			for _, t := range plan.Ordered(s.router.NextRR(plan.Alias), free, nil) {
+			for _, t := range plan.Ordered(s.router.NextRR(plan.Alias), free, lcrRank) {
 				if pinned && t.Tier < floor {
 					continue
 				}
@@ -393,6 +435,9 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 					if recorded.CompareAndSwap(false, true) {
 						s.breaker.Record(ctx, key, set, false, adm.Probe)
 						s.metrics.TierAttempt(plan.Alias, tierLabel, "success", time.Since(began))
+						if plan.Strategy == "lcr" {
+							s.lcr.Record(ctx, lcr.Key{Provider: t.Provider, UpstreamModel: t.UpstreamModel}, true)
+						}
 					}
 				}
 				committed, callErr := runAttempt(ctx, t.Provider, pol.budget, func(actx context.Context, commit func() bool) error {
@@ -427,6 +472,9 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 					s.breaker.Record(ctx, key, set, true, adm.Probe)
 					s.metrics.TierAttempt(plan.Alias, tierLabel, "failure", time.Since(began))
 					s.markUnavailable(ctx, unavailKey, callErr)
+					if plan.Strategy == "lcr" {
+						s.lcr.Record(ctx, lcr.Key{Provider: unavailKey.Provider, UpstreamModel: unavailKey.UpstreamModel}, false)
+					}
 				default:
 					// The request itself was the problem: no verdict on the tier.
 					if adm.Probe {

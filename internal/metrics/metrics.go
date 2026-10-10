@@ -32,6 +32,9 @@ type Metrics struct {
 	tierOutcomes       *prometheus.CounterVec
 	tierLatency        *prometheus.HistogramVec
 	synthesisCache     *prometheus.CounterVec
+
+	targetPrice        *prometheus.GaugeVec
+	targetAvailability *prometheus.GaugeVec
 }
 
 // New builds and registers the collectors on a fresh registry.
@@ -85,9 +88,16 @@ func New() *Metrics {
 		synthesisCache: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "airllm_synthesis_cache_total", Help: "Answered speech requests on aliases with the synthesis cache, by alias, serving provider and outcome (hit, miss, error).",
 		}, []string{"alias", "provider", "outcome"}),
+		targetPrice: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "airllm_target_price_usd_per_1m", Help: "LCR price proxy (InputPer1M + OutputPer1M) for a target, by provider and upstream model.",
+		}, []string{"provider", "upstream_model"}),
+		targetAvailability: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "airllm_target_availability", Help: "Live EWMA success rate (0..1) for a target, by provider and upstream model.",
+		}, []string{"provider", "upstream_model"}),
 	}
 	m.reg.MustRegister(m.httpRequests, m.httpDuration, m.component, m.tokens, m.cost, m.rateLimited, m.dlpSkipped, m.dlpDuration,
-		m.breakerTransitions, m.breakerForced, m.tierFallbacks, m.tierOutcomes, m.tierLatency, m.synthesisCache)
+		m.breakerTransitions, m.breakerForced, m.tierFallbacks, m.tierOutcomes, m.tierLatency, m.synthesisCache,
+		m.targetPrice, m.targetAvailability)
 	return m
 }
 
@@ -270,6 +280,22 @@ func (m *Metrics) TierAttempt(alias, tier, outcome string, d time.Duration) {
 	}
 	m.tierOutcomes.WithLabelValues(alias, tier, outcome).Inc()
 	m.tierLatency.WithLabelValues(alias, tier, outcome).Observe(d.Seconds())
+}
+
+// SetTargetPrice records the current LCR price proxy for a target.
+func (m *Metrics) SetTargetPrice(provider, model string, usdPer1M float64) {
+	if m == nil {
+		return
+	}
+	m.targetPrice.WithLabelValues(provider, model).Set(usdPer1M)
+}
+
+// SetTargetAvailability records a target's live EWMA availability.
+func (m *Metrics) SetTargetAvailability(provider, model string, avail float64) {
+	if m == nil {
+		return
+	}
+	m.targetAvailability.WithLabelValues(provider, model).Set(avail)
 }
 
 // BreakerState is one tier breaker's state as read at scrape time.
