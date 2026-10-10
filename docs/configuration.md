@@ -335,6 +335,51 @@ reason `unavailable`, the same as a `quarantined` breaker skip. A request
 whose every target is marked unavailable fails with `503`, as when every tier
 is quarantined.
 
+#### Cost/availability-aware ordering (lcr)
+
+A third within-tier ordering strategy, alongside `round_robin` and
+`least_busy`: order a tier's targets by price and/or a live measured
+availability signal, the way a telecom least-cost-routing engine picks the
+cheapest carrier among those that clear a quality bar. It only decides the
+order candidates within a tier are tried in — the circuit breaker and target
+unavailability above still decide whether a target is tried at all.
+
+`lcr_mode=price` sorts candidates cheapest first, by a price proxy (input +
+output rate per 1M tokens) from the pricing table; a target with no price on
+record sorts last, never first, so an unpriced target never wins traffic by
+looking free. `lcr_mode=availability` sorts candidates by a live EWMA
+success rate, highest first: a target with no history yet starts at `1.0`
+(cold start), competitive from its first request, and that history expires
+after a while so a target that failed once gets another chance to prove it
+recovered. `lcr_mode=both` is a threshold gate, not a weighted blend:
+targets at or above `lcr_min_availability` sort before those below it, and
+price decides ties within each group.
+
+| Alias field | Default | Meaning |
+|-------------|---------|---------|
+| `lcr_mode` | `price` | Only read when `strategy=lcr`. `price` (cheapest first), `availability` (highest live EWMA success rate first), or `both` (targets below `lcr_min_availability` sort last; price decides within each group). |
+| `lcr_min_availability` | `0.5` | Only read when `strategy=lcr` and `lcr_mode=both`. Range `[0, 1]`. |
+
+`strategy` is set per alias, so it applies to every tier of that alias — but
+a tier with a single target has nothing to reorder, so one alias can freely
+mix a tier with one pinned target and a tier of several `lcr`-ranked
+targets. Two configurations this is meant to support cleanly:
+
+- **A voice alias** (STT/TTS): tier 0 is the local provider alone, sized by
+  its own `max_concurrency`; tier 1, the fallback, is the remote providers
+  with `strategy=lcr`. When the local tier's concurrency is exhausted, the
+  request falls through to tier 1's LCR-ordered remote candidates exactly as
+  any busy target falls through today — local-first for latency and cost,
+  with LCR-ranked remote providers as the overflow or outage fallback.
+- **A chat alias**: tier 0 is several remote providers with `strategy=lcr`
+  ranking them; the last tier is the local model alone, a safety net tried
+  only once every remote tier has failed. Remote-first for quality and cost
+  via LCR, with the local model as the always-available floor.
+
+Both are pure configuration — tier composition plus the existing
+`max_concurrency` cap — once the alias itself sets `strategy=lcr`; no
+additional mechanism is needed beyond the ordering rule above.
+
 #### Call affinity
 
 A client that ties its requests together with the `X-Session-Id` header — a

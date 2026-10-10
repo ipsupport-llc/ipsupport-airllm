@@ -56,3 +56,17 @@ test("target names are escaped", () => {
   const [row] = tierHealthRows([{ ...open, targets: [{ provider: "<b>", upstream_model: "m" }] }]);
   assert.match(row, /&lt;b&gt;\/m/);
 });
+
+test("a target with price, availability and unavailable shows all three", () => {
+  const [row] = tierHealthRows([{
+    ...open,
+    targets: [{
+      provider: "vertex", upstream_model: "gemini",
+      price_usd_per_1m: 2.5, availability: 0.8,
+      unavailable: true, unavailable_remaining_ms: 30000,
+    }],
+  }]);
+  assert.match(row, /\$2\.50\/1M/);
+  assert.match(row, /80% avail/);
+  assert.match(row, /unavailable 30s/);
+});

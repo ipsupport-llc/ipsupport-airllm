@@ -222,6 +222,29 @@ func (t *Table) CostMicroUSD(provider, model string, promptTokens, completionTok
 	return int64(math.Round(usd * 1e6))
 }
 
+// Rate returns the LCR routing price proxy for a model: InputPer1M plus
+// OutputPer1M (a fixed, documented 1:1 blend — the actual input/output split
+// of a future request is unknown at routing time, so this is an
+// approximation, not a prediction). ok is false when no price row exists for
+// this provider+model (exact or wildcard) — the caller MUST treat that as
+// "unknown, sorts last", never as a zero (free) rate; CostMicroUSD's
+// "unknown models cost 0" convention is correct for billing and wrong here.
+// Deliberately ignores ContextThreshold/*Above rates: ranking always uses
+// the base rate pair, since prompt size isn't known before a request is
+// sent. See the spec's "Price signal" section for both simplifications.
+func (t *Table) Rate(provider, model string) (rate float64, ok bool) {
+	t.mu.RLock()
+	p, found := t.prices[key(provider, model)]
+	if !found {
+		p, found = t.prices[key("", model)]
+	}
+	t.mu.RUnlock()
+	if !found {
+		return 0, false
+	}
+	return p.InputPer1M + p.OutputPer1M, true
+}
+
 // AudioCostMicroUSD prices a transcription by audio duration: seconds/1e6
 // * the priced row's InputPer1M (interpreted as $ per 1,000,000 seconds).
 // Same lookup precedence as CostMicroUSD: exact provider+model, then the

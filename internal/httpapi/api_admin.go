@@ -503,6 +503,7 @@ func (s *Server) handleAdminAliases(w http.ResponseWriter, r *http.Request) {
 		SELECT a.alias, a.protocol, a.strategy, a.dlp_model_scan, a.expose_backend_headers, a.dlp_audio_scan,
 			a.session_affinity, a.session_affinity_ttl_s,
 			a.synthesis_cache, a.synthesis_cache_ttl_s,
+			a.lcr_mode, a.lcr_min_availability,
 			COALESCE(t.priority, 0), COALESCE(t.provider_name, ''),
 			COALESCE(t.upstream_model, ''), COALESCE(t.display_label, ''), COALESCE(t.options, '{}')
 		FROM model_aliases a
@@ -524,6 +525,8 @@ func (s *Server) handleAdminAliases(w http.ResponseWriter, r *http.Request) {
 		SessionAffinityTTLS  int           `json:"session_affinity_ttl_s"`
 		SynthesisCache       bool          `json:"synthesis_cache"`
 		SynthesisCacheTTLS   int           `json:"synthesis_cache_ttl_s"`
+		LCRMode              string        `json:"lcr_mode"`
+		LCRMinAvailability   float64       `json:"lcr_min_availability"`
 		Targets              []aliasTarget `json:"targets"`
 	}
 	byAlias := map[string]*aliasView{}
@@ -533,7 +536,9 @@ func (s *Server) handleAdminAliases(w http.ResponseWriter, r *http.Request) {
 		var options []byte
 		var priority, affinityTTLS, synthesisCacheTTLS int
 		var dlpModelScan, exposeBackendHeaders, dlpAudioScan, sessionAffinity, synthesisCache bool
-		if err := rows.Scan(&alias, &protocol, &strategy, &dlpModelScan, &exposeBackendHeaders, &dlpAudioScan, &sessionAffinity, &affinityTTLS, &synthesisCache, &synthesisCacheTTLS, &priority, &provider, &upModel, &label, &options); err != nil {
+		var lcrMode string
+		var lcrMinAvailability float64
+		if err := rows.Scan(&alias, &protocol, &strategy, &dlpModelScan, &exposeBackendHeaders, &dlpAudioScan, &sessionAffinity, &affinityTTLS, &synthesisCache, &synthesisCacheTTLS, &lcrMode, &lcrMinAvailability, &priority, &provider, &upModel, &label, &options); err != nil {
 			writeControlError(w, http.StatusInternalServerError, "failed to read aliases")
 			return
 		}
@@ -541,7 +546,8 @@ func (s *Server) handleAdminAliases(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			av = &aliasView{Alias: alias, Protocol: protocol, Strategy: strategy, DLPModelScan: dlpModelScan, ExposeBackendHeaders: exposeBackendHeaders, DLPAudioScan: dlpAudioScan,
 				SessionAffinity: sessionAffinity, SessionAffinityTTLS: affinityTTLS,
-				SynthesisCache: synthesisCache, SynthesisCacheTTLS: synthesisCacheTTLS, Targets: []aliasTarget{}}
+				SynthesisCache: synthesisCache, SynthesisCacheTTLS: synthesisCacheTTLS,
+				LCRMode: lcrMode, LCRMinAvailability: lcrMinAvailability, Targets: []aliasTarget{}}
 			byAlias[alias] = av
 			order = append(order, alias)
 		}
@@ -569,6 +575,8 @@ func (s *Server) handleAdminPutAlias(w http.ResponseWriter, r *http.Request) {
 		SessionAffinityTTLS  int           `json:"session_affinity_ttl_s"`
 		SynthesisCache       bool          `json:"synthesis_cache"`
 		SynthesisCacheTTLS   int           `json:"synthesis_cache_ttl_s"`
+		LCRMode              string        `json:"lcr_mode"`
+		LCRMinAvailability   *float64      `json:"lcr_min_availability"`
 		Targets              []aliasTarget `json:"targets"`
 	}
 	// Plain decoding, NOT the strict decodeJSON helper: that helper sets
@@ -584,7 +592,10 @@ func (s *Server) handleAdminPutAlias(w http.ResponseWriter, r *http.Request) {
 	if body.Protocol == "" {
 		body.Protocol = "openai"
 	}
-	if body.Strategy != "least_busy" {
+	switch body.Strategy {
+	case "least_busy", "lcr":
+		// keep as-is
+	default:
 		body.Strategy = "round_robin"
 	}
 	scan := true
@@ -601,6 +612,22 @@ func (s *Server) handleAdminPutAlias(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.SynthesisCacheTTLS < 0 || body.SynthesisCacheTTLS > routing.MaxSynthesisCacheTTLSeconds {
 		writeControlError(w, http.StatusBadRequest, fmt.Sprintf("synthesis_cache_ttl_s must be between 0 (default) and %d", routing.MaxSynthesisCacheTTLSeconds))
+		return
+	}
+	if body.Strategy == "lcr" {
+		switch body.LCRMode {
+		case "price", "availability", "both":
+		default:
+			writeControlError(w, http.StatusBadRequest, `lcr_mode must be "price", "availability" or "both"`)
+			return
+		}
+	}
+	lcrMinAvailability := 0.5
+	if body.LCRMinAvailability != nil {
+		lcrMinAvailability = *body.LCRMinAvailability
+	}
+	if lcrMinAvailability < 0 || lcrMinAvailability > 1 {
+		writeControlError(w, http.StatusBadRequest, "lcr_min_availability must be between 0 and 1")
 		return
 	}
 	for i, t := range body.Targets {
@@ -621,12 +648,13 @@ func (s *Server) handleAdminPutAlias(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 
 	if _, err := tx.Exec(r.Context(), `
-		INSERT INTO model_aliases (alias, protocol, strategy, dlp_model_scan, expose_backend_headers, dlp_audio_scan, session_affinity, session_affinity_ttl_s, synthesis_cache, synthesis_cache_ttl_s)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		INSERT INTO model_aliases (alias, protocol, strategy, dlp_model_scan, expose_backend_headers, dlp_audio_scan, session_affinity, session_affinity_ttl_s, synthesis_cache, synthesis_cache_ttl_s, lcr_mode, lcr_min_availability)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		ON CONFLICT (alias) DO UPDATE SET protocol = EXCLUDED.protocol, strategy = EXCLUDED.strategy, dlp_model_scan = EXCLUDED.dlp_model_scan, expose_backend_headers = EXCLUDED.expose_backend_headers, dlp_audio_scan = EXCLUDED.dlp_audio_scan,
 			session_affinity = EXCLUDED.session_affinity, session_affinity_ttl_s = EXCLUDED.session_affinity_ttl_s,
-			synthesis_cache = EXCLUDED.synthesis_cache, synthesis_cache_ttl_s = EXCLUDED.synthesis_cache_ttl_s`,
-		alias, body.Protocol, body.Strategy, scan, body.ExposeBackendHeaders, audioScan, body.SessionAffinity, body.SessionAffinityTTLS, body.SynthesisCache, body.SynthesisCacheTTLS); err != nil {
+			synthesis_cache = EXCLUDED.synthesis_cache, synthesis_cache_ttl_s = EXCLUDED.synthesis_cache_ttl_s,
+			lcr_mode = EXCLUDED.lcr_mode, lcr_min_availability = EXCLUDED.lcr_min_availability`,
+		alias, body.Protocol, body.Strategy, scan, body.ExposeBackendHeaders, audioScan, body.SessionAffinity, body.SessionAffinityTTLS, body.SynthesisCache, body.SynthesisCacheTTLS, body.LCRMode, lcrMinAvailability); err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to save alias")
 		return
 	}

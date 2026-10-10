@@ -16,10 +16,13 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/breaker"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/lcr"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/pricing"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/unavail"
 )
 
 // These are the seam tests for the per-tier circuit breaker. Requests go
@@ -618,7 +621,11 @@ type aliasHealthBody struct {
 		CooldownMS          int64     `json:"cooldown_ms"`
 		ConsecutiveFailures int       `json:"consecutive_failures"`
 		Targets             []struct {
-			Provider string `json:"provider"`
+			Provider               string   `json:"provider"`
+			PriceUSDPer1M          *float64 `json:"price_usd_per_1m"`
+			Availability           *float64 `json:"availability"`
+			Unavailable            bool     `json:"unavailable"`
+			UnavailableRemainingMS int64    `json:"unavailable_remaining_ms"`
 		} `json:"targets"`
 	} `json:"tiers"`
 }
@@ -656,6 +663,14 @@ func TestAdminAliasHealthAndRelease(t *testing.T) {
 	s := newBreakerTestServer(t, clk, providers.NewOpenAICompat(prov, "openai", up.URL, ""), providers.NewMock(okProv))
 	s.st = &store.Store{PG: pool}
 	s.router = routing.NewRouter(s.st)
+	// The health view now also looks up price (Task 6). s.lcr/s.unavail stay
+	// nil here on purpose — both their lookups are documented nil-safe
+	// (Snapshot returns 1.0, Check never skips), and a non-nil *Store with a
+	// nil Redis client is NOT equivalent: it still tracks state locally,
+	// which would change this test's breaker/failover behavior.
+	// pricing.Table.Rate has no such nil guard, so it needs a real (if
+	// empty) table to avoid a nil-pointer panic.
+	s.pricing = pricing.New()
 	var audited []string
 	s.auditHook = func(_ context.Context, _, action, _ string, _ any) { audited = append(audited, action) }
 
@@ -685,6 +700,12 @@ func TestAdminAliasHealthAndRelease(t *testing.T) {
 	if len(t0.Targets) != 1 || t0.Targets[0].Provider != prov {
 		t.Errorf("tier 0 targets = %+v, want the flaky provider", t0.Targets)
 	}
+	// This alias's strategy is round_robin (the default, never set above):
+	// no EWMA data is ever collected for it, so the health view must not
+	// fabricate a "100% available" figure nobody is actually measuring.
+	if t0.Targets[0].Availability != nil {
+		t.Errorf("tier 0 target availability = %v, want nil (strategy=round_robin collects no EWMA data)", *t0.Targets[0].Availability)
+	}
 	if t1.Tier != 10 || t1.BreakerEnabled || t1.State != "closed" {
 		t.Errorf("tier 10 = %+v, want a closed tier without a breaker", t1)
 	}
@@ -710,6 +731,109 @@ func TestAdminAliasHealthAndRelease(t *testing.T) {
 
 	if code, _ := getAliasHealth(t, s, "no-such-alias-"+alias); code != http.StatusNotFound {
 		t.Errorf("health of a missing alias = %d, want 404", code)
+	}
+}
+
+// TestAdminAliasHealthReportsPriceAvailabilityUnavailable exercises the
+// price/availability/unavailable fields Task 6 of the LCR plan adds to the
+// per-target health view: a live price from the pricing table, EWMA
+// availability from the lcr store, and the pre-existing unavail mark — three
+// signals that previously had no unified view anywhere. One target is given
+// a known price and a nudged-away-from-cold-start availability; the other is
+// left with no price row and no recorded history, and is marked unavailable,
+// so both the "present" and "absent/default" shapes of every field are
+// covered in one pass.
+func TestAdminAliasHealthReportsPriceAvailabilityUnavailable(t *testing.T) {
+	pool := testPool(t)
+	rdb := testBreakerRedis(t)
+	ctx := context.Background()
+	suffix := time.Now().UnixNano()
+	priced, cold := fmt.Sprintf("health-priced-%d", suffix), fmt.Sprintf("health-cold-%d", suffix)
+	alias := fmt.Sprintf("health-lcr-alias-%d", suffix)
+	for _, p := range []string{priced, cold} {
+		if _, err := pool.Exec(ctx, `INSERT INTO providers (name, kind, base_url, enabled, max_concurrency) VALUES ($1, 'openai', 'http://127.0.0.1:1', true, 1)`, p); err != nil {
+			t.Fatalf("seed provider: %v", err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM model_aliases WHERE alias = $1`, alias)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM providers WHERE name = ANY($1)`, []string{priced, cold})
+	})
+
+	s := newRunChatTestServer(t)
+	s.st = &store.Store{PG: pool}
+	s.router = routing.NewRouter(s.st)
+	s.auditHook = func(context.Context, string, string, string, any) {}
+	s.pricing = pricing.New()
+	s.lcr = lcr.New(rdb)
+	s.unavail = unavail.New(rdb)
+
+	pricedKey := lcr.Key{Provider: priced, UpstreamModel: "m"}
+	t.Cleanup(func() {
+		_ = rdb.Del(context.Background(), "air:lcr:avail:"+priced+":m", "air:unavail:"+cold+":m").Err()
+	})
+
+	// A known price for the priced target; the cold target gets none.
+	s.pricing.Set(priced, "m", pricing.Price{InputPer1M: 1, OutputPer1M: 3})
+
+	// One recorded failure moves the priced target's EWMA availability off
+	// the 1.0 cold start: alpha=0.1, so avail = 0.1*0 + 0.9*1.0 = 0.9. Record
+	// writes in a detached goroutine, so poll briefly for it to land.
+	s.lcr.Record(ctx, pricedKey, false)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := s.lcr.Snapshot(ctx, []lcr.Key{pricedKey})[pricedKey]; got != 1.0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// The cold target is marked unavailable for a known duration; the priced
+	// one is never marked.
+	if got := s.unavail.Mark(ctx, unavail.Key{Provider: cold, UpstreamModel: "m"}, nil, 5*time.Second, time.Minute); got != 5*time.Second {
+		t.Fatalf("unavail.Mark returned %v, want the 5s initial backoff", got)
+	}
+
+	body := fmt.Sprintf(`{"protocol":"openai","strategy":"lcr","lcr_mode":"both","targets":[
+		{"priority":0,"provider":%q,"upstream_model":"m"},
+		{"priority":10,"provider":%q,"upstream_model":"m"}]}`, priced, cold)
+	if rec := putAlias(s, alias, body); rec.Code != http.StatusOK {
+		t.Fatalf("put alias: %d %s", rec.Code, rec.Body.String())
+	}
+
+	code, h := getAliasHealth(t, s, alias)
+	if code != http.StatusOK || len(h.Tiers) != 2 {
+		t.Fatalf("health: %d %+v", code, h)
+	}
+	if len(h.Tiers[0].Targets) != 1 || len(h.Tiers[1].Targets) != 1 {
+		t.Fatalf("tier targets = %+v / %+v, want one target each", h.Tiers[0].Targets, h.Tiers[1].Targets)
+	}
+	pricedTarget, coldTarget := h.Tiers[0].Targets[0], h.Tiers[1].Targets[0]
+
+	if pricedTarget.PriceUSDPer1M == nil || *pricedTarget.PriceUSDPer1M != 4 {
+		t.Errorf("priced target price_usd_per_1m = %v, want 4 (1 input + 3 output)", pricedTarget.PriceUSDPer1M)
+	}
+	if pricedTarget.Availability == nil || *pricedTarget.Availability < 0.89 || *pricedTarget.Availability > 0.91 {
+		t.Errorf("priced target availability = %v, want ~0.9 after one recorded failure", pricedTarget.Availability)
+	}
+	if pricedTarget.Unavailable {
+		t.Errorf("priced target unavailable = true, want false (never marked)")
+	}
+
+	if coldTarget.PriceUSDPer1M != nil {
+		t.Errorf("cold target price_usd_per_1m = %v, want nil (no price row)", *coldTarget.PriceUSDPer1M)
+	}
+	// Snapshot's documented cold-start default is 1.0 for a target with no
+	// recorded history — this is correct, not a bug, and the field must
+	// still be populated (not nil) for it.
+	if coldTarget.Availability == nil || *coldTarget.Availability != 1.0 {
+		t.Errorf("cold target availability = %v, want 1.0 (cold start, no recorded history)", coldTarget.Availability)
+	}
+	if !coldTarget.Unavailable {
+		t.Errorf("cold target unavailable = false, want true (marked via unavail.Mark)")
+	}
+	if coldTarget.UnavailableRemainingMS <= 0 || coldTarget.UnavailableRemainingMS > 5000 {
+		t.Errorf("cold target unavailable_remaining_ms = %d, want in (0, 5000]", coldTarget.UnavailableRemainingMS)
 	}
 }
 

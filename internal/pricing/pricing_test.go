@@ -250,3 +250,31 @@ func TestReplaceAfterASetRestoresTheRowsEvenIfTheyAreUnchanged(t *testing.T) {
 		t.Errorf("price after Replace = %d, want 1000000 from the rows", got)
 	}
 }
+
+func TestTableRateBlendsInputAndOutput(t *testing.T) {
+	tbl := New()
+	tbl.Set("openai", "gpt-nano", Price{InputPer1M: 1.0, OutputPer1M: 2.0})
+	rate, ok := tbl.Rate("openai", "gpt-nano")
+	if !ok {
+		t.Fatal("Rate: ok=false for a priced model")
+	}
+	if rate != 3.0 { // InputPer1M + 1.0*OutputPer1M
+		t.Errorf("Rate = %v, want 3.0 (1.0 + 1.0*2.0)", rate)
+	}
+}
+
+func TestTableRateFallsBackToWildcardProvider(t *testing.T) {
+	tbl := New()
+	tbl.Set("", "shared-model", Price{InputPer1M: 5.0, OutputPer1M: 0})
+	rate, ok := tbl.Rate("some-provider", "shared-model")
+	if !ok || rate != 5.0 {
+		t.Errorf("Rate via wildcard = (%v, %v), want (5.0, true)", rate, ok)
+	}
+}
+
+func TestTableRateUnknownModelReportsNotFound(t *testing.T) {
+	tbl := New()
+	if _, ok := tbl.Rate("openai", "nonexistent"); ok {
+		t.Error("Rate for an unpriced model must report ok=false, not a zero rate — a caller treating ok=false as 0 would rank an unpriced target as free")
+	}
+}

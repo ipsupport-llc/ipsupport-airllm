@@ -85,7 +85,11 @@ func (s *Server) SecondpassChat(ctx context.Context, prompt string) (string, err
 		return "", fmt.Errorf("secondpass: resolve %q: %w", cfg.Model, err)
 	}
 	reg := s.reg()
-	for _, t := range plan.Ordered(0, s.freeFunc(reg)) {
+	lcrRank := s.lcrRank(ctx, plan)
+	// SecondpassChat has no breaker/unavail admission gate (unlike
+	// executePlan): lcr's own "both"-mode minimum-availability threshold is
+	// the only quality signal available on this path.
+	for _, t := range plan.Ordered(0, s.freeFunc(reg), lcrRank) {
 		e, ok := reg.Get(t.Provider)
 		if !ok {
 			continue

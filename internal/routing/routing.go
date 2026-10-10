@@ -1,6 +1,7 @@
 // Package routing resolves a client-requested model into a fallback/load-
 // balancing plan: targets grouped into priority tiers, with a within-tier
-// strategy (round-robin or least-busy). Lower-priority tiers are fallback.
+// strategy (round-robin, least-busy, or lcr cost/availability ranking).
+// Lower-priority tiers are fallback.
 package routing
 
 import (
@@ -21,6 +22,17 @@ import (
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/lookupcache"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 )
+
+// LCRRank is one target's price/availability figures for the `lcr`
+// strategy, supplied by the caller (internal/httpapi) since internal/routing
+// has no Redis or pricing access of its own. Price is math.Inf(1) for a
+// target with no known price — it must sort after every priced target
+// regardless of how large their own prices are, which a finite sentinel
+// could not guarantee.
+type LCRRank struct {
+	Price        float64
+	Availability float64
+}
 
 // Target is one resolved upstream destination.
 type Target struct {
@@ -289,14 +301,23 @@ type Plan struct {
 	// kept.
 	SynthesisCache    bool
 	SynthesisCacheTTL time.Duration
+	// LCRMode and LCRMinAvailability configure the `lcr` strategy; read only
+	// when Strategy == "lcr" (see docs/superpowers/specs/2026-10-10-lcr-routing-design.md).
+	LCRMode            string
+	LCRMinAvailability float64
 }
 
-// Ordered flattens the tiers into the try-order for one request: tier by tier,
-// each tier internally ordered by the strategy. rr rotates round-robin;
-// free(provider) drives least-busy.
-func (p *Plan) Ordered(rr uint64, free func(provider string) int) []Target {
+// Ordered flattens the tiers into the try-order for one request: tier by
+// tier, each tier internally ordered by the strategy. rr rotates round-robin;
+// free(provider) drives least-busy; rank supplies price/availability for the
+// lcr strategy and is ignored (may be nil) otherwise.
+func (p *Plan) Ordered(rr uint64, free func(provider string) int, rank func(Target) LCRRank) []Target {
 	var out []Target
 	for _, tier := range p.Tiers {
+		if p.Strategy == "lcr" {
+			out = append(out, orderTierLCR(tier, p.LCRMode, p.LCRMinAvailability, rr, rank)...)
+			continue
+		}
 		out = append(out, orderTier(tier, p.Strategy, rr, free)...)
 	}
 	return out
@@ -328,6 +349,85 @@ func orderTier(tier []Target, strategy string, rr uint64, free func(string) int)
 		out = append(out, tier[(rot+i)%n])
 	}
 	return out
+}
+
+// orderTierLCR orders one tier under the `lcr` strategy. price mode sorts by
+// price ascending; availability mode sorts by availability descending; both
+// partitions into "at/above minAvail" then "below it" and price-sorts each
+// group — a threshold gate, never a weighted blend (see the spec for why).
+// Exact ties round-robin via rr, rotating only within the tied sub-group (by
+// walking the stably-sorted result for runs of adjacent equal elements) so
+// an untied neighbor can't skew a tied pair's own rotation.
+func orderTierLCR(tier []Target, mode string, minAvail float64, rr uint64, rank func(Target) LCRRank) []Target {
+	n := len(tier)
+	if n <= 1 {
+		return tier
+	}
+	ranks := make([]LCRRank, n)
+	for i, t := range tier {
+		ranks[i] = rank(t)
+	}
+	idx := make([]int, n)
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.SliceStable(idx, func(a, b int) bool { return lessLCR(ranks, idx[a], idx[b], mode, minAvail) })
+
+	// Rotate each maximal run of adjacent, equally-ranked elements by rr,
+	// independently of any other run — a strictly-better or strictly-worse
+	// neighbor must never affect a tied pair's own rotation.
+	for i := 0; i < n; {
+		j := i + 1
+		for j < n && tiedLCR(ranks, idx[i], idx[j], mode, minAvail) {
+			j++
+		}
+		if j-i > 1 {
+			rot := int(rr % uint64(j-i))
+			group := append([]int{}, idx[i:j]...)
+			for k := range group {
+				idx[i+k] = group[(rot+k)%len(group)]
+			}
+		}
+		i = j
+	}
+
+	out := make([]Target, n)
+	for i, j := range idx {
+		out[i] = tier[j]
+	}
+	return out
+}
+
+// lessLCR orders two tier indices under mode: price ascending, availability
+// descending, or (for "both") the at/above-threshold group before the
+// below-threshold group, price ascending within each.
+func lessLCR(ranks []LCRRank, a, b int, mode string, minAvail float64) bool {
+	switch mode {
+	case "availability":
+		return ranks[a].Availability > ranks[b].Availability
+	case "both":
+		ga, gb := ranks[a].Availability >= minAvail, ranks[b].Availability >= minAvail
+		if ga != gb {
+			return ga
+		}
+		return ranks[a].Price < ranks[b].Price
+	default: // "price"
+		return ranks[a].Price < ranks[b].Price
+	}
+}
+
+// tiedLCR reports whether tier indices a and b sort equally under mode — the
+// exact condition lessLCR's stable sort already placed adjacent equal
+// elements next to each other for.
+func tiedLCR(ranks []LCRRank, a, b int, mode string, minAvail float64) bool {
+	switch mode {
+	case "availability":
+		return ranks[a].Availability == ranks[b].Availability
+	case "both":
+		return (ranks[a].Availability >= minAvail) == (ranks[b].Availability >= minAvail) && ranks[a].Price == ranks[b].Price
+	default:
+		return ranks[a].Price == ranks[b].Price
+	}
 }
 
 // Router resolves models against the catalog and keeps round-robin counters.
@@ -380,12 +480,13 @@ func (r *Router) Resolve(ctx context.Context, model string, allowPassthrough boo
 
 // resolveAlias expands an alias from the catalog into priority tiers.
 func (r *Router) resolveAlias(ctx context.Context, model string) (*Plan, error) {
-	var strategy string
+	var strategy, lcrMode string
+	var lcrMinAvailability float64
 	var dlpModelScan, exposeBackendHeaders, dlpAudioScan, sessionAffinity, synthesisCache bool
 	var affinityTTLSeconds, synthesisCacheTTLSeconds int
 	err := r.st.PG.QueryRow(ctx, `
-		SELECT strategy, dlp_model_scan, expose_backend_headers, dlp_audio_scan, session_affinity, session_affinity_ttl_s, synthesis_cache, synthesis_cache_ttl_s
-		FROM model_aliases WHERE alias = $1`, model).Scan(&strategy, &dlpModelScan, &exposeBackendHeaders, &dlpAudioScan, &sessionAffinity, &affinityTTLSeconds, &synthesisCache, &synthesisCacheTTLSeconds)
+		SELECT strategy, lcr_mode, lcr_min_availability, dlp_model_scan, expose_backend_headers, dlp_audio_scan, session_affinity, session_affinity_ttl_s, synthesis_cache, synthesis_cache_ttl_s
+		FROM model_aliases WHERE alias = $1`, model).Scan(&strategy, &lcrMode, &lcrMinAvailability, &dlpModelScan, &exposeBackendHeaders, &dlpAudioScan, &sessionAffinity, &affinityTTLSeconds, &synthesisCache, &synthesisCacheTTLSeconds)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, lookupcache.Miss(modelNotFoundError{model})
@@ -448,6 +549,7 @@ func (r *Router) resolveAlias(ctx context.Context, model string) (*Plan, error) 
 		Alias: model, Strategy: strategy, DLPModelScan: dlpModelScan, ExposeBackendHeaders: exposeBackendHeaders, DLPAudioScan: dlpAudioScan,
 		SessionAffinity: sessionAffinity, SessionAffinityTTL: AffinityTTL(affinityTTLSeconds),
 		SynthesisCache: synthesisCache, SynthesisCacheTTL: SynthesisCacheTTL(synthesisCacheTTLSeconds), Tiers: tiers,
+		LCRMode: lcrMode, LCRMinAvailability: lcrMinAvailability,
 	}, nil
 }
 
