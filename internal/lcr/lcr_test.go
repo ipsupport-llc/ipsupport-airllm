@@ -73,9 +73,13 @@ func TestRecoveryTTLResetsToColdStart(t *testing.T) {
 }
 
 func TestSnapshotFailsOpenWithoutRedis(t *testing.T) {
-	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", DialTimeout: 50 * time.Millisecond, MaxRetries: -1})
+	// DialTimeout is well above the 50ms budget the second call must beat:
+	// without the remote-down backoff, a second call would also pay close to
+	// this much, failing the assertion below instead of passing it.
+	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", DialTimeout: 150 * time.Millisecond, MaxRetries: -1})
 	t.Cleanup(func() { _ = rdb.Close() })
 	s := New(rdb)
+
 	start := time.Now()
 	snap := s.Snapshot(context.Background(), []Key{testKey()})
 	if elapsed := time.Since(start); elapsed > time.Second {
@@ -83,6 +87,20 @@ func TestSnapshotFailsOpenWithoutRedis(t *testing.T) {
 	}
 	if snap[testKey()] != 1.0 {
 		t.Errorf("Snapshot with Redis down = %v, want fail-open 1.0", snap[testKey()])
+	}
+
+	// A second call during the same outage must not re-pay the ~250ms
+	// per-op timeout: the remote-down backoff (mirroring internal/breaker's
+	// remoteDownTill/remoteFailed/remoteOK) must skip Redis entirely this
+	// time, proving the backoff actually kicks in rather than retrying on
+	// every call.
+	start = time.Now()
+	snap = s.Snapshot(context.Background(), []Key{testKey()})
+	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+		t.Errorf("second Snapshot during the same outage took %v, want well under 50ms (the remote-down backoff should have skipped Redis entirely)", elapsed)
+	}
+	if snap[testKey()] != 1.0 {
+		t.Errorf("second Snapshot with Redis down = %v, want fail-open 1.0", snap[testKey()])
 	}
 }
 

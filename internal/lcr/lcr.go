@@ -20,7 +20,9 @@ package lcr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -46,6 +48,12 @@ const recordTTL = 15 * time.Minute
 // discipline (internal/unavail predates this convention and lacks it).
 const opTimeout = 250 * time.Millisecond
 
+// remoteRetryAfter is how long Snapshot/Record skip Redis entirely after a
+// failure, so a sustained outage costs one timeout per interval instead of
+// one per call — mirrors internal/breaker's remoteDownTill/remoteFailed/
+// remoteOK pattern (see breaker.go).
+const remoteRetryAfter = 5 * time.Second
+
 type record struct {
 	Avail float64 `json:"a"`
 }
@@ -55,6 +63,11 @@ type record struct {
 type Store struct {
 	rdb *redis.Client
 	now func() time.Time
+
+	mu sync.Mutex
+	// remoteDownTill is when to try Redis again after it failed. It runs on
+	// the wall clock, not now: it is about the network, not EWMA time.
+	remoteDownTill time.Time
 }
 
 // New returns a Store. A nil rdb is valid: every Snapshot then returns 1.0
@@ -77,6 +90,12 @@ func (s *Store) Snapshot(ctx context.Context, keys []Key) map[Key]float64 {
 	if s == nil || s.rdb == nil || len(keys) == 0 {
 		return out
 	}
+	if !s.useRemote() {
+		// A prior failure's backoff window is still running: skip Redis
+		// entirely rather than pay opTimeout again for a call almost
+		// certain to fail the same way.
+		return out
+	}
 	cctx, cancel := context.WithTimeout(ctx, opTimeout)
 	defer cancel()
 	pipe := s.rdb.Pipeline()
@@ -85,9 +104,10 @@ func (s *Store) Snapshot(ctx context.Context, keys []Key) map[Key]float64 {
 		cmds[k] = pipe.Get(cctx, k.redisKey())
 	}
 	if _, err := pipe.Exec(cctx); err != nil && err != redis.Nil {
-		slog.Warn("lcr: snapshot pipeline failed, falling back to optimistic availability", "err", err)
+		s.remoteFailed(err)
 		return out
 	}
+	s.remoteOK()
 	for k, cmd := range cmds {
 		raw, err := cmd.Bytes()
 		if err != nil {
@@ -117,10 +137,21 @@ func (s *Store) Record(ctx context.Context, k Key, success bool) {
 }
 
 func (s *Store) record(ctx context.Context, k Key, success bool) {
+	if !s.useRemote() {
+		// Same backoff as Snapshot: skip Redis entirely during an outage
+		// rather than pay opTimeout on a background goroutine nobody waits
+		// on anyway.
+		return
+	}
 	cctx, cancel := context.WithTimeout(ctx, opTimeout)
 	defer cancel()
 	prev := 1.0
-	if raw, err := s.rdb.Get(cctx, k.redisKey()).Bytes(); err == nil {
+	raw, err := s.rdb.Get(cctx, k.redisKey()).Bytes()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		s.remoteFailed(err)
+		return
+	}
+	if err == nil {
 		var rec record
 		if json.Unmarshal(raw, &rec) == nil {
 			prev = rec.Avail
@@ -131,11 +162,49 @@ func (s *Store) record(ctx context.Context, k Key, success bool) {
 		outcome = 1.0
 	}
 	next := alpha*outcome + (1-alpha)*prev
-	raw, err := json.Marshal(record{Avail: next})
+	out, err := json.Marshal(record{Avail: next})
 	if err != nil {
 		return
 	}
-	if err := s.rdb.Set(cctx, k.redisKey(), raw, recordTTL).Err(); err != nil {
-		slog.Warn("lcr: failed to record outcome", "provider", k.Provider, "upstream_model", k.UpstreamModel, "err", err)
+	if err := s.rdb.Set(cctx, k.redisKey(), out, recordTTL).Err(); err != nil {
+		s.remoteFailed(err)
+		return
+	}
+	s.remoteOK()
+}
+
+// useRemote reports whether Redis should be tried right now: false while a
+// previous failure's backoff window is still running.
+func (s *Store) useRemote() bool {
+	if s.rdb == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return time.Now().After(s.remoteDownTill)
+}
+
+// remoteFailed starts (or extends) the backoff window after a Redis error,
+// logging only on the transition into the down state — not on every
+// subsequent call skipped because of it.
+func (s *Store) remoteFailed(err error) {
+	s.mu.Lock()
+	first := s.remoteDownTill.IsZero()
+	s.remoteDownTill = time.Now().Add(remoteRetryAfter)
+	s.mu.Unlock()
+	if first {
+		slog.Warn("lcr: Redis unavailable, failing open to optimistic availability", "err", err)
+	}
+}
+
+// remoteOK clears the backoff window after a successful Redis call, logging
+// only when it actually recovered from a down state.
+func (s *Store) remoteOK() {
+	s.mu.Lock()
+	recovered := !s.remoteDownTill.IsZero()
+	s.remoteDownTill = time.Time{}
+	s.mu.Unlock()
+	if recovered {
+		slog.Info("lcr: Redis reachable again")
 	}
 }
