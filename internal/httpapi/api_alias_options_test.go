@@ -143,6 +143,86 @@ func TestAliasTargetOptionsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestPutAliasStrategyLCRPersists saves an alias with strategy "lcr" plus
+// its lcr_mode/lcr_min_availability fields, reads it back through the admin
+// list, and confirms none of it was silently coerced to round_robin — the
+// allowlist bug this task fixes.
+func TestPutAliasStrategyLCRPersists(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	prov := fmt.Sprintf("lcr-prov-%d", time.Now().UnixNano())
+	alias := "lcr-alias-" + prov
+	if _, err := pool.Exec(ctx, `INSERT INTO providers (name, kind, base_url, enabled, max_concurrency) VALUES ($1, 'openai', 'http://127.0.0.1:1', true, 1)`, prov); err != nil {
+		t.Fatalf("seed provider: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM model_aliases WHERE alias = $1`, alias)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM providers WHERE name = $1`, prov)
+	})
+	s := &Server{st: &store.Store{PG: pool}, router: routing.NewRouter(&store.Store{PG: pool}), auditHook: func(context.Context, string, string, string, any) {}}
+
+	body := fmt.Sprintf(`{"protocol":"openai","strategy":"lcr","lcr_mode":"both","lcr_min_availability":0.6,
+		"targets":[{"priority":0,"provider":%q,"upstream_model":"m"}]}`, prov)
+	if rec := putAlias(s, alias, body); rec.Code != http.StatusOK {
+		t.Fatalf("put: %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec := httptest.NewRecorder()
+	s.handleAdminAliases(rec, httptest.NewRequest(http.MethodGet, "/api/admin/aliases", nil))
+	var list struct {
+		Aliases []struct {
+			Alias              string  `json:"alias"`
+			Strategy           string  `json:"strategy"`
+			LCRMode            string  `json:"lcr_mode"`
+			LCRMinAvailability float64 `json:"lcr_min_availability"`
+		} `json:"aliases"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	found := false
+	for _, a := range list.Aliases {
+		if a.Alias != alias {
+			continue
+		}
+		found = true
+		if a.Strategy != "lcr" {
+			t.Errorf(`strategy = %q, want "lcr" (the admin API must not silently coerce it to round_robin)`, a.Strategy)
+		}
+		if a.LCRMode != "both" {
+			t.Errorf(`lcr_mode = %q, want "both"`, a.LCRMode)
+		}
+		if a.LCRMinAvailability != 0.6 {
+			t.Errorf(`lcr_min_availability = %v, want 0.6`, a.LCRMinAvailability)
+		}
+	}
+	if !found {
+		t.Fatalf("alias %s not found in admin list", alias)
+	}
+}
+
+// TestPutAliasLCRModeMustBeKnownValue runs with no database: an unknown
+// lcr_mode must be rejected before anything is written, same as the other
+// validation-only tests in this file.
+func TestPutAliasLCRModeMustBeKnownValue(t *testing.T) {
+	s := &Server{}
+	body := `{"protocol":"openai","strategy":"lcr","lcr_mode":"cheapest-vibes","targets":[{"priority":0,"provider":"p","upstream_model":"m"}]}`
+	if rec := putAlias(s, "a", body); rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for an unknown lcr_mode (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPutAliasLCRMinAvailabilityMustBeInRange runs with no database: an
+// out-of-range lcr_min_availability must be rejected before anything is
+// written.
+func TestPutAliasLCRMinAvailabilityMustBeInRange(t *testing.T) {
+	s := &Server{}
+	body := `{"protocol":"openai","strategy":"lcr","lcr_mode":"both","lcr_min_availability":1.5,"targets":[{"priority":0,"provider":"p","upstream_model":"m"}]}`
+	if rec := putAlias(s, "a", body); rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for lcr_min_availability=1.5 (%s)", rec.Code, rec.Body.String())
+	}
+}
+
 func TestFailoverDefaultsRoundTrip(t *testing.T) {
 	s := &Server{auditHook: func(context.Context, string, string, string, any) {}}
 	bad := httptest.NewRequest(http.MethodPut, "/api/admin/failover", strings.NewReader(`{"timeout_ms":-5}`))
