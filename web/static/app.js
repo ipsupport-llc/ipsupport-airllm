@@ -1097,11 +1097,18 @@ function parseAffinityTTL(text) {
 function tierHealthRows(tiers) {
   const badge = { closed: "active", open: "revoked", half_open: "admin" };
   const fmt = (s) => (s ? new Date(s).toLocaleString() : "—");
+  const targetText = (x) => {
+    let s = `${esc(x.provider)}/${esc(x.upstream_model)}`;
+    if (x.price_usd_per_1m != null) s += ` ($${Number(x.price_usd_per_1m).toFixed(2)}/1M)`;
+    if (x.availability != null) s += ` (${Math.round(Number(x.availability) * 100)}% avail)`;
+    if (x.unavailable) s += ` [unavailable ${Math.round(Number(x.unavailable_remaining_ms) / 1000)}s]`;
+    return s;
+  };
   return (tiers || []).map((t) => {
     const state = t.breaker_enabled ? t.state : "off";
     const quarantined = t.state === "open" || t.state === "half_open";
     return `<tr><td class="mono">p${Number(t.tier)}</td>
-      <td class="mono">${(t.targets || []).map((x) => `${esc(x.provider)}/${esc(x.upstream_model)}`).join(", ") || "—"}</td>
+      <td class="mono">${(t.targets || []).map(targetText).join(", ") || "—"}</td>
       <td><span class="badge ${badge[state] || "neutral"}">${esc(state === "half_open" ? "probing" : state)}</span></td>
       <td>${esc(quarantined ? t.reason || "" : "") || "—"}</td>
       <td>${quarantined ? esc(fmt(t.open_until)) : "—"}</td>
@@ -1200,9 +1207,18 @@ async function editAlias(c, a) {
       </select></label>
     <label class="field"><span class="lab">Balancing within a priority tier</span>
       <select id="al-strategy">
-        <option value="round_robin" ${a.strategy !== "least_busy" ? "selected" : ""}>round_robin</option>
+        <option value="round_robin" ${a.strategy !== "least_busy" && a.strategy !== "lcr" ? "selected" : ""}>round_robin</option>
         <option value="least_busy" ${a.strategy === "least_busy" ? "selected" : ""}>least_busy</option>
+        <option value="lcr" ${a.strategy === "lcr" ? "selected" : ""}>lcr (price / availability)</option>
       </select></label>
+    <label class="field"><span class="lab">LCR mode (used only when strategy = lcr)</span>
+      <select id="al-lcr-mode">
+        <option value="price" ${(a.lcr_mode || "price") === "price" ? "selected" : ""}>price</option>
+        <option value="availability" ${a.lcr_mode === "availability" ? "selected" : ""}>availability</option>
+        <option value="both" ${a.lcr_mode === "both" ? "selected" : ""}>both (availability gate, then price)</option>
+      </select></label>
+    <label class="field"><span class="lab">LCR minimum availability (0..1, used only in "both" mode)</span>
+      <input id="al-lcr-minavail" type="number" min="0" max="1" step="0.01" value="${esc(String(a.lcr_min_availability ?? 0.5))}" style="width:96px" /></label>
     <label class="field"><span class="lab">Layer-2 BERT scan (fuzzy PII)</span>
       <input id="al-bert" type="checkbox" ${a.dlp_model_scan === false ? "" : "checked"} style="width:auto" /></label>
     <label class="field"><span class="lab">Expose which target answered (X-Backend-Model header)</span>
@@ -1339,6 +1355,7 @@ async function editAlias(c, a) {
     if (tlist.length === 0) { toast("Add at least one target with a model", "err"); return; }
     const x = await api("PUT", `/api/admin/aliases/${encodeURIComponent(alias)}`,
       { protocol: $("#al-proto", bg).value, strategy: $("#al-strategy", bg).value, targets: tlist,
+        lcr_mode: $("#al-lcr-mode", bg).value, lcr_min_availability: Number($("#al-lcr-minavail", bg).value),
         dlp_model_scan: $("#al-bert", bg).checked, expose_backend_headers: $("#al-expose", bg).checked, dlp_audio_scan: $("#al-dlpaudio", bg).checked,
         session_affinity: $("#al-affinity", bg).checked, session_affinity_ttl_s: affinityTTL,
         synthesis_cache: $("#al-ttscache", bg).checked, synthesis_cache_ttl_s: cacheTTL });
