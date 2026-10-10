@@ -66,6 +66,32 @@ per-target loop.
   — breaker/unavail already own hard exclusion; LCR only deprioritizes).
   Within each group, sort by price ascending.
 
+### Worked examples (target use cases, not hypothetical)
+
+`strategy` lives on the alias, so it applies uniformly across every tier of
+that alias — but a tier holding exactly one target has nothing to reorder,
+so a single alias can freely mix "one pinned local target in one tier" with
+"several LCR-ranked remote targets in another tier" without conflict. Two
+real configurations this needs to support cleanly:
+
+- **A voice alias** (STT/TTS): tier 0 = the local provider alone (its
+  existing `providers.max_concurrency` cap, e.g. `2`, is an already-shipped,
+  unrelated feature — nothing new needed there); tier 1 (fallback) = the
+  remote providers, `strategy=lcr`. When both local concurrency slots are
+  busy, `executePlan` already moves on to the next tier on a busy target
+  (`failover.go:236-238` — "a busy [target] moves on to the next target"),
+  landing on tier 1's LCR-ordered remote candidates. Local-first for
+  latency/cost, LCR-ranked remote as the overflow/outage fallback.
+- **A chat alias**: tier 0 = several remote providers, `strategy=lcr`
+  ranking them; the LAST tier (highest `priority` number) = the local model
+  alone, a pure safety net tried only once every remote tier has failed.
+  Remote-first for quality/cost optimization via LCR, local-last as the
+  always-available floor.
+
+Both are pure configuration (tier composition + existing `max_concurrency`)
+once `lcr` exists as a strategy value — no additional mechanism beyond what
+this spec already describes.
+
 ### Why not a weighted-sum score (rejected during design)
 
 An earlier draft combined price and availability into one scalar via
