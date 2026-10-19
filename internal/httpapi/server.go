@@ -230,7 +230,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	start := time.Now()
 	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-	s.mux.ServeHTTP(rec, r.WithContext(withClientSession(r.Context(), r)))
+	ctx := withClientSession(r.Context(), r)
+	if s.cfg != nil {
+		ctx = withForwardedHeaders(ctx, r, s.cfg.ForwardHeaders)
+	}
+	s.mux.ServeHTTP(rec, r.WithContext(ctx))
 	if r.Method != http.MethodGet && r.Method != http.MethodHead && strings.HasPrefix(r.URL.Path, "/api/") && rec.status/100 == 2 {
 		// Any successful control-plane write may have revoked a key, disabled
 		// a user, changed a role's policy, or edited an alias or a provider.

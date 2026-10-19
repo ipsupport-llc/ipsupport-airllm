@@ -72,6 +72,14 @@ type Config struct {
 	// this one is a hard ceiling the provider itself applies underneath
 	// that context, regardless of timeout_ms.
 	UpstreamChatTimeout time.Duration
+
+	// ForwardHeaders names request headers, from FORWARD_HEADERS
+	// (comma-separated), that are copied onto the outbound upstream
+	// request alongside the gateway's own Content-Type/Authorization/
+	// Accept. Empty by default: forwarding is opt-in per header name,
+	// never automatic, since a client's own headers could otherwise
+	// override the ones the gateway sets for its upstream call.
+	ForwardHeaders []string
 }
 
 // Load reads configuration from the environment and validates it.
@@ -125,6 +133,7 @@ func Load() (*Config, error) {
 	if c.UpstreamChatTimeout, err = duration("UPSTREAM_CHAT_TIMEOUT", "120s", true); err != nil {
 		return nil, err
 	}
+	c.ForwardHeaders = parseForwardHeaders(env("FORWARD_HEADERS", ""))
 
 	key, dev, err := loadMasterKey(c.Env)
 	if err != nil {
@@ -293,6 +302,21 @@ func loadOIDC() (OIDCConfig, error) {
 		RolesClaim:   os.Getenv("OIDC_ROLES_CLAIM"),
 		RoleMap:      parseRoleMap(os.Getenv("OIDC_ROLE_MAP")),
 	}, nil
+}
+
+// parseForwardHeaders splits a comma-separated FORWARD_HEADERS value into
+// header names, trimmed, blank entries dropped. Canonicalization (so
+// matching against an incoming request's headers is case-insensitive) is
+// the httpapi layer's job, not this package's — it has no reason to import
+// net/http otherwise.
+func parseForwardHeaders(s string) []string {
+	var out []string
+	for _, name := range strings.Split(s, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // parseRoleMap parses a comma-separated "idp_role:airllm_role" mapping string.

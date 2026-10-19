@@ -58,6 +58,12 @@ func sendChatCompletions(ctx context.Context, hc *http.Client, name, baseURL, be
 	if err != nil {
 		return nil, err
 	}
+	// Set first, so none of them can override what follows: an operator
+	// who forwards "Content-Type" or "Authorization" by mistake still
+	// gets the gateway's own values on the wire.
+	for k, v := range ForwardedHeadersFromContext(ctx) {
+		req.Header[k] = v
+	}
 	req.Header.Set("Content-Type", "application/json")
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)

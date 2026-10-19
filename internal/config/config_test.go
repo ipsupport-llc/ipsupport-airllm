@@ -451,3 +451,32 @@ func TestUpstreamChatTimeoutRejectsBadValues(t *testing.T) {
 		}
 	}
 }
+
+func TestForwardHeadersDefaultEmpty(t *testing.T) {
+	setBase(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(c.ForwardHeaders) != 0 {
+		t.Errorf("ForwardHeaders = %v, want empty (opt-in)", c.ForwardHeaders)
+	}
+}
+
+func TestForwardHeadersFromEnv(t *testing.T) {
+	setBase(t)
+	t.Setenv("FORWARD_HEADERS", " X-Request-Id ,X-Session-Id,,X-Session-Id")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []string{"X-Request-Id", "X-Session-Id", "X-Session-Id"}
+	if len(c.ForwardHeaders) != len(want) {
+		t.Fatalf("ForwardHeaders = %v, want %v", c.ForwardHeaders, want)
+	}
+	for i, w := range want {
+		if c.ForwardHeaders[i] != w {
+			t.Errorf("ForwardHeaders[%d] = %q, want %q", i, c.ForwardHeaders[i], w)
+		}
+	}
+}
