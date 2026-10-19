@@ -63,6 +63,15 @@ type Config struct {
 	// ShutdownTimeout is how long in-flight requests may then take to finish.
 	ShutdownDrain   time.Duration
 	ShutdownTimeout time.Duration
+
+	// UpstreamChatTimeout bounds a single non-streaming call to an
+	// OpenAI-compatible or Vertex upstream (chat completions and
+	// embeddings). It has nothing to do with a target's own per-attempt
+	// timeout_ms (routing.TargetOptions): that one can be set to 0 for an
+	// unbounded wait and is enforced by cancelling the attempt's context;
+	// this one is a hard ceiling the provider itself applies underneath
+	// that context, regardless of timeout_ms.
+	UpstreamChatTimeout time.Duration
 }
 
 // Load reads configuration from the environment and validates it.
@@ -111,6 +120,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if c.ShutdownTimeout, err = duration("SHUTDOWN_TIMEOUT", "10s", true); err != nil {
+		return nil, err
+	}
+	if c.UpstreamChatTimeout, err = duration("UPSTREAM_CHAT_TIMEOUT", "120s", true); err != nil {
 		return nil, err
 	}
 

@@ -37,10 +37,11 @@ import (
 //     TestVertexDeclaresNoAudioCapability, because a later refactor could
 //     otherwise quietly re-open that misconfiguration.
 type Vertex struct {
-	name    string
-	baseURL string // .../endpoints/openapi (no trailing slash)
-	tokens  TokenSource
-	hc      *http.Client
+	name        string
+	baseURL     string // .../endpoints/openapi (no trailing slash)
+	tokens      TokenSource
+	hc          *http.Client
+	chatTimeout time.Duration // 0 = defaultChatTimeout; see SetChatTimeout
 }
 
 // NewVertex builds a Vertex provider addressed at baseURL — see
@@ -54,6 +55,11 @@ func NewVertex(name, baseURL string, tokens TokenSource) *Vertex {
 		hc:      &http.Client{},
 	}
 }
+
+// SetChatTimeout overrides the ceiling Chat enforces on a single
+// non-streaming call; see OpenAICompat.SetChatTimeout for the full
+// rationale (same knob, same default, same relationship to timeout_ms).
+func (p *Vertex) SetChatTimeout(d time.Duration) { p.chatTimeout = d }
 
 func (p *Vertex) Name() string     { return p.name }
 func (p *Vertex) Kind() string     { return "vertex" }
@@ -166,11 +172,15 @@ func withThoughtSignature(extra json.RawMessage, sig string) json.RawMessage {
 	return b
 }
 
-// Chat performs a non-streaming upstream call. The two-minute ceiling is
-// parity with OpenAICompat; a large model with a generous thinking budget can
-// approach it.
+// Chat performs a non-streaming upstream call. The default two-minute
+// ceiling (see SetChatTimeout) is parity with OpenAICompat; a large model
+// with a generous thinking budget can approach it.
 func (p *Vertex) Chat(ctx context.Context, in llm.ChatRequest) (llm.ChatResponse, error) {
-	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	timeout := p.chatTimeout
+	if timeout <= 0 {
+		timeout = defaultChatTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	body, err := openai.EncodeChatRequest(vertexRequest(withThinkingOff(p.Kind(), in)), false)

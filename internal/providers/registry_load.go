@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"time"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/secrets"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
@@ -42,7 +43,10 @@ func defaultBaseURL(kind string) string {
 // A provider that cannot be built is skipped, never fatal: the gateway has to
 // start — and keep serving every other provider — when one provider's
 // credentials or configuration are wrong.
-func Build(ctx context.Context, rows []store.ProviderRow, sealer *secrets.Sealer) *Registry {
+//
+// chatTimeout is applied to every OpenAI-compatible and Vertex provider via
+// SetChatTimeout; <= 0 leaves each on its own built-in default.
+func Build(ctx context.Context, rows []store.ProviderRow, sealer *secrets.Sealer, chatTimeout time.Duration) *Registry {
 	reg := NewRegistry()
 	// Fingerprints of every Google credential this load actually resolved a
 	// token source for — reconciled against the token cache at the end, so
@@ -69,13 +73,16 @@ func Build(ctx context.Context, rows []store.ProviderRow, sealer *secrets.Sealer
 			if base == "" {
 				base = defaultBaseURL(p.Kind)
 			}
-			prov = NewOpenAICompat(p.Name, p.Kind, base, string(cred))
+			oc := NewOpenAICompat(p.Name, p.Kind, base, string(cred))
+			oc.SetChatTimeout(chatTimeout)
+			prov = oc
 		case "vertex":
 			v, err := newVertexFromRow(ctx, p, cred, credErr)
 			if err != nil {
 				slog.Error("vertex provider disabled", "provider", p.Name, "err", err)
 				continue
 			}
+			v.SetChatTimeout(chatTimeout)
 			prov = v
 			if credErr == nil {
 				liveTokenFingerprints[googleTokenFingerprint(cred)] = true

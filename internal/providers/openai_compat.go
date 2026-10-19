@@ -24,12 +24,17 @@ import (
 // OpenAI, OpenRouter, xAI (Grok), and Ollama. They differ only by base URL and
 // API key.
 type OpenAICompat struct {
-	name    string
-	kind    string
-	baseURL string // e.g. https://api.openai.com/v1 (no trailing slash)
-	apiKey  string
-	hc      *http.Client
+	name        string
+	kind        string
+	baseURL     string // e.g. https://api.openai.com/v1 (no trailing slash)
+	apiKey      string
+	hc          *http.Client
+	chatTimeout time.Duration // 0 = defaultChatTimeout; see SetChatTimeout
 }
+
+// defaultChatTimeout is the ceiling Chat enforces when SetChatTimeout was
+// never called.
+const defaultChatTimeout = 120 * time.Second
 
 // NewOpenAICompat builds an OpenAI-compatible provider.
 func NewOpenAICompat(name, kind, baseURL, apiKey string) *OpenAICompat {
@@ -41,6 +46,14 @@ func NewOpenAICompat(name, kind, baseURL, apiKey string) *OpenAICompat {
 		hc:      &http.Client{},
 	}
 }
+
+// SetChatTimeout overrides the ceiling Chat (and Embeddings) enforce on a
+// single non-streaming call. Zero or negative restores defaultChatTimeout.
+// This is independent of a target's own per-attempt timeout_ms
+// (routing.TargetOptions), which bounds the call from the caller's side by
+// cancelling its context; this one is a floor the provider applies itself,
+// underneath whatever context it was given.
+func (p *OpenAICompat) SetChatTimeout(d time.Duration) { p.chatTimeout = d }
 
 func (p *OpenAICompat) Name() string     { return p.name }
 func (p *OpenAICompat) Kind() string     { return p.kind }
@@ -64,7 +77,11 @@ func audioHTTPError(name string, status int, body []byte, header http.Header) er
 
 // Chat performs a non-streaming upstream call.
 func (p *OpenAICompat) Chat(ctx context.Context, in llm.ChatRequest) (llm.ChatResponse, error) {
-	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	timeout := p.chatTimeout
+	if timeout <= 0 {
+		timeout = defaultChatTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	body, err := openai.EncodeChatRequest(withoutToolCallExtras(withThinkingOff(p.kind, in)), false)

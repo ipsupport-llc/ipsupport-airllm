@@ -71,6 +71,30 @@ func TestChatTransportCancellationIsNotRetryable(t *testing.T) {
 	}
 }
 
+// TestChatRespectsConfiguredTimeout proves SetChatTimeout overrides the
+// built-in 120s ceiling: a handler that hangs longer than the configured
+// timeout must abort the call, not hang for the default duration.
+func TestChatRespectsConfiguredTimeout(t *testing.T) {
+	block := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-block // hang well past the configured timeout
+	}))
+	defer ts.Close()
+	defer close(block)
+
+	p := NewOpenAICompat("up", "openai", ts.URL, "sk-test")
+	p.SetChatTimeout(50 * time.Millisecond)
+
+	start := time.Now()
+	_, err := p.Chat(context.Background(), llm.ChatRequest{Model: "m", Messages: []llm.Message{{Role: "user", Content: "hi"}}})
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("Chat took %v, want it bounded by the 50ms configured timeout", elapsed)
+	}
+	if err == nil {
+		t.Fatal("expected a timeout error")
+	}
+}
+
 func TestChatStreamSynthesizesFinishReasonBeforeUsage(t *testing.T) {
 	// Groq-shaped quirk: a whole tool call, then straight to a usage chunk,
 	// finish_reason never populated anywhere (see the v0.1.12 incident).

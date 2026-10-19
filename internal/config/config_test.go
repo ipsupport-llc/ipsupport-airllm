@@ -418,3 +418,36 @@ func TestReplicaKnobsRejectBadValues(t *testing.T) {
 		}
 	}
 }
+
+func TestUpstreamChatTimeoutDefault(t *testing.T) {
+	setBase(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.UpstreamChatTimeout != 120*time.Second {
+		t.Errorf("upstream chat timeout = %v, want 120s", c.UpstreamChatTimeout)
+	}
+}
+
+func TestUpstreamChatTimeoutFromEnv(t *testing.T) {
+	setBase(t)
+	t.Setenv("UPSTREAM_CHAT_TIMEOUT", "5m")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.UpstreamChatTimeout != 5*time.Minute {
+		t.Errorf("upstream chat timeout = %v, want 5m", c.UpstreamChatTimeout)
+	}
+}
+
+func TestUpstreamChatTimeoutRejectsBadValues(t *testing.T) {
+	for _, val := range []string{"often", "0s", "-30s"} {
+		setBase(t)
+		t.Setenv("UPSTREAM_CHAT_TIMEOUT", val)
+		if _, err := Load(); err == nil {
+			t.Errorf("UPSTREAM_CHAT_TIMEOUT=%q: want an error", val)
+		}
+	}
+}
