@@ -27,6 +27,47 @@ func TestDecodeEmbeddingsRequestArrayOfStrings(t *testing.T) {
 	}
 }
 
+func TestDecodeEmbeddingsRequestPassesThroughDimensions(t *testing.T) {
+	req, err := DecodeEmbeddingsRequest(strings.NewReader(`{"model":"m","input":"hi","dimensions":256}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Dimensions == nil || *req.Dimensions != 256 {
+		t.Errorf("Dimensions = %v, want 256", req.Dimensions)
+	}
+}
+
+func TestDecodeEmbeddingsRequestOmittedDimensionsIsNil(t *testing.T) {
+	req, err := DecodeEmbeddingsRequest(strings.NewReader(`{"model":"m","input":"hi"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Dimensions != nil {
+		t.Errorf("Dimensions = %v, want nil", req.Dimensions)
+	}
+}
+
+func TestDecodeEmbeddingsRequestAcceptsExplicitFloatEncodingFormat(t *testing.T) {
+	req, err := DecodeEmbeddingsRequest(strings.NewReader(`{"model":"m","input":"hi","encoding_format":"float"}`))
+	if err != nil {
+		t.Fatalf("encoding_format=float must be accepted: %v", err)
+	}
+	if req.Model != "m" {
+		t.Errorf("req = %+v", req)
+	}
+}
+
+// TestDecodeEmbeddingsRequestRejectsUnsupportedEncodingFormat proves a
+// request for base64 (or any non-float) encoding is refused rather than
+// silently answered with float vectors — some client SDKs default to
+// base64 and decode the reply as such, so answering with floats under a
+// base64 request would hand them corrupt data instead of an error.
+func TestDecodeEmbeddingsRequestRejectsUnsupportedEncodingFormat(t *testing.T) {
+	if _, err := DecodeEmbeddingsRequest(strings.NewReader(`{"model":"m","input":"hi","encoding_format":"base64"}`)); err == nil {
+		t.Fatal("expected an error for encoding_format=base64")
+	}
+}
+
 func TestDecodeEmbeddingsRequestRejectsMissingModel(t *testing.T) {
 	if _, err := DecodeEmbeddingsRequest(strings.NewReader(`{"input":"hi"}`)); err == nil {
 		t.Fatal("expected an error for a missing model")
@@ -42,6 +83,12 @@ func TestDecodeEmbeddingsRequestRejectsMissingInput(t *testing.T) {
 func TestDecodeEmbeddingsRequestRejectsEmptyArray(t *testing.T) {
 	if _, err := DecodeEmbeddingsRequest(strings.NewReader(`{"model":"m","input":[]}`)); err == nil {
 		t.Fatal("expected an error for an empty input array")
+	}
+}
+
+func TestDecodeEmbeddingsRequestRejectsEmptyStringInArray(t *testing.T) {
+	if _, err := DecodeEmbeddingsRequest(strings.NewReader(`{"model":"m","input":["a",""]}`)); err == nil {
+		t.Fatal("expected an error for an empty string within the input array")
 	}
 }
 

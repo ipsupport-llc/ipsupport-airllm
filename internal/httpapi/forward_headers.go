@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"net/http"
+	"slices"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
 )
@@ -25,7 +26,10 @@ func withForwardedHeaders(ctx context.Context, r *http.Request, allow []string) 
 			if out == nil {
 				out = http.Header{}
 			}
-			out[key] = v
+			// Cloned so this slice is never the same backing array as
+			// r.Header's — nothing mutates either today, but the two have
+			// no reason to alias.
+			out[key] = slices.Clone(v)
 		}
 	}
 	return providers.WithForwardedHeaders(ctx, out)

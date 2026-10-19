@@ -44,6 +44,39 @@ func TestEmbeddingsHitsEmbeddingsPath(t *testing.T) {
 	}
 }
 
+// TestEmbeddingsRejectsIncompleteResponse proves a response whose data
+// doesn't fully cover the request's inputs is a retryable failure, not a
+// success with missing or null vectors. Covers both a short count and
+// indices that leave a hole.
+func TestEmbeddingsRejectsIncompleteResponse(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"fewer entries than inputs", `{"model":"m","data":[{"embedding":[1],"index":0}],"usage":{"prompt_tokens":1}}`},
+		{"indices leave a hole", `{"model":"m","data":[{"embedding":[1],"index":0},{"embedding":[2],"index":2}],"usage":{"prompt_tokens":2}}`},
+		{"count matches but a duplicate index leaves a slot empty", `{"model":"m","data":[{"embedding":[1],"index":0},{"embedding":[9],"index":0},{"embedding":[2],"index":1}],"usage":{"prompt_tokens":3}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(tc.body))
+			}))
+			defer ts.Close()
+
+			p := NewOpenAICompat("up", "openai", ts.URL, "sk-test")
+			_, err := p.Embeddings(context.Background(), llm.EmbeddingsRequest{Model: "m", Input: []string{"a", "b", "c"}})
+			if err == nil {
+				t.Fatal("expected an error for an incomplete response, got none")
+			}
+			if !IsRetryable(err) {
+				t.Errorf("expected a retryable error so failover can run, got %v", err)
+			}
+		})
+	}
+}
+
 // TestEmbeddingsForwardsAuthAndForwardedHeaders proves Embeddings sets its
 // own Authorization and also attaches an opted-in forwarded header,
 // mirroring Chat's behavior on the same upstream call.
@@ -53,7 +86,7 @@ func TestEmbeddingsForwardsAuthAndForwardedHeaders(t *testing.T) {
 		gotAuth = r.Header.Get("Authorization")
 		gotForwarded = r.Header.Get("X-Request-Id")
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"model":"m","data":[],"usage":{"prompt_tokens":0}}`))
+		w.Write([]byte(`{"model":"m","data":[{"embedding":[0.1],"index":0}],"usage":{"prompt_tokens":1}}`))
 	}))
 	defer ts.Close()
 

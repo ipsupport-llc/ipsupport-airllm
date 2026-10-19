@@ -39,17 +39,14 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Pattern-scan (and redact or block) each input text before it leaves
+	// Pattern-scan (and redact or block) the input batch before it leaves
 	// the gateway, the same protection chat's own input gets and audio
 	// already gives its transcript on the way back out — an embeddings
-	// input is just as capable of carrying a secret to a third party.
-	for i, text := range req.Input {
-		blocked, msg, _, redacted := s.dlpScanText(r.Context(), ak, "openai", req.Model, text)
-		if blocked {
-			writeProtocolError(w, r, http.StatusBadRequest, "invalid_request_error", msg)
-			return
-		}
-		req.Input[i] = redacted
+	// input is just as capable of carrying a secret to a third party. One
+	// incident is recorded for the whole batch, not one per input.
+	if blocked, msg := s.dlpScanTexts(r.Context(), ak, "openai", req.Model, req.Input); blocked {
+		writeProtocolError(w, r, http.StatusBadRequest, "invalid_request_error", msg)
+		return
 	}
 
 	resp, res, callErr := s.runEmbeddings(r.Context(), plan, req)

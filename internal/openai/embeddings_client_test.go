@@ -17,6 +17,17 @@ func TestEncodeEmbeddingsRequest(t *testing.T) {
 	}
 }
 
+func TestEncodeEmbeddingsRequestIncludesDimensions(t *testing.T) {
+	dims := 256
+	b, err := EncodeEmbeddingsRequest(llm.EmbeddingsRequest{Model: "m", Input: []string{"a"}, Dimensions: &dims})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := string(b); s != `{"model":"m","input":["a"],"dimensions":256}` {
+		t.Errorf("got %s", s)
+	}
+}
+
 // TestDecodeEmbeddingsResponseOrdersByIndex proves a vendor that returns
 // entries out of order is still placed correctly, keyed by the index field
 // rather than array position.

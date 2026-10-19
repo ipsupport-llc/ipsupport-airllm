@@ -8,14 +8,15 @@ import (
 )
 
 type upstreamEmbeddingsRequest struct {
-	Model string   `json:"model"`
-	Input []string `json:"input"`
+	Model      string   `json:"model"`
+	Input      []string `json:"input"`
+	Dimensions *int     `json:"dimensions,omitempty"`
 }
 
 // EncodeEmbeddingsRequest renders the IR as an OpenAI embeddings request
 // body for an upstream call.
 func EncodeEmbeddingsRequest(req llm.EmbeddingsRequest) ([]byte, error) {
-	return json.Marshal(upstreamEmbeddingsRequest{Model: req.Model, Input: req.Input})
+	return json.Marshal(upstreamEmbeddingsRequest{Model: req.Model, Input: req.Input, Dimensions: req.Dimensions})
 }
 
 type upstreamEmbedding struct {

@@ -463,6 +463,21 @@ func TestForwardHeadersDefaultEmpty(t *testing.T) {
 	}
 }
 
+func TestForwardHeadersRejectsDenylistedNames(t *testing.T) {
+	for _, val := range []string{
+		"Authorization", "authorization", "X-Api-Key", "Proxy-Authorization",
+		"Cookie", "Host", "Content-Length", "Content-Type", "Content-Encoding",
+		"Transfer-Encoding", "Connection", "Te", "Upgrade", "Accept-Encoding",
+		"X-Request-Id,Authorization", // denied even mixed in with an allowed name
+	} {
+		setBase(t)
+		t.Setenv("FORWARD_HEADERS", val)
+		if _, err := Load(); err == nil {
+			t.Errorf("FORWARD_HEADERS=%q: want an error (denylisted header name)", val)
+		}
+	}
+}
+
 func TestForwardHeadersFromEnv(t *testing.T) {
 	setBase(t)
 	t.Setenv("FORWARD_HEADERS", " X-Request-Id ,X-Session-Id,,X-Session-Id")

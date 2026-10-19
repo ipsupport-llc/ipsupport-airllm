@@ -133,7 +133,9 @@ func Load() (*Config, error) {
 	if c.UpstreamChatTimeout, err = duration("UPSTREAM_CHAT_TIMEOUT", "120s", true); err != nil {
 		return nil, err
 	}
-	c.ForwardHeaders = parseForwardHeaders(env("FORWARD_HEADERS", ""))
+	if c.ForwardHeaders, err = parseForwardHeaders(env("FORWARD_HEADERS", "")); err != nil {
+		return nil, err
+	}
 
 	key, dev, err := loadMasterKey(c.Env)
 	if err != nil {
@@ -304,19 +306,45 @@ func loadOIDC() (OIDCConfig, error) {
 	}, nil
 }
 
+// forwardHeaderDenylist are names FORWARD_HEADERS must never contain:
+// hop-by-hop headers, and ones the gateway sets for its own reasons on the
+// outbound request (Content-Type/Authorization/Accept, see
+// providers.setForwardedHeaders) or needs intact on the inbound one.
+// Authorization and X-Api-Key in particular authenticate the CALLER to
+// this gateway — forwarding either to a keyless upstream (a local Ollama,
+// say) would hand that upstream the caller's gateway credential.
+var forwardHeaderDenylist = []string{
+	"Authorization", "X-Api-Key", "Proxy-Authorization", "Cookie",
+	"Host", "Content-Length", "Content-Type", "Content-Encoding",
+	"Transfer-Encoding", "Connection", "Te", "Upgrade", "Accept-Encoding",
+}
+
+func isForwardHeaderDenied(name string) bool {
+	for _, d := range forwardHeaderDenylist {
+		if strings.EqualFold(d, name) {
+			return true
+		}
+	}
+	return false
+}
+
 // parseForwardHeaders splits a comma-separated FORWARD_HEADERS value into
 // header names, trimmed, blank entries dropped. Canonicalization (so
 // matching against an incoming request's headers is case-insensitive) is
 // the httpapi layer's job, not this package's — it has no reason to import
 // net/http otherwise.
-func parseForwardHeaders(s string) []string {
+func parseForwardHeaders(s string) ([]string, error) {
 	var out []string
 	for _, name := range strings.Split(s, ",") {
-		if name = strings.TrimSpace(name); name != "" {
+		if name = strings.TrimSpace(name); name == "" {
+			continue
+		} else if isForwardHeaderDenied(name) {
+			return nil, fmt.Errorf("FORWARD_HEADERS must not include %q: the gateway sets this header itself, or it authenticates the caller rather than the upstream", name)
+		} else {
 			out = append(out, name)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // parseRoleMap parses a comma-separated "idp_role:airllm_role" mapping string.

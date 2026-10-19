@@ -62,25 +62,26 @@ func TestRunEmbeddingsHappyPath(t *testing.T) {
 	}
 }
 
-// embeddingsOnly is a provider with no embeddings capability — used to prove
-// runEmbeddings falls through to the next tier instead of resolving here,
-// mirroring chatOnly/TestAudioCapableButBusyTargetIsReportedAsBusy's pattern
-// for the audio capability check.
-type embeddingsOnly struct{ name string }
+// chatOnlyNoEmbed is a provider that can chat but has no embeddings
+// capability — used to prove runEmbeddings falls through to the next tier
+// instead of resolving here, mirroring chatOnly/
+// TestAudioCapableButBusyTargetIsReportedAsBusy's pattern for the audio
+// capability check.
+type chatOnlyNoEmbed struct{ name string }
 
-func (e embeddingsOnly) Name() string     { return e.name }
-func (e embeddingsOnly) Kind() string     { return "openai" }
-func (e embeddingsOnly) Protocol() string { return "openai" }
-func (e embeddingsOnly) Chat(context.Context, llm.ChatRequest) (llm.ChatResponse, error) {
+func (e chatOnlyNoEmbed) Name() string     { return e.name }
+func (e chatOnlyNoEmbed) Kind() string     { return "openai" }
+func (e chatOnlyNoEmbed) Protocol() string { return "openai" }
+func (e chatOnlyNoEmbed) Chat(context.Context, llm.ChatRequest) (llm.ChatResponse, error) {
 	return llm.ChatResponse{}, nil
 }
-func (e embeddingsOnly) ChatStream(context.Context, llm.ChatRequest, func(llm.StreamChunk) error) error {
+func (e chatOnlyNoEmbed) ChatStream(context.Context, llm.ChatRequest, func(llm.StreamChunk) error) error {
 	return nil
 }
 
 func TestRunEmbeddingsSkipsTargetWithoutEmbedder(t *testing.T) {
 	reg := providers.NewRegistry()
-	reg.Register(embeddingsOnly{name: "text-only"}, 0)
+	reg.Register(chatOnlyNoEmbed{name: "text-only"}, 0)
 	reg.Register(providers.NewMock("mock"), 0)
 	s := &Server{router: routing.NewRouter(nil), metrics: metrics.New()}
 	s.regPtr.Store(reg)

@@ -5,6 +5,10 @@ package llm
 type EmbeddingsRequest struct {
 	Model string
 	Input []string
+	// Dimensions is the requested output vector length, for models that
+	// support truncating it (OpenAI's text-embedding-3 family, among
+	// others). Nil means the model's own default length.
+	Dimensions *int
 }
 
 // EmbeddingsResponse is what a provider's embeddings call returns: one

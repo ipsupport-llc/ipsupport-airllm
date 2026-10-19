@@ -13,6 +13,8 @@ data:
   CONFIG_REFRESH_INTERVAL: {{ .Values.config.configRefreshInterval | quote }}
   SHUTDOWN_DRAIN: {{ .Values.config.shutdownDrain | quote }}
   SHUTDOWN_TIMEOUT: {{ .Values.config.shutdownTimeout | quote }}
+  UPSTREAM_CHAT_TIMEOUT: {{ .Values.config.upstreamChatTimeout | quote }}
+  FORWARD_HEADERS: {{ .Values.config.forwardHeaders | quote }}
 {{- if .Values.dlpBert.enabled }}
   DLP_MODEL_URL_DEFAULT: {{ printf "http://%s:%d" (include "airllm.dlpBertServiceName" .) (int .Values.dlpBert.service.port) | quote }}
 {{- end }}

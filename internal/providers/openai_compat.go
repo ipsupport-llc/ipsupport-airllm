@@ -51,8 +51,8 @@ func NewOpenAICompat(name, kind, baseURL, apiKey string) *OpenAICompat {
 // single non-streaming call. Zero or negative restores defaultChatTimeout.
 // This is independent of a target's own per-attempt timeout_ms
 // (routing.TargetOptions), which bounds the call from the caller's side by
-// cancelling its context; this one is a floor the provider applies itself,
-// underneath whatever context it was given.
+// cancelling its context; this one is a ceiling the provider applies
+// itself, underneath whatever context it was given.
 func (p *OpenAICompat) SetChatTimeout(d time.Duration) { p.chatTimeout = d }
 
 func (p *OpenAICompat) Name() string     { return p.name }
@@ -150,7 +150,26 @@ func (p *OpenAICompat) Embeddings(ctx context.Context, in llm.EmbeddingsRequest)
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		return llm.EmbeddingsResponse{}, httpError(p.name, resp.StatusCode, b, resp.Header)
 	}
-	return openai.DecodeEmbeddingsResponse(resp.Body)
+	out, err := openai.DecodeEmbeddingsResponse(resp.Body)
+	if err != nil {
+		return llm.EmbeddingsResponse{}, err
+	}
+	// A 2xx body short of one vector per input, or with a duplicate/
+	// out-of-range index leaving a slot unfilled, is not a usable success:
+	// the caller would get a nil vector or fewer than it asked for. Treat
+	// it as a retryable upstream failure so the router falls over to the
+	// next tier instead of handing the client silently corrupt data.
+	if len(out.Data) != len(in.Input) {
+		return llm.EmbeddingsResponse{}, &Error{Status: http.StatusBadGateway, Retryable: true,
+			Message: fmt.Sprintf("upstream %s returned %d embeddings for %d inputs", p.name, len(out.Data), len(in.Input))}
+	}
+	for _, vec := range out.Data {
+		if vec == nil {
+			return llm.EmbeddingsResponse{}, &Error{Status: http.StatusBadGateway, Retryable: true,
+				Message: "upstream " + p.name + " response is missing an embedding for one or more inputs"}
+		}
+	}
+	return out, nil
 }
 
 // withoutToolCallExtras drops every tool call's ExtraContent. It is Vertex's
