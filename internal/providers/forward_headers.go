@@ -25,3 +25,13 @@ func ForwardedHeadersFromContext(ctx context.Context) http.Header {
 	h, _ := ctx.Value(forwardedHeadersKey{}).(http.Header)
 	return h
 }
+
+// setForwardedHeaders attaches any headers an operator opted into
+// forwarding (ctx, via WithForwardedHeaders) onto req. Callers must call
+// this before setting their own headers (Content-Type, Authorization, ...)
+// so forwarding can never override them.
+func setForwardedHeaders(ctx context.Context, req *http.Request) {
+	for k, v := range ForwardedHeadersFromContext(ctx) {
+		req.Header[k] = v
+	}
+}

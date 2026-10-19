@@ -236,6 +236,28 @@ func TestMockTranscribe(t *testing.T) {
 	}
 }
 
+func TestMockEmbeddings(t *testing.T) {
+	m := NewMock("mock")
+	resp, err := m.Embeddings(context.Background(), llm.EmbeddingsRequest{Model: "mock-embed", Input: []string{"hi", "hello there"}})
+	if err != nil {
+		t.Fatalf("Embeddings: %v", err)
+	}
+	if len(resp.Data) != 2 {
+		t.Fatalf("len(Data) = %d, want 2", len(resp.Data))
+	}
+	if len(resp.Data[0]) == 0 || len(resp.Data[1]) == 0 {
+		t.Error("want non-empty vectors")
+	}
+	if resp.PromptTokens <= 0 {
+		t.Errorf("PromptTokens = %d, want > 0", resp.PromptTokens)
+	}
+
+	_, err = m.Embeddings(context.Background(), llm.EmbeddingsRequest{Model: "mock-embed-fail", Input: []string{"x"}})
+	if !IsRetryable(err) {
+		t.Errorf("fail model: expected retryable error, got %v", err)
+	}
+}
+
 func TestMockSynthesize(t *testing.T) {
 	m := NewMock("mock")
 	resp, err := m.Synthesize(context.Background(), audio.SpeechRequest{

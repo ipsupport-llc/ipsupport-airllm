@@ -114,6 +114,45 @@ func (p *OpenAICompat) ChatStream(ctx context.Context, in llm.ChatRequest, yield
 	return decodeSSEStream(resp.Body, streamDecodeOptions{provider: p.name}, yield)
 }
 
+// Embeddings performs a non-streaming embeddings call, at base_url+
+// "/embeddings" — a sibling of the chat-completions path every
+// OpenAI-compatible vendor this gateway talks to also serves. Vertex does
+// not implement this interface; see its own doc comment for why it stays
+// scoped to chat and streaming only.
+func (p *OpenAICompat) Embeddings(ctx context.Context, in llm.EmbeddingsRequest) (llm.EmbeddingsResponse, error) {
+	timeout := p.chatTimeout
+	if timeout <= 0 {
+		timeout = defaultChatTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	body, err := openai.EncodeEmbeddingsRequest(in)
+	if err != nil {
+		return llm.EmbeddingsResponse{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/embeddings", bytes.NewReader(body))
+	if err != nil {
+		return llm.EmbeddingsResponse{}, err
+	}
+	setForwardedHeaders(ctx, req)
+	req.Header.Set("Content-Type", "application/json")
+	if p.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
+
+	resp, err := p.hc.Do(req)
+	if err != nil {
+		return llm.EmbeddingsResponse{}, transportError(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return llm.EmbeddingsResponse{}, httpError(p.name, resp.StatusCode, b, resp.Header)
+	}
+	return openai.DecodeEmbeddingsResponse(resp.Body)
+}
+
 // withoutToolCallExtras drops every tool call's ExtraContent. It is Vertex's
 // field (Gemini's thought signature), and a turn that falls back from a
 // Vertex tier still carries it; other vendors get exactly the request they

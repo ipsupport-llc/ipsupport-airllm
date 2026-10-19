@@ -179,7 +179,8 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// chatEntry seeds a ledger entry common to the chat and messages paths.
+// chatEntry seeds a ledger entry common to the chat, messages and
+// embeddings paths.
 func chatEntry(ak authedKey, alias string, res execResult, ingress string, start time.Time) ledger.Entry {
 	return ledger.Entry{
 		KeyID:            ak.KeyID,

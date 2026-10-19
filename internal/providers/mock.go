@@ -250,3 +250,25 @@ func (m *Mock) Synthesize(_ context.Context, req audio.SpeechRequest) (audio.Spe
 		ContentType: "audio/mpeg",
 	}, nil
 }
+
+// Embeddings returns a deterministic fake vector per input (8 dimensions,
+// derived from the input's length and position — not a real embedding, but
+// stable and distinguishable across inputs). An upstream model containing
+// "fail" yields a retryable error, the same convention Chat uses, so
+// embeddings aliases can exercise fallback in dev without real credentials.
+func (m *Mock) Embeddings(_ context.Context, req llm.EmbeddingsRequest) (llm.EmbeddingsResponse, error) {
+	if strings.Contains(req.Model, "fail") {
+		return llm.EmbeddingsResponse{}, &Error{Status: 503, Retryable: true, Message: "mock upstream failure for model " + req.Model}
+	}
+	data := make([][]float64, len(req.Input))
+	var prompt int
+	for i, text := range req.Input {
+		prompt += approxTokens(text)
+		vec := make([]float64, 8)
+		for d := range vec {
+			vec[d] = float64(len(text)+d) / 100
+		}
+		data[i] = vec
+	}
+	return llm.EmbeddingsResponse{Model: req.Model, Data: data, PromptTokens: prompt}, nil
+}
