@@ -56,6 +56,7 @@ func TestEmbeddingsRejectsIncompleteResponse(t *testing.T) {
 		{"fewer entries than inputs", `{"model":"m","data":[{"embedding":[1],"index":0}],"usage":{"prompt_tokens":1}}`},
 		{"indices leave a hole", `{"model":"m","data":[{"embedding":[1],"index":0},{"embedding":[2],"index":2}],"usage":{"prompt_tokens":2}}`},
 		{"count matches but a duplicate index leaves a slot empty", `{"model":"m","data":[{"embedding":[1],"index":0},{"embedding":[9],"index":0},{"embedding":[2],"index":1}],"usage":{"prompt_tokens":3}}`},
+		{"count matches but an out-of-range index leaves a slot empty", `{"model":"m","data":[{"embedding":[1],"index":0},{"embedding":[2],"index":1},{"embedding":[9],"index":5}],"usage":{"prompt_tokens":3}}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

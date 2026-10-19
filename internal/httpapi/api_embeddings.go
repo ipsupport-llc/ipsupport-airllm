@@ -65,7 +65,7 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 	s.finalizeUsage(r.Context(), entry, ak.KeyID, res.UpstreamModel,
 		llm.Usage{PromptTokens: resp.PromptTokens, TotalTokens: resp.PromptTokens}, 0, 0)
 
-	body, err := openai.MarshalEmbeddingsResponse(resp)
+	body, err := openai.MarshalEmbeddingsResponse(resp, req.EncodingFormat)
 	if err != nil {
 		writeProtocolError(w, r, http.StatusInternalServerError, "internal_error", "failed to encode response")
 		return

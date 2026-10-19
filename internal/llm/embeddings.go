@@ -9,6 +9,14 @@ type EmbeddingsRequest struct {
 	// support truncating it (OpenAI's text-embedding-3 family, among
 	// others). Nil means the model's own default length.
 	Dimensions *int
+	// EncodingFormat is the client-facing wire shape for each vector:
+	// "float" (a JSON number array) or "base64" (a base64 string of
+	// little-endian float32 bytes — what the official OpenAI SDKs request
+	// by default). It never reaches an upstream call: providers always
+	// decode a plain float array from upstream regardless of what the
+	// gateway's own client asked for; only MarshalEmbeddingsResponse reads
+	// it. Always normalized to one of the two values, never empty.
+	EncodingFormat string
 }
 
 // EmbeddingsResponse is what a provider's embeddings call returns: one
