@@ -32,6 +32,15 @@ config:                                         # non-secret env (rendered into 
   # app.terminationGracePeriodSeconds.
   shutdownDrain: 5s
   shutdownTimeout: 20s
+  # Ceiling on a single non-streaming upstream chat/embeddings call,
+  # independent of a routing target's own timeout_ms. Raise it for a
+  # local upstream with a long time-to-first-token on non-streaming
+  # requests.
+  upstreamChatTimeout: 120s
+  # Comma-separated request header names copied onto the outbound upstream
+  # request, alongside the gateway's own Content-Type/Authorization/Accept
+  # (which this can never override). Empty by default — opt in per name.
+  forwardHeaders: ""
   oidc:                                         # used only when authMode: oidc (non-secret parts)
     issuer: ""
     clientId: ""

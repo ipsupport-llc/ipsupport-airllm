@@ -73,6 +73,12 @@ type VoiceLister interface {
 	ListVoices(ctx context.Context) ([]audio.Voice, error)
 }
 
+// Embedder is implemented by providers that can compute text embeddings.
+// Providers without an embeddings capability simply do not implement it.
+type Embedder interface {
+	Embeddings(ctx context.Context, req llm.EmbeddingsRequest) (llm.EmbeddingsResponse, error)
+}
+
 // Entry wraps a provider with a concurrency limit. A request must Acquire a
 // slot before calling and Release it after; when the limit is reached Acquire
 // fails so the router can fall back to another target.

@@ -251,6 +251,63 @@ func TestDlpScanTextClean(t *testing.T) {
 	}
 }
 
+func TestDlpScanTextsFlagLeavesTextUnchanged(t *testing.T) {
+	s := newDLPScanTextTestServer(t, dlpConfig{Enabled: true, Action: "flag"})
+	texts := []string{
+		"clean sentence",
+		"my key is sk-test-1234567890abcdef1234567890abcdef",
+		"another secret sk-test-abcdef1234567890abcdef1234567890",
+	}
+	blocked, msg := s.dlpScanTexts(context.Background(), authedKey{}, "openai", "embed-alias", texts)
+	if blocked {
+		t.Errorf("action=flag must not block, got msg=%q", msg)
+	}
+	if texts[0] != "clean sentence" {
+		t.Errorf("flag must not alter clean text, got %q", texts[0])
+	}
+}
+
+func TestDlpScanTextsRedactsEachInputInPlace(t *testing.T) {
+	s := newDLPScanTextTestServer(t, dlpConfig{Enabled: true, Action: "redact"})
+	texts := []string{
+		"clean sentence",
+		"my key is sk-test-1234567890abcdef1234567890abcdef",
+	}
+	if blocked, _ := s.dlpScanTexts(context.Background(), authedKey{}, "openai", "embed-alias", texts); blocked {
+		t.Fatal("action=redact must not block")
+	}
+	if texts[0] != "clean sentence" {
+		t.Errorf("clean input must round-trip unchanged, got %q", texts[0])
+	}
+	if texts[1] == "my key is sk-test-1234567890abcdef1234567890abcdef" {
+		t.Error("input with a planted secret must be redacted in place")
+	}
+}
+
+func TestDlpScanTextsBlocksWholeBatchOnAnyFinding(t *testing.T) {
+	s := newDLPScanTextTestServer(t, dlpConfig{Enabled: true, Action: "block"})
+	texts := []string{"clean sentence", "my key is sk-test-1234567890abcdef1234567890abcdef"}
+	blocked, msg := s.dlpScanTexts(context.Background(), authedKey{}, "openai", "embed-alias", texts)
+	if !blocked {
+		t.Error("a batch containing a planted secret must block")
+	}
+	if msg == "" {
+		t.Error("want a non-empty block message")
+	}
+}
+
+func TestDlpScanTextsCleanBatchPassesThrough(t *testing.T) {
+	s := newDLPScanTextTestServer(t, dlpConfig{Enabled: true, Action: "block"})
+	texts := []string{"nothing to see here", "an ordinary sentence"}
+	blocked, _ := s.dlpScanTexts(context.Background(), authedKey{}, "openai", "embed-alias", texts)
+	if blocked {
+		t.Error("a clean batch must not block")
+	}
+	if texts[0] != "nothing to see here" || texts[1] != "an ordinary sentence" {
+		t.Errorf("clean batch must round-trip unchanged, got %v", texts)
+	}
+}
+
 // TestDlpEnforceModelScanGate proves modelScan gates ONLY the layer-2 BERT
 // sidecar call: with model scanning enabled config-wise, dlpEnforce(...,
 // false) must never hit the sidecar, while the layer-1 deterministic scan

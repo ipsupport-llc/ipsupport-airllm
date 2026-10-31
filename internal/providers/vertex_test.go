@@ -156,6 +156,9 @@ func TestVertexDeclaresNoAudioCapability(t *testing.T) {
 	if _, ok := p.(PricedModelLister); ok {
 		t.Error("Vertex must not satisfy PricedModelLister: Google publishes no machine-readable price list, so an import would silently do nothing")
 	}
+	if _, ok := p.(Embedder); ok {
+		t.Error("Vertex must not satisfy Embedder: it would let an embeddings alias resolve to a provider that cannot serve it")
+	}
 	if _, ok := p.(ModelLister); !ok {
 		t.Error("Vertex must satisfy ModelLister: the alias editor's dropdown is its only source of Gemini model ids")
 	}

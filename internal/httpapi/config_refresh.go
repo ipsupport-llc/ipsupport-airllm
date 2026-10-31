@@ -82,7 +82,7 @@ func (s *Server) loadProvidersLocked(ctx context.Context, force bool) error {
 	if !force && fp == s.config.providersFP {
 		return nil
 	}
-	s.regPtr.Store(providers.Build(ctx, rows, s.sealer))
+	s.regPtr.Store(providers.Build(ctx, rows, s.sealer, s.cfg.UpstreamChatTimeout))
 	s.config.providersFP = fp
 	if !force {
 		slog.Info("providers reloaded from the database", "providers", len(rows))

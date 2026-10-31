@@ -63,6 +63,23 @@ type Config struct {
 	// ShutdownTimeout is how long in-flight requests may then take to finish.
 	ShutdownDrain   time.Duration
 	ShutdownTimeout time.Duration
+
+	// UpstreamChatTimeout bounds a single non-streaming call to an
+	// OpenAI-compatible or Vertex upstream (chat completions and
+	// embeddings). It has nothing to do with a target's own per-attempt
+	// timeout_ms (routing.TargetOptions): that one can be set to 0 for an
+	// unbounded wait and is enforced by cancelling the attempt's context;
+	// this one is a hard ceiling the provider itself applies underneath
+	// that context, regardless of timeout_ms.
+	UpstreamChatTimeout time.Duration
+
+	// ForwardHeaders names request headers, from FORWARD_HEADERS
+	// (comma-separated), that are copied onto the outbound upstream
+	// request alongside the gateway's own Content-Type/Authorization/
+	// Accept. Empty by default: forwarding is opt-in per header name,
+	// never automatic, since a client's own headers could otherwise
+	// override the ones the gateway sets for its upstream call.
+	ForwardHeaders []string
 }
 
 // Load reads configuration from the environment and validates it.
@@ -111,6 +128,12 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if c.ShutdownTimeout, err = duration("SHUTDOWN_TIMEOUT", "10s", true); err != nil {
+		return nil, err
+	}
+	if c.UpstreamChatTimeout, err = duration("UPSTREAM_CHAT_TIMEOUT", "120s", true); err != nil {
+		return nil, err
+	}
+	if c.ForwardHeaders, err = parseForwardHeaders(env("FORWARD_HEADERS", "")); err != nil {
 		return nil, err
 	}
 
@@ -281,6 +304,47 @@ func loadOIDC() (OIDCConfig, error) {
 		RolesClaim:   os.Getenv("OIDC_ROLES_CLAIM"),
 		RoleMap:      parseRoleMap(os.Getenv("OIDC_ROLE_MAP")),
 	}, nil
+}
+
+// forwardHeaderDenylist are names FORWARD_HEADERS must never contain:
+// hop-by-hop headers, and ones the gateway sets for its own reasons on the
+// outbound request (Content-Type/Authorization/Accept, see
+// providers.setForwardedHeaders) or needs intact on the inbound one.
+// Authorization and X-Api-Key in particular authenticate the CALLER to
+// this gateway — forwarding either to a keyless upstream (a local Ollama,
+// say) would hand that upstream the caller's gateway credential.
+var forwardHeaderDenylist = []string{
+	"Authorization", "X-Api-Key", "Proxy-Authorization", "Cookie",
+	"Host", "Content-Length", "Content-Type", "Content-Encoding",
+	"Transfer-Encoding", "Connection", "Te", "Upgrade", "Accept-Encoding",
+}
+
+func isForwardHeaderDenied(name string) bool {
+	for _, d := range forwardHeaderDenylist {
+		if strings.EqualFold(d, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseForwardHeaders splits a comma-separated FORWARD_HEADERS value into
+// header names, trimmed, blank entries dropped. Canonicalization (so
+// matching against an incoming request's headers is case-insensitive) is
+// the httpapi layer's job, not this package's — it has no reason to import
+// net/http otherwise.
+func parseForwardHeaders(s string) ([]string, error) {
+	var out []string
+	for _, name := range strings.Split(s, ",") {
+		if name = strings.TrimSpace(name); name == "" {
+			continue
+		} else if isForwardHeaderDenied(name) {
+			return nil, fmt.Errorf("FORWARD_HEADERS must not include %q: the gateway sets this header itself, or it authenticates the caller rather than the upstream", name)
+		} else {
+			out = append(out, name)
+		}
+	}
+	return out, nil
 }
 
 // parseRoleMap parses a comma-separated "idp_role:airllm_role" mapping string.

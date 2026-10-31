@@ -24,12 +24,17 @@ import (
 // OpenAI, OpenRouter, xAI (Grok), and Ollama. They differ only by base URL and
 // API key.
 type OpenAICompat struct {
-	name    string
-	kind    string
-	baseURL string // e.g. https://api.openai.com/v1 (no trailing slash)
-	apiKey  string
-	hc      *http.Client
+	name        string
+	kind        string
+	baseURL     string // e.g. https://api.openai.com/v1 (no trailing slash)
+	apiKey      string
+	hc          *http.Client
+	chatTimeout time.Duration // 0 = defaultChatTimeout; see SetChatTimeout
 }
+
+// defaultChatTimeout is the ceiling Chat enforces when SetChatTimeout was
+// never called.
+const defaultChatTimeout = 120 * time.Second
 
 // NewOpenAICompat builds an OpenAI-compatible provider.
 func NewOpenAICompat(name, kind, baseURL, apiKey string) *OpenAICompat {
@@ -41,6 +46,14 @@ func NewOpenAICompat(name, kind, baseURL, apiKey string) *OpenAICompat {
 		hc:      &http.Client{},
 	}
 }
+
+// SetChatTimeout overrides the ceiling Chat (and Embeddings) enforce on a
+// single non-streaming call. Zero or negative restores defaultChatTimeout.
+// This is independent of a target's own per-attempt timeout_ms
+// (routing.TargetOptions), which bounds the call from the caller's side by
+// cancelling its context; this one is a ceiling the provider applies
+// itself, underneath whatever context it was given.
+func (p *OpenAICompat) SetChatTimeout(d time.Duration) { p.chatTimeout = d }
 
 func (p *OpenAICompat) Name() string     { return p.name }
 func (p *OpenAICompat) Kind() string     { return p.kind }
@@ -64,7 +77,11 @@ func audioHTTPError(name string, status int, body []byte, header http.Header) er
 
 // Chat performs a non-streaming upstream call.
 func (p *OpenAICompat) Chat(ctx context.Context, in llm.ChatRequest) (llm.ChatResponse, error) {
-	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	timeout := p.chatTimeout
+	if timeout <= 0 {
+		timeout = defaultChatTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	body, err := openai.EncodeChatRequest(withoutToolCallExtras(withThinkingOff(p.kind, in)), false)
@@ -95,6 +112,64 @@ func (p *OpenAICompat) ChatStream(ctx context.Context, in llm.ChatRequest, yield
 	defer resp.Body.Close()
 
 	return decodeSSEStream(resp.Body, streamDecodeOptions{provider: p.name}, yield)
+}
+
+// Embeddings performs a non-streaming embeddings call, at base_url+
+// "/embeddings" — a sibling of the chat-completions path every
+// OpenAI-compatible vendor this gateway talks to also serves. Vertex does
+// not implement this interface; see its own doc comment for why it stays
+// scoped to chat and streaming only.
+func (p *OpenAICompat) Embeddings(ctx context.Context, in llm.EmbeddingsRequest) (llm.EmbeddingsResponse, error) {
+	timeout := p.chatTimeout
+	if timeout <= 0 {
+		timeout = defaultChatTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	body, err := openai.EncodeEmbeddingsRequest(in)
+	if err != nil {
+		return llm.EmbeddingsResponse{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/embeddings", bytes.NewReader(body))
+	if err != nil {
+		return llm.EmbeddingsResponse{}, err
+	}
+	setForwardedHeaders(ctx, req)
+	req.Header.Set("Content-Type", "application/json")
+	if p.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
+
+	resp, err := p.hc.Do(req)
+	if err != nil {
+		return llm.EmbeddingsResponse{}, transportError(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return llm.EmbeddingsResponse{}, httpError(p.name, resp.StatusCode, b, resp.Header)
+	}
+	out, err := openai.DecodeEmbeddingsResponse(resp.Body)
+	if err != nil {
+		return llm.EmbeddingsResponse{}, err
+	}
+	// A 2xx body short of one vector per input, or with a duplicate/
+	// out-of-range index leaving a slot unfilled, is not a usable success:
+	// the caller would get a nil vector or fewer than it asked for. Treat
+	// it as a retryable upstream failure so the router falls over to the
+	// next tier instead of handing the client silently corrupt data.
+	if len(out.Data) != len(in.Input) {
+		return llm.EmbeddingsResponse{}, &Error{Status: http.StatusBadGateway, Retryable: true,
+			Message: fmt.Sprintf("upstream %s returned %d embeddings for %d inputs", p.name, len(out.Data), len(in.Input))}
+	}
+	for _, vec := range out.Data {
+		if vec == nil {
+			return llm.EmbeddingsResponse{}, &Error{Status: http.StatusBadGateway, Retryable: true,
+				Message: "upstream " + p.name + " response is missing an embedding for one or more inputs"}
+		}
+	}
+	return out, nil
 }
 
 // withoutToolCallExtras drops every tool call's ExtraContent. It is Vertex's

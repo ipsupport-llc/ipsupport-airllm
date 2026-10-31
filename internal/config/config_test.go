@@ -418,3 +418,80 @@ func TestReplicaKnobsRejectBadValues(t *testing.T) {
 		}
 	}
 }
+
+func TestUpstreamChatTimeoutDefault(t *testing.T) {
+	setBase(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.UpstreamChatTimeout != 120*time.Second {
+		t.Errorf("upstream chat timeout = %v, want 120s", c.UpstreamChatTimeout)
+	}
+}
+
+func TestUpstreamChatTimeoutFromEnv(t *testing.T) {
+	setBase(t)
+	t.Setenv("UPSTREAM_CHAT_TIMEOUT", "5m")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.UpstreamChatTimeout != 5*time.Minute {
+		t.Errorf("upstream chat timeout = %v, want 5m", c.UpstreamChatTimeout)
+	}
+}
+
+func TestUpstreamChatTimeoutRejectsBadValues(t *testing.T) {
+	for _, val := range []string{"often", "0s", "-30s"} {
+		setBase(t)
+		t.Setenv("UPSTREAM_CHAT_TIMEOUT", val)
+		if _, err := Load(); err == nil {
+			t.Errorf("UPSTREAM_CHAT_TIMEOUT=%q: want an error", val)
+		}
+	}
+}
+
+func TestForwardHeadersDefaultEmpty(t *testing.T) {
+	setBase(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(c.ForwardHeaders) != 0 {
+		t.Errorf("ForwardHeaders = %v, want empty (opt-in)", c.ForwardHeaders)
+	}
+}
+
+func TestForwardHeadersRejectsDenylistedNames(t *testing.T) {
+	for _, val := range []string{
+		"Authorization", "authorization", "X-Api-Key", "Proxy-Authorization",
+		"Cookie", "Host", "Content-Length", "Content-Type", "Content-Encoding",
+		"Transfer-Encoding", "Connection", "Te", "Upgrade", "Accept-Encoding",
+		"X-Request-Id,Authorization", // denied even mixed in with an allowed name
+	} {
+		setBase(t)
+		t.Setenv("FORWARD_HEADERS", val)
+		if _, err := Load(); err == nil {
+			t.Errorf("FORWARD_HEADERS=%q: want an error (denylisted header name)", val)
+		}
+	}
+}
+
+func TestForwardHeadersFromEnv(t *testing.T) {
+	setBase(t)
+	t.Setenv("FORWARD_HEADERS", " X-Request-Id ,X-Session-Id,,X-Session-Id")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []string{"X-Request-Id", "X-Session-Id", "X-Session-Id"}
+	if len(c.ForwardHeaders) != len(want) {
+		t.Fatalf("ForwardHeaders = %v, want %v", c.ForwardHeaders, want)
+	}
+	for i, w := range want {
+		if c.ForwardHeaders[i] != w {
+			t.Errorf("ForwardHeaders[%d] = %q, want %q", i, c.ForwardHeaders[i], w)
+		}
+	}
+}

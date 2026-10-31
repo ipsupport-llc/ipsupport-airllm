@@ -419,6 +419,60 @@ func (s *Server) dlpScanText(ctx context.Context, ak authedKey, ingress, alias, 
 	return false, "", findings, redactedText
 }
 
+// dlpScanTexts runs layer-1 deterministic DLP over a batch of independent
+// input strings — an embeddings request's inputs — recording ONE incident
+// for the whole batch (merged labels, total finding count, first sample),
+// the way dlpEnforce does for chat's message array, rather than the one
+// incident per string a loop over dlpScanText would record: a large batch
+// where every item matches would otherwise mean that many synchronous DB
+// writes and webhook fan-outs on the request path. cfg.Action drives the
+// same flag/redact/block semantics as dlpScanText; on redact, texts is
+// updated in place, mirroring dlpEnforce's in-place message redaction.
+func (s *Server) dlpScanTexts(ctx context.Context, ak authedKey, ingress, alias string, texts []string) (blocked bool, message string) {
+	cfg := s.dlpCfg()
+	if !cfg.Enabled || cfg.Action == "off" {
+		return false, ""
+	}
+
+	labelSet := map[string]bool{}
+	total := 0
+	sample := ""
+	for i, text := range texts {
+		if text == "" {
+			continue
+		}
+		findings := dlp.ScanWith(text, dlp.PatternSet{
+			Enabled: cfg.Patterns,
+			Custom:  cfg.compiledCustom,
+			Entropy: dlpToggle(cfg.Patterns, "high_entropy", true),
+		})
+		if len(findings) == 0 {
+			continue
+		}
+		total += len(findings)
+		for _, l := range dlp.Labels(findings) {
+			labelSet[l] = true
+		}
+		if sample == "" {
+			sample = excerpt(dlp.Redact(text, findings))
+		}
+		if cfg.Action == "redact" {
+			texts[i] = dlp.Redact(text, findings)
+		}
+	}
+	if total == 0 {
+		return false, ""
+	}
+
+	labels := sortedKeys(labelSet)
+	s.recordDLP(ctx, ak, ingress, alias, actionPast(cfg.Action), labels, total, sample)
+
+	if cfg.Action == "block" {
+		return true, "request blocked: sensitive content detected (" + strings.Join(labels, ", ") + ")"
+	}
+	return false, ""
+}
+
 // labelSetOf collects the distinct labels across a findings slice, matching
 // the label-collection loop dlpEnforce runs inline per message.
 func labelSetOf(findings []dlp.Finding) map[string]bool {
