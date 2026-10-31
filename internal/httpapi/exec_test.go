@@ -275,11 +275,61 @@ func TestClassifyUpstreamErrReasoningEffortUnsupported(t *testing.T) {
 	}
 }
 
-func TestClassifyUpstreamErrUnrecognizedStaysUpstreamError(t *testing.T) {
+// TestClassifyUpstreamErrUnrecognized4xxPassesThroughStatus covers an
+// upstream 400 nothing recognizes (e.g. llama.cpp's "Assistant message
+// must contain either 'content' or 'tool_calls'!", which classifyErrorBody
+// doesn't match against any known shape). The upstream already told us
+// this is a client-shaped error, not a retryable one (Retryable: false) —
+// flattening it into a 502 tells the client to retry a request retrying
+// can never fix. The real status must pass through instead.
+func TestClassifyUpstreamErrUnrecognized4xxPassesThroughStatus(t *testing.T) {
 	err := &providers.Error{Status: 400, Retryable: false, Message: "malformed"}
 	code, typ := classifyUpstreamErr(err)
-	if code != http.StatusBadGateway || typ != "upstream_error" {
-		t.Errorf("got (%d, %q), want (502, upstream_error) — unrecognized errors must keep today's mapping", code, typ)
+	if code != http.StatusBadRequest || typ != "invalid_request_error" {
+		t.Errorf("got (%d, %q), want (400, invalid_request_error)", code, typ)
+	}
+}
+
+// TestClassifyUpstreamErrProviderAuthStaysUpstreamError pins the one
+// deliberate exception: a non-retryable 401/403/402 means OUR credentials
+// or billing with the real upstream are bad, not that the client's request
+// was malformed. Passing the real status through here would tell the
+// client its own request was unauthorized or unpayable, which is
+// misleading — these stay a 502.
+func TestClassifyUpstreamErrProviderAuthStaysUpstreamError(t *testing.T) {
+	for _, status := range []int{401, 402, 403} {
+		err := &providers.Error{Status: status, Retryable: false, Code: providers.ErrCodeProviderAuth, Message: "bad key"}
+		code, typ := classifyUpstreamErr(err)
+		if code != http.StatusBadGateway || typ != "upstream_error" {
+			t.Errorf("status %d: got (%d, %q), want (502, upstream_error) — provider auth/billing failures must not leak to the client", status, code, typ)
+		}
+	}
+}
+
+// TestClassifyUpstreamErrTransportStaysUpstreamError pins that a
+// connection-level failure (no real upstream status at all — transportError
+// always synthesizes 502) is unaffected by the 4xx-passthrough change,
+// since its Status is already 502, outside the 4xx range the passthrough
+// checks for. Covers both transportError shapes: the ordinary retryable
+// one and the non-retryable context.Canceled one — the latter is the case
+// that actually exercises "Status outside 4xx" rather than passing only
+// because Retryable is true.
+func TestClassifyUpstreamErrTransportStaysUpstreamError(t *testing.T) {
+	cases := []struct {
+		name      string
+		retryable bool
+	}{
+		{"ordinary transport failure", true},
+		{"client disconnected (context.Canceled)", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := &providers.Error{Status: http.StatusBadGateway, Retryable: tc.retryable, Message: "dial tcp: connection refused"}
+			code, typ := classifyUpstreamErr(err)
+			if code != http.StatusBadGateway || typ != "upstream_error" {
+				t.Errorf("got (%d, %q), want (502, upstream_error) — transport failures must keep today's mapping", code, typ)
+			}
+		})
 	}
 }
 
