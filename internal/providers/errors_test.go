@@ -217,6 +217,7 @@ func TestHTTPErrorStatusOnlyCodes(t *testing.T) {
 	}{
 		{"openai invalid key", 401, `{"error":{"message":"Incorrect API key provided","type":"invalid_request_error","code":"invalid_api_key"}}`, ErrCodeProviderAuth},
 		{"bare 403", 403, `forbidden`, ErrCodeProviderAuth},
+		{"openrouter out of credit", 402, `{"error":{"message":"Insufficient credits"}}`, ErrCodeProviderAuth},
 		{"ollama openai-compat model not found", 404, `{"error":{"message":"model \"gemma3:27b\" not found, try pulling it first","type":"api_error","param":null,"code":null}}`, ErrCodeModelNotFound},
 		{"ollama native model not found", 404, `{"error":"model 'gemma3:27b' not found"}`, ErrCodeModelNotFound},
 		{"a 404 about something else", 404, `404 page not found`, ""},

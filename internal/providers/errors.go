@@ -286,6 +286,12 @@ func httpError(name string, status int, body []byte, header http.Header) error {
 		switch {
 		case status == http.StatusUnauthorized || status == http.StatusForbidden:
 			code = ErrCodeProviderAuth
+		case status == http.StatusPaymentRequired:
+			// A vendor's own billing failure (e.g. OpenRouter when the
+			// gateway's account is out of credit) — the same class of
+			// problem as Google's BILLING_DISABLED, not a malformed
+			// request from the client.
+			code = ErrCodeProviderAuth
 		case status == http.StatusNotFound && ollamaModelNotFoundPattern.Match(body):
 			code = ErrCodeModelNotFound
 		}

@@ -291,15 +291,18 @@ func TestClassifyUpstreamErrUnrecognized4xxPassesThroughStatus(t *testing.T) {
 }
 
 // TestClassifyUpstreamErrProviderAuthStaysUpstreamError pins the one
-// deliberate exception: a non-retryable 401/403 means OUR credentials to
-// the real upstream are bad, not that the client's request was malformed.
-// Passing the real status through here would tell the client its own
-// request was unauthorized, which is misleading — this one stays a 502.
+// deliberate exception: a non-retryable 401/403/402 means OUR credentials
+// or billing with the real upstream are bad, not that the client's request
+// was malformed. Passing the real status through here would tell the
+// client its own request was unauthorized or unpayable, which is
+// misleading — these stay a 502.
 func TestClassifyUpstreamErrProviderAuthStaysUpstreamError(t *testing.T) {
-	err := &providers.Error{Status: 401, Retryable: false, Code: providers.ErrCodeProviderAuth, Message: "bad key"}
-	code, typ := classifyUpstreamErr(err)
-	if code != http.StatusBadGateway || typ != "upstream_error" {
-		t.Errorf("got (%d, %q), want (502, upstream_error) — provider auth failures must not leak to the client as 401", code, typ)
+	for _, status := range []int{401, 402, 403} {
+		err := &providers.Error{Status: status, Retryable: false, Code: providers.ErrCodeProviderAuth, Message: "bad key"}
+		code, typ := classifyUpstreamErr(err)
+		if code != http.StatusBadGateway || typ != "upstream_error" {
+			t.Errorf("status %d: got (%d, %q), want (502, upstream_error) — provider auth/billing failures must not leak to the client", status, code, typ)
+		}
 	}
 }
 
@@ -307,12 +310,26 @@ func TestClassifyUpstreamErrProviderAuthStaysUpstreamError(t *testing.T) {
 // connection-level failure (no real upstream status at all — transportError
 // always synthesizes 502) is unaffected by the 4xx-passthrough change,
 // since its Status is already 502, outside the 4xx range the passthrough
-// checks for.
+// checks for. Covers both transportError shapes: the ordinary retryable
+// one and the non-retryable context.Canceled one — the latter is the case
+// that actually exercises "Status outside 4xx" rather than passing only
+// because Retryable is true.
 func TestClassifyUpstreamErrTransportStaysUpstreamError(t *testing.T) {
-	err := &providers.Error{Status: http.StatusBadGateway, Retryable: true, Message: "dial tcp: connection refused"}
-	code, typ := classifyUpstreamErr(err)
-	if code != http.StatusBadGateway || typ != "upstream_error" {
-		t.Errorf("got (%d, %q), want (502, upstream_error) — transport failures must keep today's mapping", code, typ)
+	cases := []struct {
+		name      string
+		retryable bool
+	}{
+		{"ordinary transport failure", true},
+		{"client disconnected (context.Canceled)", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := &providers.Error{Status: http.StatusBadGateway, Retryable: tc.retryable, Message: "dial tcp: connection refused"}
+			code, typ := classifyUpstreamErr(err)
+			if code != http.StatusBadGateway || typ != "upstream_error" {
+				t.Errorf("got (%d, %q), want (502, upstream_error) — transport failures must keep today's mapping", code, typ)
+			}
+		})
 	}
 }
 

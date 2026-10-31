@@ -154,8 +154,8 @@ func TestEncodeChatRequestEmptyContentNoImagesOmitsContentKey(t *testing.T) {
 // Unlike the tool-calls-only case above, there is nothing else in this
 // message that satisfies "assistant message must contain either content
 // or tool_calls" (llama.cpp's and OpenAI's own wire requirement), so
-// omitting content here — as today's code does — sends an invalid
-// message and the upstream rejects it with a 400.
+// omitting content here sends an invalid message and the upstream
+// rejects it with a 400.
 func TestEncodeChatRequestAssistantEmptyContentNoToolCallsKeepsContentKey(t *testing.T) {
 	req := llm.ChatRequest{Model: "m", Messages: []llm.Message{{
 		Role: "assistant", Content: "",
