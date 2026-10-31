@@ -75,7 +75,15 @@ func toOpenAIOutMessage(m llm.Message) openaiOutMessage {
 		// choice, it's a different, invalid message a strict backend can
 		// reject outright, so a tool message always gets an explicit
 		// (possibly empty) content string.
-		if m.Content != "" || m.Role == "tool" {
+		//
+		// An assistant message with tool_calls is the other exception that
+		// legitimately omits content — but only when it actually HAS
+		// tool_calls. An assistant turn with neither text nor tool_calls
+		// (e.g. a replayed history whose previous reply was empty) must
+		// still get an explicit content key: both OpenAI's and llama.cpp's
+		// wire schema require "either content or tool_calls", and omitting
+		// both produces an upstream 400 instead of a valid empty turn.
+		if m.Content != "" || m.Role != "assistant" || len(m.ToolCalls) == 0 {
 			out.Content = m.Content
 		}
 		return out

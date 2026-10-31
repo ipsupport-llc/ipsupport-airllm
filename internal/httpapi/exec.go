@@ -31,8 +31,10 @@ const (
 // multimodal-not-supported/reasoning-effort-unsupported/voice-not-supported
 // error that still failed on every fallback tier is a 400 the client can act
 // on; every tier quarantined by its breaker, or every target marked
-// unavailable, is a 503; anything else is a 502
-// upstream error.
+// unavailable, is a 503; any other non-retryable 4xx the upstream itself
+// reported passes through as that same status (see
+// nonRetryableClientStatus); anything else — a transport failure, a 5xx, an
+// upstream 429 that exhausted every tier — is a 502 upstream error.
 func classifyUpstreamErr(err error) (int, string) {
 	if errors.Is(err, errAllBusy) {
 		return http.StatusTooManyRequests, "rate_limit_error"
@@ -43,7 +45,34 @@ func classifyUpstreamErr(err error) (int, string) {
 	if providers.IsTargetMismatch(err) {
 		return http.StatusBadRequest, "invalid_request_error"
 	}
+	if status, ok := nonRetryableClientStatus(err); ok {
+		return status, "invalid_request_error"
+	}
 	return http.StatusBadGateway, "upstream_error"
+}
+
+// nonRetryableClientStatus reports the real upstream status for a
+// non-retryable 4xx *providers.Error nothing above already recognized — a
+// well-formed client-shaped rejection (e.g. "assistant message must
+// contain either content or tool_calls") that classifyErrorBody didn't
+// match against any known vendor shape. Retrying it can never succeed, so
+// coercing it into a 502 only teaches the client to retry a request that
+// will always fail the same way.
+//
+// ErrCodeProviderAuth is excluded: a 401/403 there means the GATEWAY's own
+// credentials to the real upstream are bad, not that the client's request
+// was malformed — surfacing the real status would misleadingly tell the
+// client its own request was unauthorized.
+//
+// A transport-level failure (no real upstream response at all) is
+// unaffected: transportError always synthesizes Status: 502, which falls
+// outside the 4xx range this checks.
+func nonRetryableClientStatus(err error) (int, bool) {
+	var pe *providers.Error
+	if errors.As(err, &pe) && !pe.Retryable && pe.Status >= 400 && pe.Status < 500 && pe.Code != providers.ErrCodeProviderAuth {
+		return pe.Status, true
+	}
+	return 0, false
 }
 
 // warnUnregisteredTarget logs the one case classifyUpstreamErr can never

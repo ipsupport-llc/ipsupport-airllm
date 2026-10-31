@@ -148,6 +148,36 @@ func TestEncodeChatRequestEmptyContentNoImagesOmitsContentKey(t *testing.T) {
 	}
 }
 
+// TestEncodeChatRequestAssistantEmptyContentNoToolCallsKeepsContentKey
+// covers an assistant turn that has neither text nor tool_calls — e.g. a
+// client replays a history where the model's previous reply was empty.
+// Unlike the tool-calls-only case above, there is nothing else in this
+// message that satisfies "assistant message must contain either content
+// or tool_calls" (llama.cpp's and OpenAI's own wire requirement), so
+// omitting content here — as today's code does — sends an invalid
+// message and the upstream rejects it with a 400.
+func TestEncodeChatRequestAssistantEmptyContentNoToolCallsKeepsContentKey(t *testing.T) {
+	req := llm.ChatRequest{Model: "m", Messages: []llm.Message{{
+		Role: "assistant", Content: "",
+	}}}
+	b, err := EncodeChatRequest(req, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	msg := got["messages"].([]any)[0].(map[string]any)
+	content, present := msg["content"]
+	if !present {
+		t.Fatalf("content key must be present for an assistant message with no tool_calls, even with empty content, got: %s", b)
+	}
+	if content != "" {
+		t.Errorf("content = %#v, want an explicit empty string", content)
+	}
+}
+
 func TestEncodeChatRequestImageOnlyOmitsTextPart(t *testing.T) {
 	req := llm.ChatRequest{Model: "m", Messages: []llm.Message{{
 		Role: "user", Images: []llm.Image{{URL: "https://x/a.png"}},
