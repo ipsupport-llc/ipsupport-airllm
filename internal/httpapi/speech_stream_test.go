@@ -193,6 +193,9 @@ func TestStreamSpeechBrokenMidStreamReportsStarted(t *testing.T) {
 	if err == nil || !streamed || res.Provider != "local" {
 		t.Fatalf("provider %q streamed %v err %v; want the broken stream reported as started", res.Provider, streamed, err)
 	}
+	if res.Cache != "" {
+		t.Errorf("cache outcome %q on an alias without the cache, want none", res.Cache)
+	}
 	if len(calls()) != 0 {
 		t.Fatal("another tier was called after audio had been sent")
 	}
@@ -221,5 +224,46 @@ func TestStreamSpeechMissIsCachedForTheRepeat(t *testing.T) {
 	resp, res, streamed, err := s.runSynthesizeTo(context.Background(), plan, audio.SpeechRequest{Input: "hi", ResponseFormat: "wav"}, &speechSink{w: w2, flush: w2.Flush})
 	if err != nil || streamed || res.Cache != cacheHit || !bytes.Equal(resp.Audio, wav) {
 		t.Fatalf("repeat: streamed %v cache %q err %v, %d bytes; want the whole clip from the cache", streamed, res.Cache, err, len(resp.Audio))
+	}
+}
+
+// A WAV whose header runs past the upstream's first flush (a LIST chunk
+// before the data) is read on to the data chunk, not rejected.
+func TestStreamSpeechReadsALongWAVHeaderAcrossChunks(t *testing.T) {
+	wav := pcmWAV(24000, 1)
+	list := append([]byte("LIST"), 0, 0, 0, 0)
+	meta := bytes.Repeat([]byte("x"), 200)
+	list[4] = byte(len(meta))
+	long := append(append(append(append([]byte(nil), wav[:36]...), list...), meta...), wav[36:]...)
+	release := make(chan struct{})
+	close(release)
+	up := streamingUpstream(t, "audio/wav", long[:100], long[100:], release, false)
+	s := streamTestServer(t, map[string]string{"local": up.URL})
+	w := newRecordingWriter()
+	_, _, streamed, err := s.runSynthesizeTo(context.Background(), ttsPlan(streamingTarget("local", true)),
+		audio.SpeechRequest{Input: "hi", ResponseFormat: "wav"}, &speechSink{w: w, flush: w.Flush})
+	if err != nil || !streamed || !bytes.Equal(w.bytes(), long) {
+		t.Fatalf("streamed %v err %v, %d of %d bytes; want the whole WAV with its LIST chunk", streamed, err, len(w.bytes()), len(long))
+	}
+}
+
+// A cached alias whose stream breaks reports a miss (a provider rendered it)
+// and stores nothing.
+func TestStreamSpeechBrokenOnACachedAliasIsAMissNotStored(t *testing.T) {
+	wav := pcmWAV(24000, 1)
+	release := make(chan struct{})
+	close(release)
+	up := streamingUpstream(t, "audio/wav", wav[:4096], nil, release, true)
+	s := streamTestServer(t, map[string]string{"local": up.URL})
+	plan := ttsPlan(streamingTarget("local", true))
+	plan.SynthesisCache, plan.SynthesisCacheTTL = true, routing.DefaultSynthesisCacheTTL
+	w := newRecordingWriter()
+	_, res, streamed, err := s.runSynthesizeTo(context.Background(), plan, audio.SpeechRequest{Input: "hi", ResponseFormat: "wav"}, &speechSink{w: w, flush: w.Flush})
+	if err == nil || !streamed || res.Cache != cacheMiss {
+		t.Fatalf("streamed %v cache %q err %v; want a started break reported as a miss", streamed, res.Cache, err)
+	}
+	if _, hit, _ := s.speechCache.Get(context.Background(), speechcache.Key{Alias: plan.Alias, Provider: "local",
+		Model: "chatterbox", Format: "wav", Text: "hi"}); hit {
+		t.Fatal("a broken stream was stored in the cache")
 	}
 }

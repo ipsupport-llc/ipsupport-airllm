@@ -453,6 +453,10 @@ func (s *Server) runSynthesize(ctx context.Context, plan *routing.Plan, req audi
 	return resp, res, err
 }
 
+// maxStreamWAVHeader bounds how far a streamed WAV is read to reach its data
+// chunk (format, LIST and other metadata chunks come first).
+const maxStreamWAVHeader = 64 << 10
+
 // maxStreamCacheBytes caps the audio a streamed speech reply keeps for the
 // synthesis cache; a longer clip is streamed but not cached.
 const maxStreamCacheBytes = 16 << 20
@@ -495,12 +499,29 @@ func streamSpeech(st audio.SpeechStream, in audio.SpeechRequest, p providers.Pro
 	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
 		return nil, "", err
 	}
-	head := buf[:n]
+	head := append([]byte(nil), buf[:n]...)
+	ended := err != nil
 	contentType := st.ContentType
 	if in.ResponseFormat == "wav" {
-		if _, ok := audio.WAVSampleRate(head); !ok {
-			return nil, "", &providers.Error{Status: http.StatusBadGateway, Retryable: true,
-				Message: "upstream " + p.Name() + " answered a wav request with " + st.ContentType + " that is not a readable WAV"}
+		notWAV := &providers.Error{Status: http.StatusBadGateway, Retryable: true,
+			Message: "upstream " + p.Name() + " answered a wav request with " + st.ContentType + " that is not a readable WAV"}
+		// Read on until the header reaches the data chunk: the first chunk the
+		// upstream flushed may end inside it.
+		for {
+			if _, ok := audio.WAVSampleRate(head); ok {
+				break
+			}
+			if len(head) >= 12 && (string(head[0:4]) != "RIFF" || string(head[8:12]) != "WAVE") ||
+				ended || len(head) >= maxStreamWAVHeader {
+				return nil, "", notWAV
+			}
+			m, rerr := st.Body.Read(buf)
+			head = append(head, buf[:m]...)
+			if rerr == io.EOF {
+				ended = true
+			} else if rerr != nil {
+				return nil, "", rerr
+			}
 		}
 		contentType = "audio/wav"
 	}
@@ -514,6 +535,9 @@ func streamSpeech(st audio.SpeechStream, in audio.SpeechRequest, p providers.Pro
 	}
 	if err := sink.write(head); err != nil {
 		return nil, contentType, err
+	}
+	if ended {
+		return kept, contentType, nil
 	}
 	for {
 		n, rerr := st.Body.Read(buf)
@@ -624,8 +648,15 @@ func (s *Server) runSynthesizeTo(ctx context.Context, plan *routing.Plan, req au
 	})
 	if err != nil {
 		if streamed && started {
-			// Audio already went out: the reply is the served tier's.
+			// Audio already went out: the reply is the served tier's. Nothing
+			// was cached; a provider rendered it, so it reports as a miss.
+			if cache == cacheSkipped {
+				cache = cacheMiss
+			}
 			res.UpstreamModel, res.DisplayLabel, res.Cache = served, label, cache
+			if cache != "" {
+				s.metrics.SynthesisCache(plan.Alias, res.Provider, string(cache))
+			}
 		}
 		return audio.SpeechResponse{}, res, streamed && started, err
 	}
