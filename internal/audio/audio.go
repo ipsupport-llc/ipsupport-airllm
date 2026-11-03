@@ -4,6 +4,8 @@
 // binary-out, so it gets its own types rather than extending llm's.
 package audio
 
+import "io"
+
 // TranscriptionRequest is a provider-neutral request to transcribe audio to text.
 type TranscriptionRequest struct {
 	Model    string
@@ -77,6 +79,13 @@ type SpeechRequest struct {
 }
 
 // SpeechResponse is synthesized audio.
+// SpeechStream is a synthesis whose audio is read as the upstream sends it
+// (see providers.SpeechStreamer). The caller closes Body.
+type SpeechStream struct {
+	Body        io.ReadCloser
+	ContentType string
+}
+
 type SpeechResponse struct {
 	Audio       []byte
 	ContentType string // e.g. "audio/mpeg", from the upstream response

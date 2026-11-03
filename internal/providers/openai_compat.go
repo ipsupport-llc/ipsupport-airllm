@@ -420,6 +420,21 @@ func (p *OpenAICompat) RecognitionLanguages() []string {
 // batch only, no streaming — and the upstream Content-Type is passed
 // through so the client gets the right audio format.
 func (p *OpenAICompat) Synthesize(ctx context.Context, in audio.SpeechRequest) (audio.SpeechResponse, error) {
+	st, err := p.SynthesizeStream(ctx, in)
+	if err != nil {
+		return audio.SpeechResponse{}, err
+	}
+	defer st.Body.Close()
+	audioBytes, err := io.ReadAll(st.Body)
+	if err != nil {
+		return audio.SpeechResponse{}, err
+	}
+	return audio.SpeechResponse{Audio: audioBytes, ContentType: st.ContentType}, nil
+}
+
+// SynthesizeStream sends the speech request and returns the upstream's
+// body unread once it has answered 2xx.
+func (p *OpenAICompat) SynthesizeStream(ctx context.Context, in audio.SpeechRequest) (audio.SpeechStream, error) {
 	body, err := json.Marshal(struct {
 		Model          string `json:"model"`
 		Input          string `json:"input"`
@@ -428,11 +443,11 @@ func (p *OpenAICompat) Synthesize(ctx context.Context, in audio.SpeechRequest) (
 		Language       string `json:"language,omitempty"`
 	}{Model: in.Model, Input: in.Input, Voice: in.Voice, ResponseFormat: in.ResponseFormat, Language: in.SendLanguage})
 	if err != nil {
-		return audio.SpeechResponse{}, err
+		return audio.SpeechStream{}, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/audio/speech", bytes.NewReader(body))
 	if err != nil {
-		return audio.SpeechResponse{}, err
+		return audio.SpeechStream{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if p.apiKey != "" {
@@ -441,16 +456,12 @@ func (p *OpenAICompat) Synthesize(ctx context.Context, in audio.SpeechRequest) (
 
 	resp, err := p.hc.Do(req)
 	if err != nil {
-		return audio.SpeechResponse{}, transportError(err)
+		return audio.SpeechStream{}, transportError(err)
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
+		defer resp.Body.Close()
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return audio.SpeechResponse{}, classifyVoiceRejection(audioHTTPError(p.name, resp.StatusCode, b, resp.Header))
+		return audio.SpeechStream{}, classifyVoiceRejection(audioHTTPError(p.name, resp.StatusCode, b, resp.Header))
 	}
-	audioBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return audio.SpeechResponse{}, err
-	}
-	return audio.SpeechResponse{Audio: audioBytes, ContentType: resp.Header.Get("Content-Type")}, nil
+	return audio.SpeechStream{Body: resp.Body, ContentType: resp.Header.Get("Content-Type")}, nil
 }
