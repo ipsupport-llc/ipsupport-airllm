@@ -3,7 +3,7 @@
 # tracks main lists this file in its Helm valueFiles, so a merge to main is the
 # rollout. A digest wins over image.tag (see the chart's airllm.image helper).
 image:
-  digest: "sha256:4456648509c2009a273a82082b75bdf6dfb76e12b1458a37157153ecc632c672"
+  digest: "sha256:24249db0f6ca4b424aa151333226aaf86aa8ede81872fd965844e92bf5e44b32"
 dlpBert:
   image:
     digest: "sha256:28083c82b1eff753eb4abd2a934594a2dcf8d5237964e18fb420bef9bc754099"
