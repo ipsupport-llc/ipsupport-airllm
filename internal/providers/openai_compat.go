@@ -425,7 +425,8 @@ func (p *OpenAICompat) Synthesize(ctx context.Context, in audio.SpeechRequest) (
 		Input          string `json:"input"`
 		Voice          string `json:"voice"`
 		ResponseFormat string `json:"response_format,omitempty"`
-	}{Model: in.Model, Input: in.Input, Voice: in.Voice, ResponseFormat: in.ResponseFormat})
+		Language       string `json:"language,omitempty"`
+	}{Model: in.Model, Input: in.Input, Voice: in.Voice, ResponseFormat: in.ResponseFormat, Language: in.SendLanguage})
 	if err != nil {
 		return audio.SpeechResponse{}, err
 	}

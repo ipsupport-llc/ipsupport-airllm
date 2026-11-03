@@ -92,7 +92,15 @@ type TargetOptions struct {
 	// is skipped for it, so the next tier speaks instead of the request
 	// failing on a name this provider has never heard.
 	DefaultVoices map[string]VoiceChoice `json:"default_voices,omitempty"`
+	// SendLanguage makes an OpenAI-compatible target receive the speech
+	// request's language as a "language" field, for a model that speaks
+	// many languages with one voice and must be told which (OpenAI's own
+	// API has no such field). Unset sends the request as before.
+	SendLanguage *bool `json:"send_language,omitempty"`
 }
+
+// SendsLanguage reports whether the target is sent the speech language.
+func (o TargetOptions) SendsLanguage() bool { return o.SendLanguage != nil && *o.SendLanguage }
 
 // thinkingOff is the one value TargetOptions.Thinking accepts.
 const thinkingOff = "off"

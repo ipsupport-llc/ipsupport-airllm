@@ -240,6 +240,34 @@ func TestOpenAICompatSynthesize(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatSynthesizeSendsLanguageOnlyWhenAsked(t *testing.T) {
+	var bodies []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		w.Header().Set("Content-Type", "audio/wav")
+		w.Write([]byte("RIFF"))
+	}))
+	defer ts.Close()
+
+	p := NewOpenAICompat("up", "openai", ts.URL, "")
+	// Language alone (used to pick a voice) is not sent: the body stays what it always was.
+	for _, in := range []audio.SpeechRequest{
+		{Model: "m", Input: "hi", Voice: "v", Language: "fr", ResponseFormat: "wav"},
+		{Model: "m", Input: "hi", Voice: "v", Language: "fr", ResponseFormat: "wav", SendLanguage: "fr"},
+	} {
+		if _, err := p.Synthesize(context.Background(), in); err != nil {
+			t.Fatalf("Synthesize: %v", err)
+		}
+	}
+	if want := `{"model":"m","input":"hi","voice":"v","response_format":"wav"}`; bodies[0] != want {
+		t.Errorf("without SendLanguage the body = %s, want %s", bodies[0], want)
+	}
+	if want := `{"model":"m","input":"hi","voice":"v","response_format":"wav","language":"fr"}`; bodies[1] != want {
+		t.Errorf("with SendLanguage the body = %s, want %s", bodies[1], want)
+	}
+}
+
 func TestOpenAICompatSynthesizeNon200(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"bad voice"}`, http.StatusBadRequest)

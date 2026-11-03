@@ -69,6 +69,11 @@ type SpeechRequest struct {
 	// voices whose names do not.
 	Language       string
 	ResponseFormat string // mp3/wav/opus/...; provider default if empty
+	// SendLanguage is the language an OpenAI-compatible upstream is sent
+	// as "language" (see the send_language target option): the request's
+	// language, else the one the requested voice's name carries. Empty, the
+	// default, sends no such field.
+	SendLanguage string
 }
 
 // SpeechResponse is synthesized audio.

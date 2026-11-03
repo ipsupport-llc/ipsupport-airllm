@@ -453,6 +453,12 @@ func (s *Server) runSynthesize(ctx context.Context, plan *routing.Plan, req audi
 		}
 		in := req
 		in.Model, in.Voice = t.UpstreamModel, choice.Voice
+		if t.Options.SendsLanguage() {
+			// The canonical voice's language, before mapping to this target's voice.
+			if in.SendLanguage = req.Language; in.SendLanguage == "" {
+				in.SendLanguage = audio.VoiceLanguage(req.Voice)
+			}
+		}
 		if choice.Model != "" {
 			in.Model = choice.Model
 		}
