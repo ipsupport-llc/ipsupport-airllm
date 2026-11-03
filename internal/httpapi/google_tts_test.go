@@ -12,8 +12,10 @@ import (
 	"testing"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/audio"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/metrics"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/speechcache"
 )
 
 // These are the seam tests for the Google Text-to-Speech provider kind and
@@ -88,6 +90,7 @@ type speechCallOpenAI struct {
 	Input          string `json:"input"`
 	Voice          string `json:"voice"`
 	ResponseFormat string `json:"response_format"`
+	Language       string `json:"language"`
 }
 
 // fakeOpenAISpeech answers /audio/speech with the given content type and
@@ -330,5 +333,36 @@ func TestARequestWithoutAVoiceLeavesItToTheProvider(t *testing.T) {
 	}
 	if c := calls()[0]; c.Voice != "" {
 		t.Errorf("sent voice %q, want none", c.Voice)
+	}
+}
+
+func TestSendLanguageOptionSendsTheSpeechLanguageUpstream(t *testing.T) {
+	up, calls := fakeOpenAISpeech(t, "audio/wav", pcmWAV(24000, 1))
+	reg := providers.NewRegistry()
+	reg.Register(providers.NewOpenAICompat("local", "openai", up.URL, ""), 4)
+	s := &Server{router: routing.NewRouter(nil), metrics: metrics.New(), speechCache: speechcache.New(nil)}
+	s.regPtr.Store(reg)
+	on := true
+	target := func(send *bool) *routing.Plan {
+		return ttsPlan(routing.Target{Provider: "local", UpstreamModel: "chatterbox", Options: routing.TargetOptions{SendLanguage: send}})
+	}
+	for _, c := range []struct {
+		name string
+		send *bool
+		req  audio.SpeechRequest
+		want string
+	}{
+		{"off by default", nil, audio.SpeechRequest{Input: "Bonjour", Voice: "fr-FR-x", Language: "fr", ResponseFormat: "wav"}, ""},
+		{"the request's language", &on, audio.SpeechRequest{Input: "Bonjour", Voice: "anna", Language: "fr", ResponseFormat: "wav"}, "fr"},
+		{"the voice's language", &on, audio.SpeechRequest{Input: "Hallo", Voice: "de-DE-x", ResponseFormat: "wav"}, "de-DE"},
+		{"none known", &on, audio.SpeechRequest{Input: "Hi", Voice: "anna", ResponseFormat: "wav"}, ""},
+	} {
+		if _, _, err := s.runSynthesize(context.Background(), target(c.send), c.req); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		got := calls()
+		if last := got[len(got)-1]; last.Language != c.want || last.Voice != c.req.Voice {
+			t.Errorf("%s: upstream got language %q voice %q, want %q %q", c.name, last.Language, last.Voice, c.want, c.req.Voice)
+		}
 	}
 }
