@@ -97,10 +97,19 @@ type TargetOptions struct {
 	// many languages with one voice and must be told which (OpenAI's own
 	// API has no such field). Unset sends the request as before.
 	SendLanguage *bool `json:"send_language,omitempty"`
+	// StreamSpeech passes this target's speech audio to the client as it
+	// arrives instead of after the whole clip, when its provider can stream
+	// (OpenAI-compatible kinds). The time budget then bounds the wait for the
+	// first audio, and no other tier can take over once audio has been sent.
+	// Unset answers with the whole clip, as before.
+	StreamSpeech *bool `json:"stream_speech,omitempty"`
 }
 
 // SendsLanguage reports whether the target is sent the speech language.
 func (o TargetOptions) SendsLanguage() bool { return o.SendLanguage != nil && *o.SendLanguage }
+
+// StreamsSpeech reports whether the target streams its speech audio.
+func (o TargetOptions) StreamsSpeech() bool { return o.StreamSpeech != nil && *o.StreamSpeech }
 
 // thinkingOff is the one value TargetOptions.Thinking accepts.
 const thinkingOff = "off"

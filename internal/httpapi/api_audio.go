@@ -319,9 +319,15 @@ func (s *Server) handleAudioSpeech(w http.ResponseWriter, r *http.Request) {
 	if format == "" {
 		format = "wav"
 	}
-	resp, res, callErr := s.runSynthesize(r.Context(), plan, audio.SpeechRequest{
+	// A target with stream_speech writes its audio through this sink as it
+	// arrives; any other answers with the whole clip below.
+	var sink *speechSink
+	if f, ok := w.(http.Flusher); ok {
+		sink = &speechSink{w: w, flush: f.Flush, expose: plan.ExposeBackendHeaders}
+	}
+	resp, res, streamed, callErr := s.runSynthesizeTo(r.Context(), plan, audio.SpeechRequest{
 		Input: redactedInput, Voice: body.Voice, Language: audio.CanonicalLanguage(body.Language), ResponseFormat: format,
-	})
+	}, sink)
 	target, upstreamModel := res.Provider, res.UpstreamModel
 
 	entry := ledger.Entry{
@@ -330,7 +336,7 @@ func (s *Server) handleAudioSpeech(w http.ResponseWriter, r *http.Request) {
 		Session: res.Session, LatencyMS: time.Since(start).Milliseconds(),
 	}
 
-	if callErr != nil {
+	if callErr != nil && !streamed {
 		code, typ := classifyUpstreamErr(callErr)
 		if pe, ok := callErr.(*providers.Error); ok && !pe.Retryable {
 			code = pe.Status
@@ -351,6 +357,11 @@ func (s *Server) handleAudioSpeech(w http.ResponseWriter, r *http.Request) {
 		costMicro = s.pricing.TTSCostMicroUSD(target, upstreamModel, utf8.RuneCountInString(redactedInput))
 	}
 	entry.Status, entry.Cached = http.StatusOK, res.Cache == cacheHit
+	if callErr != nil {
+		// Audio already went out, so the headers cannot say it broke off: the
+		// ledger keeps why, and the text is charged as synthesized.
+		entry.ErrorMsg = callErr.Error()
+	}
 	s.finalizeAudioUsage(r.Context(), entry, ak.KeyID, costMicro, 0, ttsChars, res.Cache)
 
 	dlpRes := dlpResult{}
@@ -365,6 +376,9 @@ func (s *Server) handleAudioSpeech(w http.ResponseWriter, r *http.Request) {
 	s.enqueueCapture(ak, "openai", body.Model, target, upstreamModel, http.StatusOK, 0, 0, float64(costMicro)/1e6, dlpRes,
 		[]llm.Message{{Role: "user", Content: redactedInput}}, "")
 
+	if streamed {
+		return
+	}
 	setBackendLabel(w, res.Target, plan.ExposeBackendHeaders)
 	if resp.ContentType != "" {
 		w.Header().Set("Content-Type", resp.ContentType)
@@ -435,7 +449,127 @@ func (s *Server) runTranscribe(ctx context.Context, plan *routing.Plan, req audi
 // of the target whose attempt found it, so X-Backend-Model names the tier
 // that made the audio (and none for a clip stored before labels were kept).
 func (s *Server) runSynthesize(ctx context.Context, plan *routing.Plan, req audio.SpeechRequest) (audio.SpeechResponse, execResult, error) {
+	resp, res, _, err := s.runSynthesizeTo(ctx, plan, req, nil)
+	return resp, res, err
+}
+
+// maxStreamWAVHeader bounds how far a streamed WAV is read to reach its data
+// chunk (format, LIST and other metadata chunks come first).
+const maxStreamWAVHeader = 64 << 10
+
+// maxStreamCacheBytes caps the audio a streamed speech reply keeps for the
+// synthesis cache; a longer clip is streamed but not cached.
+const maxStreamCacheBytes = 16 << 20
+
+// speechSink writes a streamed speech reply: begin sends the headers once
+// the first audio is in hand, write passes audio on and flushes it.
+type speechSink struct {
+	w     http.ResponseWriter
+	flush func()
+	// expose is the alias's ExposeBackendHeaders.
+	expose bool
+	// begun is set once the headers went out.
+	begun bool
+}
+
+func (k *speechSink) begin(t routing.Target, contentType string) {
+	k.begun = true
+	setBackendLabel(k.w, t, k.expose)
+	if contentType != "" {
+		k.w.Header().Set("Content-Type", contentType)
+	}
+	k.w.WriteHeader(http.StatusOK)
+}
+
+func (k *speechSink) write(b []byte) error {
+	if _, err := k.w.Write(b); err != nil {
+		return err
+	}
+	k.flush()
+	return nil
+}
+
+// streamSpeech reads a target's audio stream and passes it to the sink: the
+// first bytes are held until a WAV request's header has been checked, then
+// the attempt is committed and everything goes out as it arrives. It returns
+// the audio kept for the cache (nil when the clip outgrew it or keep is false).
+func streamSpeech(st audio.SpeechStream, in audio.SpeechRequest, p providers.Provider, t routing.Target, sink *speechSink, commit func() bool, keep bool) ([]byte, string, error) {
+	buf := make([]byte, 32<<10)
+	n, err := io.ReadAtLeast(st.Body, buf, 64)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return nil, "", err
+	}
+	head := append([]byte(nil), buf[:n]...)
+	ended := err != nil
+	contentType := st.ContentType
+	if in.ResponseFormat == "wav" {
+		notWAV := &providers.Error{Status: http.StatusBadGateway, Retryable: true,
+			Message: "upstream " + p.Name() + " answered a wav request with " + st.ContentType + " that is not a readable WAV"}
+		// Read on until the header reaches the data chunk: the first chunk the
+		// upstream flushed may end inside it.
+		for {
+			if _, ok := audio.WAVSampleRate(head); ok {
+				break
+			}
+			if len(head) >= 12 && (string(head[0:4]) != "RIFF" || string(head[8:12]) != "WAVE") ||
+				ended || len(head) >= maxStreamWAVHeader {
+				return nil, "", notWAV
+			}
+			m, rerr := st.Body.Read(buf)
+			head = append(head, buf[:m]...)
+			if rerr == io.EOF {
+				ended = true
+			} else if rerr != nil {
+				return nil, "", rerr
+			}
+		}
+		contentType = "audio/wav"
+	}
+	if !commit() {
+		return nil, "", errFirstChunkLate
+	}
+	sink.begin(t, contentType)
+	var kept []byte
+	if keep {
+		kept = append([]byte(nil), head...)
+	}
+	if err := sink.write(head); err != nil {
+		return nil, contentType, err
+	}
+	if ended {
+		return kept, contentType, nil
+	}
+	for {
+		n, rerr := st.Body.Read(buf)
+		if n > 0 {
+			if kept != nil {
+				if len(kept)+n > maxStreamCacheBytes {
+					kept = nil
+					keep = false
+				} else {
+					kept = append(kept, buf[:n]...)
+				}
+			}
+			if err := sink.write(buf[:n]); err != nil {
+				return nil, contentType, err
+			}
+		}
+		if rerr == io.EOF {
+			return kept, contentType, nil
+		}
+		if rerr != nil {
+			return nil, contentType, rerr
+		}
+	}
+}
+
+// runSynthesizeTo is runSynthesize that, given a sink, streams the audio of
+// a target with the stream_speech option straight to the client (started
+// then reports whether any of it was sent). Without a sink, or for a target
+// that does not stream, the whole clip comes back in the response.
+func (s *Server) runSynthesizeTo(ctx context.Context, plan *routing.Plan, req audio.SpeechRequest, sink *speechSink) (audio.SpeechResponse, execResult, bool, error) {
 	var resp audio.SpeechResponse
+	var streamed bool
 	var served, label string
 	var cache cacheOutcome
 	var key speechcache.Key
@@ -445,7 +579,7 @@ func (s *Server) runSynthesize(ctx context.Context, plan *routing.Plan, req audi
 		}
 		return nil
 	}
-	res, _, err := s.executePlan(ctx, plan, supports, func(ctx context.Context, p providers.Provider, t routing.Target, _ func() bool) error {
+	res, started, err := s.executePlan(ctx, plan, supports, func(ctx context.Context, p providers.Provider, t routing.Target, commit func() bool) error {
 		choice, ok := t.Options.SpeakAs(req.Voice, req.Language)
 		if !ok {
 			return &providers.Error{Status: http.StatusBadRequest, Code: providers.ErrCodeVoiceNotSupported,
@@ -481,6 +615,20 @@ func (s *Server) runSynthesize(ctx context.Context, plan *routing.Plan, req audi
 				cache = cacheMiss
 			}
 		}
+		if sp, ok := p.(providers.SpeechStreamer); ok && sink != nil && t.Options.StreamsSpeech() {
+			st, err := sp.SynthesizeStream(ctx, in)
+			if err != nil {
+				return err
+			}
+			defer st.Body.Close()
+			kept, contentType, err := streamSpeech(st, in, p, t, sink, commit, cache == cacheMiss)
+			streamed = sink.begun
+			resp, served, label = audio.SpeechResponse{Audio: kept, ContentType: contentType}, in.Model, t.DisplayLabel
+			if kept == nil && cache == cacheMiss {
+				cache = cacheSkipped
+			}
+			return err
+		}
 		out, err := p.(providers.Synthesizer).Synthesize(ctx, in)
 		if err != nil {
 			return err
@@ -499,9 +647,25 @@ func (s *Server) runSynthesize(ctx context.Context, plan *routing.Plan, req audi
 		return nil
 	})
 	if err != nil {
-		return audio.SpeechResponse{}, res, err
+		if streamed && started {
+			// Audio already went out: the reply is the served tier's. Nothing
+			// was cached; a provider rendered it, so it reports as a miss.
+			if cache == cacheSkipped {
+				cache = cacheMiss
+			}
+			res.UpstreamModel, res.DisplayLabel, res.Cache = served, label, cache
+			if cache != "" {
+				s.metrics.SynthesisCache(plan.Alias, res.Provider, string(cache))
+			}
+		}
+		return audio.SpeechResponse{}, res, streamed && started, err
 	}
 	res.UpstreamModel, res.DisplayLabel, res.Cache = served, label, cache
+	if cache == cacheSkipped {
+		cache, res.Cache = cacheMiss, cacheMiss
+		s.metrics.SynthesisCache(plan.Alias, res.Provider, string(cache))
+		return resp, res, streamed, nil
+	}
 	if cache == cacheMiss {
 		// Stored even if the client has gone: the clip is already paid for.
 		clip := speechcache.Clip{Audio: resp.Audio, ContentType: resp.ContentType, Model: served, Label: label}
@@ -512,5 +676,5 @@ func (s *Server) runSynthesize(ctx context.Context, plan *routing.Plan, req audi
 	if cache != "" {
 		s.metrics.SynthesisCache(plan.Alias, res.Provider, string(cache))
 	}
-	return resp, res, nil
+	return resp, res, streamed, nil
 }

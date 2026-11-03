@@ -66,6 +66,13 @@ type Synthesizer interface {
 	Synthesize(ctx context.Context, req audio.SpeechRequest) (audio.SpeechResponse, error)
 }
 
+// SpeechStreamer is implemented by synthesizers that can hand the audio
+// back as the upstream sends it, for targets with the stream_speech option.
+// The stream is returned once the upstream has answered 2xx.
+type SpeechStreamer interface {
+	SynthesizeStream(ctx context.Context, req audio.SpeechRequest) (audio.SpeechStream, error)
+}
+
 // VoiceLister is implemented by synthesizing providers that can enumerate
 // their voices. It answers the capabilities route for an alias's first tier
 // when that tier's target does not list its voices in its own options.
