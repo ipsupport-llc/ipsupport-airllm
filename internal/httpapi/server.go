@@ -265,6 +265,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/embeddings", s.requireAPIKey(s.handleEmbeddings))
 	s.mux.HandleFunc("POST /v1/audio/transcriptions", s.requireAPIKey(s.handleAudioTranscriptions))
 	s.mux.HandleFunc("POST /v1/audio/speech", s.requireAPIKey(s.handleAudioSpeech))
+	s.mux.HandleFunc("POST /v1/video/speech", s.requireAPIKey(s.handleVideoSpeech))
 	s.mux.HandleFunc("GET /v1/audio/capabilities", s.requireAPIKey(s.handleAudioCapabilities))
 
 	// Control-plane auth endpoints (public — no session required).

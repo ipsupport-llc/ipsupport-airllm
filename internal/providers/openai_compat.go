@@ -435,6 +435,17 @@ func (p *OpenAICompat) Synthesize(ctx context.Context, in audio.SpeechRequest) (
 // SynthesizeStream sends the speech request and returns the upstream's
 // body unread once it has answered 2xx.
 func (p *OpenAICompat) SynthesizeStream(ctx context.Context, in audio.SpeechRequest) (audio.SpeechStream, error) {
+	return p.speechPost(ctx, "/audio/speech", in)
+}
+
+// SpeakVideo sends the request to the upstream's /video/speech (the
+// k8s-llm-router routes it to a talking-face container next to its speech
+// server) and returns the video stream unread once it has answered 2xx.
+func (p *OpenAICompat) SpeakVideo(ctx context.Context, in audio.SpeechRequest) (audio.SpeechStream, error) {
+	return p.speechPost(ctx, "/video/speech", in)
+}
+
+func (p *OpenAICompat) speechPost(ctx context.Context, path string, in audio.SpeechRequest) (audio.SpeechStream, error) {
 	body, err := json.Marshal(struct {
 		Model          string `json:"model"`
 		Input          string `json:"input"`
@@ -445,7 +456,7 @@ func (p *OpenAICompat) SynthesizeStream(ctx context.Context, in audio.SpeechRequ
 	if err != nil {
 		return audio.SpeechStream{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/audio/speech", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+path, bytes.NewReader(body))
 	if err != nil {
 		return audio.SpeechStream{}, err
 	}

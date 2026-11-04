@@ -73,6 +73,13 @@ type SpeechStreamer interface {
 	SynthesizeStream(ctx context.Context, req audio.SpeechRequest) (audio.SpeechStream, error)
 }
 
+// VideoSpeaker is implemented by providers that can answer a talking-face
+// video of the speech (POST /v1/video/speech). The fragmented MP4 is
+// returned unread once the upstream has answered 2xx.
+type VideoSpeaker interface {
+	SpeakVideo(ctx context.Context, req audio.SpeechRequest) (audio.SpeechStream, error)
+}
+
 // VoiceLister is implemented by synthesizing providers that can enumerate
 // their voices. It answers the capabilities route for an alias's first tier
 // when that tier's target does not list its voices in its own options.
