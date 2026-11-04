@@ -76,6 +76,10 @@ type SpeechRequest struct {
 	// language, else the one the requested voice's name carries. Empty, the
 	// default, sends no such field.
 	SendLanguage string
+	// Placeholder, for /v1/video/speech only: false asks the talking face
+	// for no placeholder before the speech (a player with its own idle
+	// clips); nil sends nothing and the upstream's default applies.
+	Placeholder *bool
 }
 
 // SpeechResponse is synthesized audio.

@@ -15,13 +15,13 @@ import (
 
 // videoUpstream answers /video/speech with head, waits for release, then sends
 // tail; status other than 200 answers that status instead. got receives each body.
-func videoUpstream(t *testing.T, status int, head, tail []byte, release <-chan struct{}, got chan<- map[string]string) *httptest.Server {
+func videoUpstream(t *testing.T, status int, head, tail []byte, release <-chan struct{}, got chan<- map[string]any) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/video/speech" {
 			t.Errorf("upstream path %q, want /video/speech", r.URL.Path)
 		}
-		var b map[string]string
+		var b map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&b)
 		if got != nil {
 			got <- b
@@ -49,7 +49,7 @@ func videoUpstream(t *testing.T, status int, head, tail []byte, release <-chan s
 func TestVideoSpeechStreamsAsItArrives(t *testing.T) {
 	head, tail := bytes.Repeat([]byte("ftyp"), 64), bytes.Repeat([]byte("moof"), 512)
 	release := make(chan struct{})
-	got := make(chan map[string]string, 1)
+	got := make(chan map[string]any, 1)
 	up := videoUpstream(t, http.StatusOK, head, tail, release, got)
 	s := streamTestServer(t, map[string]string{"local": up.URL})
 	w := newRecordingWriter()
@@ -60,7 +60,7 @@ func TestVideoSpeechStreamsAsItArrives(t *testing.T) {
 	done := make(chan result, 1)
 	go func() {
 		_, streamed, err := s.runVideoTo(context.Background(), ttsPlan(routing.Target{Provider: "local", UpstreamModel: "chatterbox"}),
-			audio.SpeechRequest{Input: "Привет", Language: "ru", ResponseFormat: "mp4"}, &speechSink{w: w, flush: w.Flush})
+			audio.SpeechRequest{Input: "Привет", Language: "ru", ResponseFormat: "mp4", Placeholder: new(bool)}, &speechSink{w: w, flush: w.Flush})
 		done <- result{streamed, err}
 	}()
 	select {
@@ -79,7 +79,7 @@ func TestVideoSpeechStreamsAsItArrives(t *testing.T) {
 	if !bytes.Equal(w.bytes(), append(head, tail...)) || w.header.Get("Content-Type") != "video/mp4" {
 		t.Fatalf("client got %d bytes, type %q", len(w.bytes()), w.header.Get("Content-Type"))
 	}
-	if b := <-got; b["model"] != "chatterbox" || b["input"] != "Привет" || b["language"] != "ru" {
+	if b := <-got; b["model"] != "chatterbox" || b["input"] != "Привет" || b["language"] != "ru" || b["placeholder"] != false {
 		t.Fatalf("upstream got %v", b)
 	}
 }

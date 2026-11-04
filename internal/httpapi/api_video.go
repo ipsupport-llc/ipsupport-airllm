@@ -28,6 +28,9 @@ func (s *Server) handleVideoSpeech(w http.ResponseWriter, r *http.Request) {
 		Input    string `json:"input"`
 		Voice    string `json:"voice"`
 		Language string `json:"language"`
+		// Placeholder false: the stream starts with the face (no
+		// "initializing" frames), for a player that shows its own idle clips.
+		Placeholder *bool `json:"placeholder"`
 	}
 	// Plain decoding (unknown fields ignored), as for /v1/audio/speech.
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -71,6 +74,7 @@ func (s *Server) handleVideoSpeech(w http.ResponseWriter, r *http.Request) {
 	sink := &speechSink{w: w, flush: f.Flush, expose: plan.ExposeBackendHeaders}
 	res, streamed, callErr := s.runVideoTo(r.Context(), plan, audio.SpeechRequest{
 		Input: redactedInput, Voice: body.Voice, Language: audio.CanonicalLanguage(body.Language), ResponseFormat: "mp4",
+		Placeholder: body.Placeholder,
 	}, sink)
 	target, upstreamModel := res.Provider, res.UpstreamModel
 	entry := ledger.Entry{
