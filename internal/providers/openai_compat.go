@@ -452,7 +452,9 @@ func (p *OpenAICompat) speechPost(ctx context.Context, path string, in audio.Spe
 		Voice          string `json:"voice"`
 		ResponseFormat string `json:"response_format,omitempty"`
 		Language       string `json:"language,omitempty"`
-	}{Model: in.Model, Input: in.Input, Voice: in.Voice, ResponseFormat: in.ResponseFormat, Language: in.SendLanguage})
+		Placeholder    *bool  `json:"placeholder,omitempty"`
+	}{Model: in.Model, Input: in.Input, Voice: in.Voice, ResponseFormat: in.ResponseFormat, Language: in.SendLanguage,
+		Placeholder: in.Placeholder})
 	if err != nil {
 		return audio.SpeechStream{}, err
 	}
