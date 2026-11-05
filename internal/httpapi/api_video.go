@@ -31,14 +31,18 @@ func (s *Server) handleVideoSpeech(w http.ResponseWriter, r *http.Request) {
 		// Placeholder false: the stream starts with the face (no
 		// "initializing" frames), for a player that shows its own idle clips.
 		Placeholder *bool `json:"placeholder"`
+		// Idle names an idle clip ("still", "blink", ...) or "poster": the
+		// talking face answers that clip of its avatar instead of speech, and
+		// input may be empty.
+		Idle string `json:"idle"`
 	}
 	// Plain decoding (unknown fields ignored), as for /v1/audio/speech.
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeProtocolError(w, r, http.StatusBadRequest, "invalid_request_error", "invalid JSON body: "+err.Error())
 		return
 	}
-	if body.Model == "" || body.Input == "" {
-		writeProtocolError(w, r, http.StatusBadRequest, "invalid_request_error", "model and input are required")
+	if body.Model == "" || body.Input == "" && body.Idle == "" {
+		writeProtocolError(w, r, http.StatusBadRequest, "invalid_request_error", "model and input (or idle) are required")
 		return
 	}
 	if !ak.Policy.Allows(body.Model) {
@@ -74,7 +78,7 @@ func (s *Server) handleVideoSpeech(w http.ResponseWriter, r *http.Request) {
 	sink := &speechSink{w: w, flush: f.Flush, expose: plan.ExposeBackendHeaders}
 	res, streamed, callErr := s.runVideoTo(r.Context(), plan, audio.SpeechRequest{
 		Input: redactedInput, Voice: body.Voice, Language: audio.CanonicalLanguage(body.Language), ResponseFormat: "mp4",
-		Placeholder: body.Placeholder,
+		Placeholder: body.Placeholder, Idle: body.Idle,
 	}, sink)
 	target, upstreamModel := res.Provider, res.UpstreamModel
 	entry := ledger.Entry{

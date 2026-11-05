@@ -80,6 +80,10 @@ type SpeechRequest struct {
 	// for no placeholder before the speech (a player with its own idle
 	// clips); nil sends nothing and the upstream's default applies.
 	Placeholder *bool
+	// Idle, for /v1/video/speech only: the name of an idle clip ("still",
+	// "blink", ...) or "poster"; the talking face answers that clip of the
+	// request's avatar instead of speech. Empty sends nothing.
+	Idle string
 }
 
 // SpeechResponse is synthesized audio.

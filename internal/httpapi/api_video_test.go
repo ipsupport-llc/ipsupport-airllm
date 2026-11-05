@@ -113,3 +113,21 @@ func TestVideoSpeechAllTiersFail(t *testing.T) {
 		t.Fatalf("streamed %v err %v, %d bytes; want an error and nothing sent", streamed, err, len(w.bytes()))
 	}
 }
+
+// An idle clip has no input; "idle" reaches the upstream.
+func TestVideoSpeechPassesIdle(t *testing.T) {
+	release := make(chan struct{})
+	close(release)
+	got := make(chan map[string]any, 1)
+	up := videoUpstream(t, http.StatusOK, []byte("clip"), nil, release, got)
+	s := streamTestServer(t, map[string]string{"local": up.URL})
+	w := newRecordingWriter()
+	_, streamed, err := s.runVideoTo(context.Background(), ttsPlan(routing.Target{Provider: "local", UpstreamModel: "chatterbox"}),
+		audio.SpeechRequest{Idle: "blink", ResponseFormat: "mp4"}, &speechSink{w: w, flush: w.Flush})
+	if err != nil || !streamed {
+		t.Fatalf("streamed %v err %v", streamed, err)
+	}
+	if b := <-got; b["idle"] != "blink" || b["input"] != "" {
+		t.Fatalf("upstream got %v", b)
+	}
+}
