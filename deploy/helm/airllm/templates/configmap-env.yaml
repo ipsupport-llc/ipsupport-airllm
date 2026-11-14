@@ -17,6 +17,7 @@ data:
   FORWARD_HEADERS: {{ .Values.config.forwardHeaders | quote }}
 {{- if .Values.dlpBert.enabled }}
   DLP_MODEL_URL_DEFAULT: {{ printf "http://%s:%d" (include "airllm.dlpBertServiceName" .) (int .Values.dlpBert.service.port) | quote }}
+  DLP_MODEL_MAX_CONCURRENCY_DEFAULT: {{ .Values.dlpBert.modelMaxConcurrency | quote }}
 {{- end }}
 {{- if eq .Values.config.authMode "oidc" }}
   OIDC_ISSUER: {{ .Values.config.oidc.issuer | quote }}

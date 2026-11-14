@@ -10,7 +10,9 @@ import (
 )
 
 func (s *Server) handleAdminGetDLP(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.dlpCfg())
+	cfg := s.dlpCfg()
+	cfg.Patterns = effectivePatternsForDisplay(cfg)
+	writeJSON(w, http.StatusOK, cfg)
 }
 
 // handleAdminDLPPatterns returns the catalog of toggleable detection patterns
@@ -31,6 +33,7 @@ func (s *Server) handleAdminDLPPatterns(w http.ResponseWriter, _ *http.Request) 
 		info{"person_name", "pii", false, true},
 		info{"address", "pii", false, true},
 		info{"organization", "pii", false, true},
+		info{"other", "pii", false, true}, // catch-all for unmapped model labels (e.g. CoNLL's MISC)
 	)
 	writeJSON(w, http.StatusOK, map[string]any{"patterns": out})
 }
@@ -51,6 +54,10 @@ func (s *Server) handleAdminPutDLP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := compileCustomPatterns(body.CustomPatterns); err != nil {
+		writeControlError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateModelConfig(body); err != nil {
 		writeControlError(w, http.StatusBadRequest, err.Error())
 		return
 	}

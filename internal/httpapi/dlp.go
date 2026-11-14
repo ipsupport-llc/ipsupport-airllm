@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -134,7 +135,10 @@ func dlpToggle(enabled map[string]bool, label string, def bool) bool {
 // modelToggleLabel maps a model entity label ("pii:<ENTITY>") to its toggle,
 // normalizing the common NER vocabularies (abbreviated and full, any case) so
 // the toggle works whether the sidecar emits PER or PERSON, LOC or LOCATION/GPE,
-// ORG or ORGANIZATION. An unrecognized entity returns "" (kept, untoggled).
+// ORG or ORGANIZATION. An unrecognized entity (e.g. CoNLL's MISC, or any label
+// a fine-tuned model adds) falls back to "other" — it still goes through the
+// same opt-in toggle gate as the other three, instead of being unconditionally
+// kept with no way for an operator to turn it off.
 func modelToggleLabel(label string) string {
 	switch strings.ToUpper(strings.TrimPrefix(label, "pii:")) {
 	case "PER", "PERSON", "PERS":
@@ -144,30 +148,61 @@ func modelToggleLabel(label string) string {
 	case "ORG", "ORGANIZATION", "ORGANISATION":
 		return "organization"
 	}
-	return ""
+	return "other"
 }
 
-// filterModelFindings drops model PII findings whose toggle is off. Model PII
-// is opt-in (default off). When the operator has not configured toggles
-// (enabled == nil) all findings are kept, preserving pre-guardrails behavior.
-func filterModelFindings(fs []dlp.Finding, enabled map[string]bool) []dlp.Finding {
+// modelLabelEffective reports whether a model PII toggle (person_name,
+// address, or organization) is currently enforced. Model PII is opt-in
+// (default off) once any patterns map has been saved; a config that has
+// never had one saved (enabled == nil) keeps everything, preserving
+// pre-guardrails behavior. This is the single source of truth for that
+// value — both enforcement (filterModelFindings) and display
+// (effectivePatternsForDisplay) call it, so they can never disagree.
+func modelLabelEffective(enabled map[string]bool, toggle string) bool {
 	if enabled == nil {
-		return fs
+		return true
 	}
+	return dlpToggle(enabled, toggle, false)
+}
+
+// filterModelFindings drops model PII findings whose toggle is off.
+func filterModelFindings(fs []dlp.Finding, enabled map[string]bool) []dlp.Finding {
 	out := fs[:0]
 	for _, f := range fs {
-		toggle := modelToggleLabel(f.Label)
-		if toggle == "" || dlpToggle(enabled, toggle, false) {
+		if modelLabelEffective(enabled, modelToggleLabel(f.Label)) {
 			out = append(out, f)
 		}
 	}
 	return out
 }
 
+// effectivePatternsForDisplay materializes every known pattern label — the
+// deterministic built-ins and the three model PII toggles — to its current
+// effective enforcement value (the same logic dlpEnforce uses), so the admin
+// console never has to guess a default for an absent key. Without this, the
+// console applied its own catalog default (false) for an absent model
+// toggle, which doesn't match a never-configured alias's true effective
+// state (true, via modelLabelEffective's nil-map case) — saving the console
+// form after that mismatched render silently persisted an explicit "off"
+// for person_name/address/organization, turning off BERT PII protection the
+// operator never asked to disable.
+func effectivePatternsForDisplay(cfg dlpConfig) map[string]bool {
+	out := make(map[string]bool, len(knownPatternLabels()))
+	for _, info := range dlp.BuiltinPatterns() {
+		out[info.Label] = dlpToggle(cfg.Patterns, info.Label, info.DefaultOn)
+	}
+	for _, label := range []string{"person_name", "address", "organization", "other"} {
+		out[label] = modelLabelEffective(cfg.Patterns, label)
+	}
+	return out
+}
+
 // knownPatternLabels is the set of valid toggle keys: every built-in pattern
-// plus the model toggles.
+// plus the model toggles. "other" catches any model entity label that isn't
+// person_name/address/organization (CoNLL's MISC, or a fine-tuned label
+// nobody mapped yet in modelToggleLabel).
 func knownPatternLabels() map[string]bool {
-	known := map[string]bool{"person_name": true, "address": true, "organization": true}
+	known := map[string]bool{"person_name": true, "address": true, "organization": true, "other": true}
 	for _, info := range dlp.BuiltinPatterns() {
 		known[info.Label] = true
 	}
@@ -213,6 +248,38 @@ func validDLPAction(a string) bool {
 		return true
 	}
 	return false
+}
+
+// validateModelConfig rejects a model-layer configuration that would save
+// successfully but scan nothing, or silently discard every finding. Without
+// this, PUT accepted model_enabled:true with no URL (0 scans, 0 errors —
+// indistinguishable from "working, just quiet") and model_min_score:70
+// instead of 0.7 (every finding's 0..1 score fails the threshold, so scans
+// "succeed" while finding nothing).
+func validateModelConfig(cfg dlpConfig) error {
+	urls := cfg.effectiveModelURLs()
+	if cfg.ModelEnabled && len(urls) == 0 {
+		return fmt.Errorf("model_enabled requires model_url or at least one model_urls entry")
+	}
+	for _, raw := range urls {
+		u, err := url.Parse(raw)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return fmt.Errorf("model_url %q must be an absolute URL with a scheme and host", raw)
+		}
+	}
+	if cfg.ModelMinScore < 0 || cfg.ModelMinScore > 1 {
+		return fmt.Errorf("model_min_score must be between 0 and 1")
+	}
+	if cfg.ModelMaxConcurrency < 0 {
+		return fmt.Errorf("model_max_concurrency must be >= 0")
+	}
+	if cfg.ModelScanBudgetMS < 0 {
+		return fmt.Errorf("model_scan_budget_ms must be >= 0")
+	}
+	if cfg.ModelScanScope != "" && cfg.ModelScanScope != "last_user" && cfg.ModelScanScope != "all" {
+		return fmt.Errorf(`model_scan_scope must be "last_user" or "all"`)
+	}
+	return nil
 }
 
 // loadDLP reads the DLP config from settings into the atomic cache.
@@ -317,6 +384,14 @@ func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, r
 	sample := ""
 	var allFindings []dlp.Finding
 	perMsg := make([][]dlp.Finding, len(req.Messages))
+	// budgetExhausted latches once bctx's deadline is hit: the shared budget
+	// context stays expired for the rest of this request, so without this
+	// flag every remaining eligible message still dialed the sidecar only to
+	// get an immediate DeadlineExceeded — one wasted pool slot and HTTP
+	// attempt per message, with the sidecar itself free to keep running a
+	// cancelled inference to completion behind it. Once exhausted, skip the
+	// attempt entirely and record the same metric without touching the pool.
+	budgetExhausted := false
 	for i := range req.Messages {
 		content := req.Messages[i].Content
 		if content == "" {
@@ -327,23 +402,40 @@ func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, r
 			Custom:  cfg.compiledCustom,
 			Entropy: dlpToggle(cfg.Patterns, "high_entropy", true),
 		})
-		if modelOn && (cfg.ModelScanScope == "all" || i == lastUser) {
+		if modelOn && budgetExhausted && (cfg.ModelScanScope == "all" || i == lastUser) {
+			s.metrics.DLPModelSkipped("budget")
+		} else if modelOn && (cfg.ModelScanScope == "all" || i == lastUser) {
 			mstart := time.Now()
-			mf, err := s.modelPool.Scan(bctx, s.httpc, content, cfg.ModelMinScore)
+			mf, truncated, err := s.modelPool.Scan(bctx, s.httpc, content, cfg.ModelMinScore)
 			switch {
 			case errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil:
 				// The request is alive but the scan budget is spent: fail open
 				// for this and all remaining messages, visibly.
 				s.metrics.DLPModelSkipped("budget")
+				budgetExhausted = true
 			case errors.Is(err, modelpool.ErrAllBusy):
 				s.metrics.DLPModelSkipped("all_busy")
 			case errors.Is(err, modelpool.ErrNoEndpoints):
 				s.metrics.DLPModelSkipped("no_endpoints")
 			case err != nil:
-				s.metrics.DLPModelObserve(time.Since(mstart))
+				// A connection/HTTP/decode failure, not a budget or capacity
+				// skip — counted under the same skip metric (reason "error")
+				// so a sidecar that fails 100% of the time is visible
+				// alongside all_busy/no_endpoints, instead of silently
+				// inflating the (success-only) duration histogram below with
+				// near-instant failures that look like fast, healthy scans.
+				s.metrics.DLPModelSkipped("error")
 				slog.Error("dlp model scan failed; deterministic layer only", "err", err)
 			default:
 				s.metrics.DLPModelObserve(time.Since(mstart))
+				if truncated {
+					// The sidecar scanned only a prefix of content (DLP_MAX_CHARS)
+					// — findings past that prefix are simply unscanned, not a
+					// clean result. Visible as a skip reason (incomplete
+					// coverage) distinct from a genuine failure or budget cut.
+					s.metrics.DLPModelSkipped("truncated")
+					slog.Warn("dlp model scan truncated; tail of message unscanned", "chars", len(content))
+				}
 				if mf = filterModelFindings(mf, cfg.Patterns); len(mf) > 0 {
 					findings = dlp.Merge(append(findings, mf...))
 				}

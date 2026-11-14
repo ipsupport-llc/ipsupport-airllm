@@ -121,10 +121,19 @@ dlpBert:
     digest: ""                                  # sha256:… — pins the exact build, wins over tag
     pullPolicy: IfNotPresent
   service:
-    headless: false                             # true → one pool endpoint per pod; false → kube-proxy LB
+    # The gateway's modelpool fans out to one endpoint PER POD by resolving
+    # this Service's hostname via DNS (net.LookupHost) — that only returns
+    # one A record per backing pod when the Service is headless. A
+    # non-headless (ClusterIP) Service resolves to a single virtual IP
+    # regardless of replicaCount, collapsing the pool to one endpoint and
+    # silently defeating per-pod scan concurrency limiting (modelMaxConcurrency)
+    # the moment this scales above 1 replica. Default true for that reason;
+    # set false only if you have a specific reason to route through
+    # kube-proxy's load balancing instead.
+    headless: true
     port: 8000
   replicaCount: 1                               # used only when autoscaling.kind=none
-  modelMaxConcurrency: 4                        # surfaced in NOTES as the console value to set
+  modelMaxConcurrency: 4                        # seeded into the DB-backed DLP config on first boot (see internal/seed.EnsureDLPDefaults); an operator save in the console always wins afterward
   autoscaling:
     kind: hpa                                   # hpa | keda | none
     minReplicaCount: 1                          # set 0 for scale-to-zero (keda only)
@@ -147,6 +156,10 @@ dlpBert:
       # stay there uselessly (bounded cost, not an outage). Mitigate by alerting on
       # skipped_total{reason="no_endpoints"}, keeping maxReplicaCount modest, or
       # narrowing query to {reason="all_busy"} when you don't run scale-to-zero.
+      # This query is UNSCOPED: if your Prometheus scrapes more than one
+      # AirLLM install, add a label selector (e.g. namespace="...", or
+      # whatever your ServiceMonitor/scrape relabeling attaches) so one
+      # installation's skip rate can't wake — or keep awake — another's pool.
       query: sum(rate(airllm_dlp_model_skipped_total[2m]))
       threshold: "1"                            # add replicas when the query exceeds this
       activationThreshold: "0"                  # query must exceed this to scale 0->1 (keep 0 so any demand wakes it)

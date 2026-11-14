@@ -33,4 +33,36 @@ spec:
               its provider keeps failing and requests are served by the next tier.
               Check the AirLLM Failover dashboard, the console's Aliases → Health view
               and the gateway's "tier attempt failed" logs for this alias.
+{{- if .Values.dlpBert.enabled }}
+        # Fail-open means a dead/misconfigured sidecar (wrong model_url, DNS
+        # failure, NetworkPolicy, CrashLoop) never blocks a request — it just
+        # silently stops contributing BERT PII coverage. Without an alert,
+        # "model_enabled: true, 0% of scans ever succeed" looks identical to
+        # a healthy, quiet install until someone reads the admin console or
+        # the raw metrics by hand. reason!="truncated" excludes scans that
+        # DID succeed (and were already counted in the duration histogram)
+        # but only covered a prefix of the input — that's not a failure.
+        - alert: AirLLMDLPModelDegraded
+          expr: >-
+            sum(rate(airllm_dlp_model_duration_seconds_count{namespace="{{ .Release.Namespace }}"}[15m]))
+            /
+            (sum(rate(airllm_dlp_model_duration_seconds_count{namespace="{{ .Release.Namespace }}"}[15m]))
+             + sum(rate(airllm_dlp_model_skipped_total{namespace="{{ .Release.Namespace }}", reason!="truncated"}[15m])))
+            < 0.9
+          for: 15m
+          {{- with .Values.metrics.prometheusRule.alertLabels }}
+          labels:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          annotations:
+            summary: "AirLLM DLP model (BERT) scans failing or skipping over 10% of attempts"
+            description: >-
+              Fewer than 90% of DLP model-layer (BERT sidecar) scan attempts have
+              succeeded over the last 15m — the rest hit all_busy, no_endpoints,
+              budget, or error. Layer-1 deterministic DLP still runs, but BERT
+              fuzzy/contextual PII coverage is degraded or entirely absent. Check
+              dlp-bert pod health, the configured model_url(s) in Admin → DLP,
+              and airllm_dlp_model_skipped_total by reason to find which failure
+              mode dominates.
+{{- end }}
 {{- end }}

@@ -3,6 +3,7 @@ package modelpool
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -71,6 +72,15 @@ func TestResolveIPLiteralSkipsDNS(t *testing.T) {
 	}
 }
 
+func TestResolvePreservesURLPath(t *testing.T) {
+	resolve := func(host string) ([]string, error) { return []string{"10.0.0.1"}, nil }
+	p := New(cfg([]string{"http://bert:8000/api"}, 0), resolve)
+	p.Resolve()
+	if got := baseURLs(p); len(got) != 1 || got[0] != "http://10.0.0.1:8000/api" {
+		t.Fatalf("baseURLs = %v, want [http://10.0.0.1:8000/api]", got)
+	}
+}
+
 func TestResolveKeepsLastGoodOnFailure(t *testing.T) {
 	ok := true
 	resolve := func(host string) ([]string, error) {
@@ -88,6 +98,46 @@ func TestResolveKeepsLastGoodOnFailure(t *testing.T) {
 	p.Resolve()
 	if p.Size() != 2 {
 		t.Fatalf("after failed resolve Size = %d, want 2 (last-good kept)", p.Size())
+	}
+}
+
+func TestResolveDropsEndpointsOnCleanEmptyAnswer(t *testing.T) {
+	ok := true
+	resolve := func(host string) ([]string, error) {
+		if ok {
+			return []string{"10.0.0.1", "10.0.0.2"}, nil
+		}
+		return []string{}, nil // clean answer, zero addresses (e.g. scaled to zero)
+	}
+	p := New(cfg([]string{"http://bert:8000"}, 0), resolve)
+	p.Resolve()
+	if p.Size() != 2 {
+		t.Fatalf("after good resolve Size = %d, want 2", p.Size())
+	}
+	ok = false
+	p.Resolve()
+	if p.Size() != 0 {
+		t.Fatalf("after clean empty answer Size = %d, want 0 (dropped, not kept stale)", p.Size())
+	}
+}
+
+func TestResolveDropsEndpointsOnNXDOMAIN(t *testing.T) {
+	ok := true
+	resolve := func(host string) ([]string, error) {
+		if ok {
+			return []string{"10.0.0.1", "10.0.0.2"}, nil
+		}
+		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+	}
+	p := New(cfg([]string{"http://bert:8000"}, 0), resolve)
+	p.Resolve()
+	if p.Size() != 2 {
+		t.Fatalf("after good resolve Size = %d, want 2", p.Size())
+	}
+	ok = false
+	p.Resolve()
+	if p.Size() != 0 {
+		t.Fatalf("after NXDOMAIN Size = %d, want 0 (dropped, not kept stale)", p.Size())
 	}
 }
 
@@ -122,7 +172,7 @@ func TestScanAllBusy(t *testing.T) {
 		t.Fatal("pick should succeed")
 	}
 	defer held.release()
-	if _, err := p.Scan(context.Background(), http.DefaultClient, "hi", 0.5); !errors.Is(err, ErrAllBusy) {
+	if _, _, err := p.Scan(context.Background(), http.DefaultClient, "hi", 0.5); !errors.Is(err, ErrAllBusy) {
 		t.Fatalf("Scan err = %v, want ErrAllBusy", err)
 	}
 }
@@ -135,7 +185,7 @@ func TestScanHappyPathAndInflightReleased(t *testing.T) {
 	// srv.URL host is 127.0.0.1 (IP literal) → resolver not exercised.
 	p := New(cfg([]string{srv.URL}, 0), func(string) ([]string, error) { return nil, errors.New("no") })
 	p.Resolve()
-	fs, err := p.Scan(context.Background(), srv.Client(), "Bob", 0.5)
+	fs, _, err := p.Scan(context.Background(), srv.Client(), "Bob", 0.5)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -147,6 +197,29 @@ func TestScanHappyPathAndInflightReleased(t *testing.T) {
 	}
 }
 
+func TestScanRetriesOnDifferentEndpointAfterError(t *testing.T) {
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer bad.Close()
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"findings":[{"label":"PER","start":0,"end":3,"score":0.9}]}`))
+	}))
+	defer good.Close()
+
+	// Both URLs are IP literals (127.0.0.1) — resolver not exercised.
+	p := New(cfg([]string{good.URL, bad.URL}, 0), func(string) ([]string, error) { return nil, errors.New("no") })
+	p.Resolve()
+
+	fs, _, err := p.Scan(context.Background(), http.DefaultClient, "Bob", 0.5)
+	if err != nil {
+		t.Fatalf("Scan should succeed via a one-shot retry on the other endpoint, got err: %v", err)
+	}
+	if len(fs) != 1 || fs[0].Label != "pii:PER" {
+		t.Fatalf("findings = %+v, want one pii:PER from the good endpoint", fs)
+	}
+}
+
 func TestScanLazyResolvesWhenEmpty(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"findings":[]}`))
@@ -154,7 +227,7 @@ func TestScanLazyResolvesWhenEmpty(t *testing.T) {
 	defer srv.Close()
 	p := New(cfg([]string{srv.URL}, 0), func(string) ([]string, error) { return nil, errors.New("no") })
 	// No Resolve() call — Scan must lazily resolve.
-	if _, err := p.Scan(context.Background(), srv.Client(), "x", 0.5); err != nil {
+	if _, _, err := p.Scan(context.Background(), srv.Client(), "x", 0.5); err != nil {
 		t.Fatalf("Scan (lazy resolve): %v", err)
 	}
 	if p.Size() == 0 {
@@ -185,7 +258,7 @@ func TestScanConcurrentLazyResolveDedupes(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func() {
 			defer wg.Done()
-			_, _ = p.Scan(context.Background(), http.DefaultClient, "x", 0.5) // outcome unchecked: only the resolve-call count matters
+			_, _, _ = p.Scan(context.Background(), http.DefaultClient, "x", 0.5) // outcome unchecked: only the resolve-call count matters
 		}()
 	}
 	time.Sleep(100 * time.Millisecond) // let every goroutine reach the lazy-resolve check
@@ -209,7 +282,7 @@ func TestScanNoEndpoints(t *testing.T) {
 	if resolves != 1 {
 		t.Fatalf("setup: resolves = %d, want 1", resolves)
 	}
-	if _, err := p.Scan(context.Background(), http.DefaultClient, "x", 0.5); !errors.Is(err, ErrNoEndpoints) {
+	if _, _, err := p.Scan(context.Background(), http.DefaultClient, "x", 0.5); !errors.Is(err, ErrNoEndpoints) {
 		t.Fatalf("Scan err = %v, want ErrNoEndpoints", err)
 	}
 	// The resolved-once guard means a Start()-ed/Resolve()-d pool must not re-run
