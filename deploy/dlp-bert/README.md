@@ -31,6 +31,17 @@ point `model_url` at its service.
 
 ## Model
 
-Defaults to `Isotonic/distilbert_finetuned_ai4privacy_v2` (ai4privacy PII NER);
-override with the `DLP_MODEL` build arg / env var. CPU inference is ~10–50 ms
-for short prompts.
+Defaults to `dslim/bert-base-NER` (BERT-base fine-tuned on CoNLL-2003: PER,
+ORG, LOC, MISC) — the actual default baked in by `Dockerfile`'s `DLP_MODEL`
+build arg, and what every image released via `.github/workflows/release.yml`
+ships with (that workflow passes no `DLP_MODEL` override). Override at build
+time with `--build-arg DLP_MODEL=<hf-model-id>`, or at runtime with the
+`DLP_MODEL` env var if running from a local checkout instead of the prebuilt
+image. CPU inference is ~10–50 ms for short prompts.
+
+Swapping in a model with a different label vocabulary (e.g. an ai4privacy
+PII model, which emits labels like `EMAIL`/`GIVENNAME`/`STREET` instead of
+`PER`/`ORG`/`LOC`) also needs `modelToggleLabel` in
+`internal/httpapi/dlp.go` updated to recognize the new labels — otherwise
+the per-entity enable/disable toggles in the admin console silently do
+nothing for them (findings still come through, just always-on).

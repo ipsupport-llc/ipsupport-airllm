@@ -69,18 +69,24 @@ rows = [json.loads(l) for l in open("train.jsonl")]
 
 def to_hf(row):
     text = row["text"]
+    # Spans are byte offsets into text (see above) — Python string indices are
+    # code-point offsets, not bytes, so slice the UTF-8-encoded bytes and
+    # decode each piece back to text. Slicing `text` directly here would be
+    # wrong for any non-ASCII input (the same Python/Go offset mismatch fixed
+    # in internal/dlp/model.go for the live sidecar response).
+    data = text.encode("utf-8")
     tokens, labels = [], []
     prev = 0
     # Simple whitespace tokenizer — swap in your tokenizer of choice.
     for span in sorted(row["spans"], key=lambda s: s["start"]):
         if prev < span["start"]:
-            tokens.append(text[prev:span["start"]])
+            tokens.append(data[prev:span["start"]].decode("utf-8"))
             labels.append("O")
-        tokens.append(text[span["start"]:span["end"]])
+        tokens.append(data[span["start"]:span["end"]].decode("utf-8"))
         labels.append("B-" + span["label"])
         prev = span["end"]
-    if prev < len(text):
-        tokens.append(text[prev:])
+    if prev < len(data):
+        tokens.append(data[prev:].decode("utf-8"))
         labels.append("O")
     return {"tokens": tokens, "ner_tags": labels}
 
@@ -98,7 +104,7 @@ from datasets import load_from_disk
 import numpy as np
 from seqeval.metrics import classification_report
 
-BASE_MODEL = "Isotonic/distilbert_finetuned_ai4privacy_v2"  # or your current DLP_MODEL
+BASE_MODEL = "dslim/bert-base-NER"  # the shipped image's default DLP_MODEL — or your current one
 OUTPUT_DIR = "./dlp-bert-finetuned"
 
 tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
@@ -191,13 +197,28 @@ DLP_MODEL=./dlp-bert-finetuned \
 
 **k8s / production:**
 Update the `DLP_MODEL` env var in the `dlp-bert` Deployment to point at the
-HuggingFace Hub model ID or the mounted local path, then roll the Deployment:
+HuggingFace Hub model ID or the mounted local path, then roll the Deployment.
+The chart names it `<release-fullname>-dlp-bert`, not literally `dlp-bert` —
+find yours with `kubectl get deploy -l app.kubernetes.io/component=dlp-bert`:
 
 ```sh
-kubectl set env deployment/dlp-bert DLP_MODEL=<your-org>/dlp-bert-airllm
-kubectl rollout restart deployment/dlp-bert
-kubectl rollout status deployment/dlp-bert
+kubectl set env deployment/<release>-dlp-bert DLP_MODEL=<your-org>/dlp-bert-airllm
+kubectl rollout restart deployment/<release>-dlp-bert
+kubectl rollout status deployment/<release>-dlp-bert
 ```
+
+This downloads the new model from the Hub at pod startup (the prebuilt image
+only bakes in the default `DLP_MODEL`) — confirm the pod has Hub egress and
+that the download finishes inside the readiness probe's startup budget
+(`dlpBert.*` probes in `values.yaml`), or the rollout will CrashLoop and the
+gateway will silently fail open (layer 2 off) until you catch it.
+
+**Any label vocabulary change (new model, new fine-tune) requires an update
+to `modelToggleLabel` in `internal/httpapi/dlp.go`.** Unmapped labels fall
+back to the catch-all `"other"` toggle (on by default) — an operator can
+switch them all off together, but they won't be covered by the
+`person_name`/`address`/`organization` toggles an operator expects. Map your
+new labels explicitly before relying on per-entity console toggles.
 
 ---
 

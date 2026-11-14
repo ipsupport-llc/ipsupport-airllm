@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/ipsupport-llc/ipsupport-airllm/actions/workflows/ci.yml/badge.svg)](https://github.com/ipsupport-llc/ipsupport-airllm/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![Third-party notices](https://img.shields.io/badge/third--party-notices-lightgrey)](THIRD_PARTY_NOTICES.md)
 [![Site](https://img.shields.io/badge/site-ipsupport--llc.github.io-6ea8fe)](https://ipsupport-llc.github.io/ipsupport-airllm/)
 
 **AirLLM** — short for **AI Router LLM** — is a self-hosted, OIDC-governed LLM

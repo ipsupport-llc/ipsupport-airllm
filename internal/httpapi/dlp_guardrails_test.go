@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -132,20 +133,184 @@ func TestDlpToggle(t *testing.T) {
 	}
 }
 
+// TestEffectivePatternsForDisplayLegacyNilKeepsModelOn proves the console-save
+// footgun fix: a config that has never had a patterns map saved (nil) must
+// display its model toggles as ON, matching modelLabelEffective's nil-map
+// behavior — not the catalog's opt-in-false default, which previously caused
+// any console save to silently persist an explicit "off".
+func TestEffectivePatternsForDisplayLegacyNilKeepsModelOn(t *testing.T) {
+	cfg := dlpConfig{ModelEnabled: true}
+	got := effectivePatternsForDisplay(cfg)
+	for _, label := range []string{"person_name", "address", "organization"} {
+		if !got[label] {
+			t.Errorf("%s: legacy nil-patterns config must display as effectively ON, got %v", label, got[label])
+		}
+	}
+}
+
+// TestEffectivePatternsForDisplayRoundTripPreservesLegacyOn simulates the
+// actual bug scenario end to end: GET materializes the legacy-on state, the
+// console saves that exact map back (as if the operator changed an unrelated
+// field), and the result must still protect every model entity.
+func TestEffectivePatternsForDisplayRoundTripPreservesLegacyOn(t *testing.T) {
+	cfg := dlpConfig{ModelEnabled: true}
+	cfg.Patterns = effectivePatternsForDisplay(cfg) // what the console now saves back
+	fs := filterModelFindings([]dlp.Finding{
+		{Label: "pii:PER", Start: 0, End: 1},
+		{Label: "pii:ORG", Start: 2, End: 3},
+		{Label: "pii:LOC", Start: 4, End: 5},
+	}, cfg.Patterns)
+	if len(fs) != 3 {
+		t.Fatalf("round-tripping the GET response through a save must not drop model findings, got %+v", fs)
+	}
+}
+
+// TestEffectivePatternsForDisplayNonNilMapStaysOptIn proves the fix doesn't
+// touch the already-tested opt-in-once-touched behavior (TestFilterModelFindings
+// below): once a patterns map has been explicitly saved, an absent model
+// label still defaults off.
+func TestEffectivePatternsForDisplayNonNilMapStaysOptIn(t *testing.T) {
+	cfg := dlpConfig{ModelEnabled: true, Patterns: map[string]bool{"person_name": false}}
+	got := effectivePatternsForDisplay(cfg)
+	if got["person_name"] {
+		t.Error("explicit false must survive materialization")
+	}
+	if got["address"] {
+		t.Error("address was never set in this non-nil map: must stay opt-in/off, not silently true")
+	}
+}
+
+func TestHandleAdminGetDLPMaterializesModelToggles(t *testing.T) {
+	s := &Server{}
+	cfg := dlpConfig{ModelEnabled: true}
+	s.dlpPtr.Store(&cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/dlp", nil)
+	rec := httptest.NewRecorder()
+	s.handleAdminGetDLP(rec, req)
+
+	var got dlpConfig
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	for _, label := range []string{"person_name", "address", "organization"} {
+		if !got.Patterns[label] {
+			t.Errorf("GET /api/admin/dlp: %s = %v, want true for a never-configured alias", label, got.Patterns[label])
+		}
+	}
+}
+
+func TestHandleAdminPutDLPRejectsModelEnabledWithNoURL(t *testing.T) {
+	s := &Server{}
+	body, _ := json.Marshal(map[string]any{"action": "redact", "model_enabled": true})
+	req := httptest.NewRequest(http.MethodPut, "/api/admin/dlp", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	s.handleAdminPutDLP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("model_enabled with no URL must be rejected, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleAdminPutDLPRejectsOutOfRangeMinScore(t *testing.T) {
+	s := &Server{}
+	body, _ := json.Marshal(map[string]any{
+		"action": "redact", "model_enabled": true, "model_url": "http://dlp-bert:8000", "model_min_score": 70,
+	})
+	req := httptest.NewRequest(http.MethodPut, "/api/admin/dlp", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	s.handleAdminPutDLP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("model_min_score=70 (outside 0..1) must be rejected, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleAdminPutDLPRejectsUnknownScope(t *testing.T) {
+	s := &Server{}
+	body, _ := json.Marshal(map[string]any{
+		"action": "redact", "model_enabled": true, "model_url": "http://dlp-bert:8000", "model_scan_scope": "every_message",
+	})
+	req := httptest.NewRequest(http.MethodPut, "/api/admin/dlp", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	s.handleAdminPutDLP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("an unknown model_scan_scope must be rejected, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleAdminPutDLPRejectsMalformedModelURL(t *testing.T) {
+	s := &Server{}
+	body, _ := json.Marshal(map[string]any{
+		"action": "redact", "model_enabled": true, "model_url": "dlp-bert:8000",
+	})
+	req := httptest.NewRequest(http.MethodPut, "/api/admin/dlp", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	s.handleAdminPutDLP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("a model_url with no scheme must be rejected, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestValidateModelConfig(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  dlpConfig
+		ok   bool
+	}{
+		{"non-http scheme", dlpConfig{ModelEnabled: true, ModelURL: "ftp://dlp-bert:8000"}, false},
+		{"https", dlpConfig{ModelEnabled: true, ModelURL: "https://dlp-bert:8000"}, true},
+		{"disabled layer ignores stale fields", dlpConfig{ModelEnabled: false, ModelURL: "bogus", ModelMinScore: 70}, true},
+	}
+	for _, c := range cases {
+		if err := validateModelConfig(c.cfg); (err == nil) != c.ok {
+			t.Errorf("%s: err = %v, want ok=%v", c.name, err, c.ok)
+		}
+	}
+}
+
+func TestHandleAdminPutDLPAcceptsValidModelConfig(t *testing.T) {
+	pool := testPool(t)
+	s := &Server{st: &store.Store{PG: pool}, auditHook: func(context.Context, string, string, string, any) {}}
+	body, _ := json.Marshal(map[string]any{
+		"action": "redact", "model_enabled": true, "model_url": "http://dlp-bert:8000", "model_min_score": 0.7,
+	})
+	req := httptest.NewRequest(http.MethodPut, "/api/admin/dlp", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	s.handleAdminPutDLP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("a valid model config must be accepted, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestFilterModelFindings(t *testing.T) {
 	in := []dlp.Finding{
 		{Label: "pii:PER", Start: 0, End: 1},
 		{Label: "pii:LOC", Start: 2, End: 3},
 		{Label: "pii:ORG", Start: 4, End: 5},
+		{Label: "pii:MISC", Start: 6, End: 7},
 	}
-	// nil map => keep all (legacy behavior).
-	if got := filterModelFindings(append([]dlp.Finding(nil), in...), nil); len(got) != 3 {
+	// nil map => keep all (legacy behavior), including the unmapped MISC label.
+	if got := filterModelFindings(append([]dlp.Finding(nil), in...), nil); len(got) != 4 {
 		t.Fatalf("nil toggles must keep all model findings, got %d", len(got))
 	}
-	// Only person_name enabled => only pii:PER survives.
+	// Only person_name set in a saved map: PER survives, LOC/ORG stay opt-in
+	// (off), and MISC (-> "other") stays on — a map saved before "other"
+	// existed must not lose MISC coverage on upgrade.
 	got := filterModelFindings(append([]dlp.Finding(nil), in...), map[string]bool{"person_name": true})
+	if len(got) != 2 || got[0].Label != "pii:PER" || got[1].Label != "pii:MISC" {
+		t.Fatalf("expected pii:PER and pii:MISC, got %+v", got)
+	}
+	// Explicitly disabling "other" drops MISC.
+	got = filterModelFindings(append([]dlp.Finding(nil), in...), map[string]bool{"person_name": true, "other": false})
 	if len(got) != 1 || got[0].Label != "pii:PER" {
 		t.Fatalf("expected only pii:PER, got %+v", got)
+	}
+}
+
+func TestModelToggleLabelUnmappedFallsBackToOther(t *testing.T) {
+	for _, label := range []string{"pii:MISC", "pii:DATE", "pii:UNKNOWN"} {
+		if got := modelToggleLabel(label); got != "other" {
+			t.Errorf("modelToggleLabel(%q) = %q, want %q", label, got, "other")
+		}
 	}
 }
 

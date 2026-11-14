@@ -24,7 +24,7 @@ func TestModelScan(t *testing.T) {
 	defer srv.Close()
 
 	// Trailing slash on the base URL must be handled.
-	fs, err := ModelScan(context.Background(), srv.Client(), srv.URL+"/", 0.5, "0123456789")
+	fs, _, err := ModelScan(context.Background(), srv.Client(), srv.URL+"/", 0.5, "0123456789")
 	if err != nil {
 		t.Fatalf("ModelScan: %v", err)
 	}
@@ -37,12 +37,106 @@ func TestModelScan(t *testing.T) {
 	}
 }
 
+// TestModelScanConvertsCharacterOffsetsToByteOffsets covers the Python/Go
+// offset mismatch: the sidecar returns start/end as Python string indices
+// (Unicode code-point offsets), but Finding.Start/End — and dlp.Redact,
+// which slices the Go string by byte — need UTF-8 byte offsets. A non-ASCII
+// character ahead of a match shifts the two apart.
+func TestModelScanConvertsCharacterOffsetsToByteOffsets(t *testing.T) {
+	// "😀 John Smith": the emoji is 1 Python/Go code point but 4 UTF-8 bytes,
+	// followed by a space (1 byte). "John Smith" starts at code point 2 but
+	// byte offset 5.
+	const text = "😀 John Smith"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"findings":[{"label":"PERSON","start":2,"end":12,"score":0.97}]}`))
+	}))
+	defer srv.Close()
+
+	fs, _, err := ModelScan(context.Background(), srv.Client(), srv.URL, 0.5, text)
+	if err != nil {
+		t.Fatalf("ModelScan: %v", err)
+	}
+	if len(fs) != 1 {
+		t.Fatalf("want 1 finding, got %+v", fs)
+	}
+	wantStart, wantEnd := 5, 15 // byte offsets, not the sidecar's code-point 2..12
+	if fs[0].Start != wantStart || fs[0].End != wantEnd {
+		t.Fatalf("finding = %+v, want byte offsets [%d:%d]", fs[0], wantStart, wantEnd)
+	}
+	if got := text[fs[0].Start:fs[0].End]; got != "John Smith" {
+		t.Errorf("text[Start:End] = %q, want %q", got, "John Smith")
+	}
+}
+
+func TestRuneOffsetToByteOffsetClampsPastEnd(t *testing.T) {
+	const text = "héllo" // 'é' is 2 bytes: byte len 6, rune len 5
+	if got := runeOffsetToByteOffset(text, 100); got != len(text) {
+		t.Errorf("out-of-range rune offset = %d, want len(s)=%d", got, len(text))
+	}
+	if got := runeOffsetToByteOffset(text, 0); got != 0 {
+		t.Errorf("offset 0 = %d, want 0", got)
+	}
+	if got := runeOffsetToByteOffset(text, 2); got != 3 {
+		t.Errorf("offset 2 (after h,é) = %d, want byte 3", got)
+	}
+}
+
+func TestModelScanDropsOutOfRangeSpan(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"findings":[{"label":"PER","start":0,"end":999,"score":0.99}]}`))
+	}))
+	defer srv.Close()
+
+	fs, _, err := ModelScan(context.Background(), srv.Client(), srv.URL, 0.5, "héllo")
+	if err != nil {
+		t.Fatalf("ModelScan: %v", err)
+	}
+	if len(fs) != 0 {
+		t.Fatalf("findings = %+v, want the past-end span dropped (not clamped to the whole message)", fs)
+	}
+}
+
+func TestModelScanToleratesURLEndingInScan(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/scan" {
+			t.Errorf("path = %q, want /scan", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"findings":[]}`))
+	}))
+	defer srv.Close()
+
+	if _, _, err := ModelScan(context.Background(), srv.Client(), srv.URL+"/scan/", 0.5, "x"); err != nil {
+		t.Fatalf("ModelScan: %v", err)
+	}
+}
+
+// TestModelScanPropagatesTruncated covers the truncation-visibility fix: the
+// sidecar's "truncated" flag (set when it scanned only a DLP_MAX_CHARS
+// prefix) must reach the caller instead of being silently dropped, so a
+// partial scan isn't reported as a clean one.
+func TestModelScanPropagatesTruncated(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"findings":[],"truncated":true}`))
+	}))
+	defer srv.Close()
+
+	_, truncated, err := ModelScan(context.Background(), srv.Client(), srv.URL, 0.5, "text")
+	if err != nil {
+		t.Fatalf("ModelScan: %v", err)
+	}
+	if !truncated {
+		t.Error("want truncated=true propagated from the sidecar response")
+	}
+}
+
 func TestModelScanHTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer srv.Close()
-	if _, err := ModelScan(context.Background(), srv.Client(), srv.URL, 0.5, "hi"); err == nil {
+	if _, _, err := ModelScan(context.Background(), srv.Client(), srv.URL, 0.5, "hi"); err == nil {
 		t.Fatal("expected an error on a 5xx sidecar response")
 	}
 }
@@ -75,7 +169,7 @@ func TestModelScanDrainsBodyOnNonSuccessStatus(t *testing.T) {
 
 	hc := srv.Client()
 	for i := 0; i < 3; i++ {
-		if _, err := ModelScan(context.Background(), hc, srv.URL, 0.5, "text"); err == nil {
+		if _, _, err := ModelScan(context.Background(), hc, srv.URL, 0.5, "text"); err == nil {
 			t.Fatal("expected an error for the 500 response")
 		}
 	}

@@ -10,7 +10,9 @@ AirLLM {{ .Chart.AppVersion }} installed as release "{{ .Release.Name }}" in nam
 
 {{- if .Values.dlpBert.enabled }}
 
-2. Wire the DLP BERT sidecar pool (Admin -> DLP in the console):
+2. DLP BERT sidecar pool — seeded automatically on first boot (Admin -> DLP
+   in the console shows/overrides these; an operator save always wins over
+   this chart's values on every later deploy):
    Sidecar URL:                   http://{{ include "airllm.dlpBertServiceName" . }}:{{ .Values.dlpBert.service.port }}
    Max concurrent scans/endpoint: {{ .Values.dlpBert.modelMaxConcurrency }}
 {{- if eq .Values.dlpBert.autoscaling.kind "keda" }}
