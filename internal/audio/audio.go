@@ -4,6 +4,8 @@
 // binary-out, so it gets its own types rather than extending llm's.
 package audio
 
+import "io"
+
 // TranscriptionRequest is a provider-neutral request to transcribe audio to text.
 type TranscriptionRequest struct {
 	Model    string
@@ -69,9 +71,29 @@ type SpeechRequest struct {
 	// voices whose names do not.
 	Language       string
 	ResponseFormat string // mp3/wav/opus/...; provider default if empty
+	// SendLanguage is the language an OpenAI-compatible upstream is sent
+	// as "language" (see the send_language target option): the request's
+	// language, else the one the requested voice's name carries. Empty, the
+	// default, sends no such field.
+	SendLanguage string
+	// Placeholder, for /v1/video/speech only: false asks the talking face
+	// for no placeholder before the speech (a player with its own idle
+	// clips); nil sends nothing and the upstream's default applies.
+	Placeholder *bool
+	// Idle, for /v1/video/speech only: the name of an idle clip ("still",
+	// "blink", ...) or "poster"; the talking face answers that clip of the
+	// request's avatar instead of speech. Empty sends nothing.
+	Idle string
 }
 
 // SpeechResponse is synthesized audio.
+// SpeechStream is a synthesis whose audio is read as the upstream sends it
+// (see providers.SpeechStreamer). The caller closes Body.
+type SpeechStream struct {
+	Body        io.ReadCloser
+	ContentType string
+}
+
 type SpeechResponse struct {
 	Audio       []byte
 	ContentType string // e.g. "audio/mpeg", from the upstream response

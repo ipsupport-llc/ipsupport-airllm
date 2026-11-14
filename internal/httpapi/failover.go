@@ -227,6 +227,9 @@ const (
 	cacheHit   cacheOutcome = "hit"
 	cacheMiss  cacheOutcome = "miss"
 	cacheError cacheOutcome = "error" // the cache could not be read; a provider answered
+	// cacheSkipped is internal to runSynthesizeTo: a streamed miss too long
+	// to keep. It is reported as a miss and nothing is stored.
+	cacheSkipped cacheOutcome = "skipped"
 )
 
 // attemptCall makes one upstream call to target t through provider p. commit
