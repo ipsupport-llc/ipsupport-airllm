@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 )
 
 // model layer: the gateway calls an external BERT-NER sidecar over HTTP for
@@ -43,7 +44,10 @@ func ModelScan(ctx context.Context, hc *http.Client, baseURL string, minScore fl
 	if err != nil {
 		return nil, false, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+"/scan", bytes.NewReader(body))
+	// Tolerate a configured URL that already ends in /scan: before the pool
+	// preserved URL paths, such a URL worked (its path was dropped).
+	endpoint := strings.TrimSuffix(strings.TrimRight(baseURL, "/"), "/scan") + "/scan"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, false, err
 	}
@@ -68,8 +72,11 @@ func ModelScan(ctx context.Context, hc *http.Client, baseURL string, minScore fl
 		return nil, false, err
 	}
 	out := make([]Finding, 0, len(mr.Findings))
+	runes := utf8.RuneCountInString(text)
 	for _, f := range mr.Findings {
-		if f.Score < minScore || f.Start < 0 || f.End <= f.Start {
+		// Out-of-range spans are dropped, not clamped: clamping a bogus end
+		// to len(text) would redact the whole rest of the message.
+		if f.Score < minScore || f.Start < 0 || f.End <= f.Start || f.End > runes {
 			continue
 		}
 		// The sidecar's start/end are Python string indices — Unicode

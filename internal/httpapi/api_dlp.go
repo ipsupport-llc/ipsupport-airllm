@@ -33,7 +33,7 @@ func (s *Server) handleAdminDLPPatterns(w http.ResponseWriter, _ *http.Request) 
 		info{"person_name", "pii", false, true},
 		info{"address", "pii", false, true},
 		info{"organization", "pii", false, true},
-		info{"other", "pii", false, true}, // catch-all for unmapped model labels (e.g. CoNLL's MISC)
+		info{"other", "pii", true, true}, // catch-all for unmapped model labels (e.g. CoNLL's MISC)
 	)
 	writeJSON(w, http.StatusOK, map[string]any{"patterns": out})
 }

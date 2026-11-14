@@ -42,12 +42,17 @@ spec:
         # the raw metrics by hand. reason!="truncated" excludes scans that
         # DID succeed (and were already counted in the duration histogram)
         # but only covered a prefix of the input — that's not a failure.
+        # The namespace/service labels come from scraping through this chart's
+        # ServiceMonitor (service = the gateway Service); scoping on service
+        # keeps two releases in one namespace from averaging each other out.
+        # Scraped any other way, these selectors match nothing and the alert
+        # can never fire — adjust them to your scrape labels.
         - alert: AirLLMDLPModelDegraded
           expr: >-
-            sum(rate(airllm_dlp_model_duration_seconds_count{namespace="{{ .Release.Namespace }}"}[15m]))
+            sum by (namespace, service) (rate(airllm_dlp_model_duration_seconds_count{namespace="{{ .Release.Namespace }}", service="{{ include "airllm.fullname" . }}"}[15m]))
             /
-            (sum(rate(airllm_dlp_model_duration_seconds_count{namespace="{{ .Release.Namespace }}"}[15m]))
-             + sum(rate(airllm_dlp_model_skipped_total{namespace="{{ .Release.Namespace }}", reason!="truncated"}[15m])))
+            (sum by (namespace, service) (rate(airllm_dlp_model_duration_seconds_count{namespace="{{ .Release.Namespace }}", service="{{ include "airllm.fullname" . }}"}[15m]))
+             + sum by (namespace, service) (rate(airllm_dlp_model_skipped_total{namespace="{{ .Release.Namespace }}", service="{{ include "airllm.fullname" . }}", reason!="truncated"}[15m])))
             < 0.9
           for: 15m
           {{- with .Values.metrics.prometheusRule.alertLabels }}

@@ -129,10 +129,17 @@ func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 		s.regPtr.Store(providers.NewRegistry()) // filled by ReloadProviders
 	}
 	s.loadDLP(context.Background())
+	// StrictErrors: with k8s search domains (ndots:5) a SERVFAIL on the real
+	// Service name would otherwise fall through to later search candidates,
+	// and the last one's NXDOMAIN would be reported — which modelpool treats
+	// as "no backing pods" and drops every endpoint over a transient blip.
+	modelResolver := &net.Resolver{StrictErrors: true}
 	s.modelPool = modelpool.New(func() ([]string, int) {
 		c := s.dlpCfg()
 		return c.effectiveModelURLs(), c.ModelMaxConcurrency
-	}, net.LookupHost)
+	}, func(host string) ([]string, error) {
+		return modelResolver.LookupHost(context.Background(), host)
+	})
 	s.metrics.RegisterModelInflight(func() float64 { return float64(s.modelPool.Inflight()) })
 	s.metrics.RegisterModelEndpoints(func() float64 { return float64(s.modelPool.Size()) })
 	s.loadCapture(context.Background())

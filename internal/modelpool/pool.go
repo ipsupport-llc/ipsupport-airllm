@@ -216,13 +216,14 @@ func (p *Pool) Resolve() {
 // pick returns an acquired endpoint using round-robin, or false if all are at
 // capacity. The caller MUST release the returned endpoint.
 func (p *Pool) pick() (*endpoint, bool) {
-	return p.pickExcluding(nil)
+	return p.pickExcluding("")
 }
 
-// pickExcluding is pick, skipping skip (used for Scan's one-shot retry so a
-// retry never lands back on the endpoint that just failed). A nil skip
-// behaves exactly like pick.
-func (p *Pool) pickExcluding(skip *endpoint) (*endpoint, bool) {
+// pickExcluding is pick, skipping the endpoint with baseURL skip (used for
+// Scan's one-shot retry so it never lands back on the endpoint that just
+// failed — compared by URL, since a Resolve in between may have rebuilt the
+// endpoint objects). An empty skip behaves exactly like pick.
+func (p *Pool) pickExcluding(skip string) (*endpoint, bool) {
 	eps := p.load()
 	n := len(eps)
 	if n == 0 {
@@ -231,7 +232,7 @@ func (p *Pool) pickExcluding(skip *endpoint) (*endpoint, bool) {
 	start := int(p.rr.Add(1) % uint64(n))
 	for i := 0; i < n; i++ {
 		e := eps[(start+i)%n]
-		if e == skip {
+		if skip != "" && e.baseURL == skip {
 			continue
 		}
 		if e.acquire() {
@@ -249,12 +250,12 @@ func (p *Pool) pickExcluding(skip *endpoint) (*endpoint, bool) {
 // when err is nil) reports whether the sidecar scanned only a prefix of
 // content — see dlp.ModelScan.
 //
-// A scan error gets one retry against a different endpoint (if one exists and
-// the caller's context isn't already done) before failing open. Without this,
-// one bad pod (OOMing, crash-looping, wrong model loaded) permanently eats its
-// round-robin share of every scan — with N endpoints, 1/N of all requests
-// silently lose BERT coverage, indistinguishable from a healthy occasional
-// error.
+// A transport error (the endpoint could not be reached or dropped the
+// connection) gets one retry against a different endpoint, if one is free and
+// the caller's context isn't done. Without it, one dead pod permanently eats
+// its round-robin share of every scan. HTTP status and decode errors are not
+// retried: the pod answered, so the failure is likely input- or fleet-wide,
+// and replaying it would double load on a sidecar that's already struggling.
 func (p *Pool) Scan(ctx context.Context, hc *http.Client, content string, minScore float64) (findings []dlp.Finding, truncated bool, err error) {
 	if !p.resolved.Load() {
 		p.lazyResolve.Do(p.Resolve)
@@ -268,8 +269,9 @@ func (p *Pool) Scan(ctx context.Context, hc *http.Client, content string, minSco
 	}
 	findings, truncated, err = dlp.ModelScan(ctx, hc, e.baseURL, minScore, content)
 	e.release()
-	if err != nil && ctx.Err() == nil {
-		if e2, ok := p.pickExcluding(e); ok {
+	var transportErr *url.Error
+	if err != nil && ctx.Err() == nil && errors.As(err, &transportErr) {
+		if e2, ok := p.pickExcluding(e.baseURL); ok {
 			findings, truncated, err = dlp.ModelScan(ctx, hc, e2.baseURL, minScore, content)
 			e2.release()
 		}

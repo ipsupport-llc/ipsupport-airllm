@@ -197,18 +197,36 @@ func TestScanHappyPathAndInflightReleased(t *testing.T) {
 	}
 }
 
-func TestScanRetriesOnDifferentEndpointAfterError(t *testing.T) {
-	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
+// countingServer serves body (or status, when non-zero) and counts hits.
+func countingServer(t *testing.T, status int, body string) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if status != 0 {
+			w.WriteHeader(status)
+			return
+		}
+		w.Write([]byte(body))
 	}))
-	defer bad.Close()
-	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"findings":[{"label":"PER","start":0,"end":3,"score":0.9}]}`))
-	}))
-	defer good.Close()
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
 
-	// Both URLs are IP literals (127.0.0.1) — resolver not exercised.
-	p := New(cfg([]string{good.URL, bad.URL}, 0), func(string) ([]string, error) { return nil, errors.New("no") })
+// deadURL returns the URL of a server that has already been closed, so any
+// request to it fails with a connection error.
+func deadURL() string {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	srv.Close()
+	return srv.URL
+}
+
+// The URL lists below put the endpoint under test second: a fresh pool's
+// first pick lands on index 1 (rr.Add(1) % 2). The hit counters pin that, so
+// a change in pick order fails the test instead of silently skipping the retry.
+func TestScanRetriesTransportErrorOnAnotherEndpoint(t *testing.T) {
+	good, goodHits := countingServer(t, 0, `{"findings":[{"label":"PER","start":0,"end":3,"score":0.9}]}`)
+	p := New(cfg([]string{good.URL, deadURL()}, 0), func(string) ([]string, error) { return nil, errors.New("no") })
 	p.Resolve()
 
 	fs, _, err := p.Scan(context.Background(), http.DefaultClient, "Bob", 0.5)
@@ -217,6 +235,37 @@ func TestScanRetriesOnDifferentEndpointAfterError(t *testing.T) {
 	}
 	if len(fs) != 1 || fs[0].Label != "pii:PER" {
 		t.Fatalf("findings = %+v, want one pii:PER from the good endpoint", fs)
+	}
+	if n := goodHits.Load(); n != 1 {
+		t.Fatalf("good endpoint hits = %d, want 1 (reached only through the retry)", n)
+	}
+	if n := p.Inflight(); n != 0 {
+		t.Fatalf("Inflight = %d after a retried scan, want 0", n)
+	}
+}
+
+func TestScanDoesNotRetryHTTPStatusError(t *testing.T) {
+	good, goodHits := countingServer(t, 0, `{"findings":[]}`)
+	bad, badHits := countingServer(t, http.StatusInternalServerError, "")
+	p := New(cfg([]string{good.URL, bad.URL}, 0), func(string) ([]string, error) { return nil, errors.New("no") })
+	p.Resolve()
+
+	if _, _, err := p.Scan(context.Background(), http.DefaultClient, "Bob", 0.5); err == nil {
+		t.Fatal("Scan err = nil, want the 500 surfaced (no retry on a status error)")
+	}
+	if b, g := badHits.Load(), goodHits.Load(); b != 1 || g != 0 {
+		t.Fatalf("hits bad=%d good=%d, want bad=1 good=0", b, g)
+	}
+}
+
+func TestScanSingleEndpointDoesNotRetryItself(t *testing.T) {
+	p := New(cfg([]string{deadURL()}, 0), func(string) ([]string, error) { return nil, errors.New("no") })
+	p.Resolve()
+	if _, _, err := p.Scan(context.Background(), http.DefaultClient, "Bob", 0.5); err == nil {
+		t.Fatal("Scan err = nil, want the connection error")
+	}
+	if n := p.Inflight(); n != 0 {
+		t.Fatalf("Inflight = %d, want 0", n)
 	}
 }
 

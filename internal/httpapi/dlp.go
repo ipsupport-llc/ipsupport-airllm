@@ -136,9 +136,9 @@ func dlpToggle(enabled map[string]bool, label string, def bool) bool {
 // normalizing the common NER vocabularies (abbreviated and full, any case) so
 // the toggle works whether the sidecar emits PER or PERSON, LOC or LOCATION/GPE,
 // ORG or ORGANIZATION. An unrecognized entity (e.g. CoNLL's MISC, or any label
-// a fine-tuned model adds) falls back to "other" — it still goes through the
-// same opt-in toggle gate as the other three, instead of being unconditionally
-// kept with no way for an operator to turn it off.
+// a fine-tuned model adds) falls back to "other" — on by default (see
+// modelLabelEffective), but an operator can now turn it off, which was
+// impossible while unmapped labels bypassed the toggles entirely.
 func modelToggleLabel(label string) string {
 	switch strings.ToUpper(strings.TrimPrefix(label, "pii:")) {
 	case "PER", "PERSON", "PERS":
@@ -162,7 +162,11 @@ func modelLabelEffective(enabled map[string]bool, toggle string) bool {
 	if enabled == nil {
 		return true
 	}
-	return dlpToggle(enabled, toggle, false)
+	// "other" defaults ON even in a saved map: before it existed, unmapped
+	// labels (MISC) were always kept and the API rejected an "other" key, so
+	// every pre-existing saved map lacks it — defaulting it off would drop
+	// that coverage on upgrade with no operator action.
+	return dlpToggle(enabled, toggle, toggle == "other")
 }
 
 // filterModelFindings drops model PII findings whose toggle is off.
@@ -257,14 +261,19 @@ func validDLPAction(a string) bool {
 // instead of 0.7 (every finding's 0..1 score fails the threshold, so scans
 // "succeed" while finding nothing).
 func validateModelConfig(cfg dlpConfig) error {
+	// A disabled model layer is never used, so its leftover fields must not
+	// block saving an unrelated change (e.g. flipping action).
+	if !cfg.ModelEnabled {
+		return nil
+	}
 	urls := cfg.effectiveModelURLs()
-	if cfg.ModelEnabled && len(urls) == 0 {
+	if len(urls) == 0 {
 		return fmt.Errorf("model_enabled requires model_url or at least one model_urls entry")
 	}
 	for _, raw := range urls {
 		u, err := url.Parse(raw)
-		if err != nil || u.Scheme == "" || u.Host == "" {
-			return fmt.Errorf("model_url %q must be an absolute URL with a scheme and host", raw)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("model_url %q must be an absolute http(s) URL with a host", raw)
 		}
 	}
 	if cfg.ModelMinScore < 0 || cfg.ModelMinScore > 1 {

@@ -215,11 +215,10 @@ gateway will silently fail open (layer 2 off) until you catch it.
 
 **Any label vocabulary change (new model, new fine-tune) requires an update
 to `modelToggleLabel` in `internal/httpapi/dlp.go`.** Unmapped labels fall
-back to the catch-all `"other"` toggle (opt-in like the rest, default off
-once any patterns map is saved) — they are never silently always-on, but
-they also won't be covered by the `person_name`/`address`/`organization`
-toggles an operator expects. Map your new labels explicitly before relying
-on per-entity console toggles.
+back to the catch-all `"other"` toggle (on by default) — an operator can
+switch them all off together, but they won't be covered by the
+`person_name`/`address`/`organization` toggles an operator expects. Map your
+new labels explicitly before relying on per-entity console toggles.
 
 ---
 

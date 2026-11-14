@@ -250,6 +250,23 @@ func TestHandleAdminPutDLPRejectsMalformedModelURL(t *testing.T) {
 	}
 }
 
+func TestValidateModelConfig(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  dlpConfig
+		ok   bool
+	}{
+		{"non-http scheme", dlpConfig{ModelEnabled: true, ModelURL: "ftp://dlp-bert:8000"}, false},
+		{"https", dlpConfig{ModelEnabled: true, ModelURL: "https://dlp-bert:8000"}, true},
+		{"disabled layer ignores stale fields", dlpConfig{ModelEnabled: false, ModelURL: "bogus", ModelMinScore: 70}, true},
+	}
+	for _, c := range cases {
+		if err := validateModelConfig(c.cfg); (err == nil) != c.ok {
+			t.Errorf("%s: err = %v, want ok=%v", c.name, err, c.ok)
+		}
+	}
+}
+
 func TestHandleAdminPutDLPAcceptsValidModelConfig(t *testing.T) {
 	pool := testPool(t)
 	s := &Server{st: &store.Store{PG: pool}, auditHook: func(context.Context, string, string, string, any) {}}
@@ -275,16 +292,17 @@ func TestFilterModelFindings(t *testing.T) {
 	if got := filterModelFindings(append([]dlp.Finding(nil), in...), nil); len(got) != 4 {
 		t.Fatalf("nil toggles must keep all model findings, got %d", len(got))
 	}
-	// Only person_name enabled => only pii:PER survives; MISC (-> "other") is
-	// not left unconditionally on just because it has no explicit mapping.
+	// Only person_name set in a saved map: PER survives, LOC/ORG stay opt-in
+	// (off), and MISC (-> "other") stays on — a map saved before "other"
+	// existed must not lose MISC coverage on upgrade.
 	got := filterModelFindings(append([]dlp.Finding(nil), in...), map[string]bool{"person_name": true})
+	if len(got) != 2 || got[0].Label != "pii:PER" || got[1].Label != "pii:MISC" {
+		t.Fatalf("expected pii:PER and pii:MISC, got %+v", got)
+	}
+	// Explicitly disabling "other" drops MISC.
+	got = filterModelFindings(append([]dlp.Finding(nil), in...), map[string]bool{"person_name": true, "other": false})
 	if len(got) != 1 || got[0].Label != "pii:PER" {
 		t.Fatalf("expected only pii:PER, got %+v", got)
-	}
-	// Explicitly enabling "other" lets MISC through alongside person_name.
-	got = filterModelFindings(append([]dlp.Finding(nil), in...), map[string]bool{"person_name": true, "other": true})
-	if len(got) != 2 {
-		t.Fatalf("expected pii:PER and pii:MISC, got %+v", got)
 	}
 }
 

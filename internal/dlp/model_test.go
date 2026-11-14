@@ -82,6 +82,35 @@ func TestRuneOffsetToByteOffsetClampsPastEnd(t *testing.T) {
 	}
 }
 
+func TestModelScanDropsOutOfRangeSpan(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"findings":[{"label":"PER","start":0,"end":999,"score":0.99}]}`))
+	}))
+	defer srv.Close()
+
+	fs, _, err := ModelScan(context.Background(), srv.Client(), srv.URL, 0.5, "héllo")
+	if err != nil {
+		t.Fatalf("ModelScan: %v", err)
+	}
+	if len(fs) != 0 {
+		t.Fatalf("findings = %+v, want the past-end span dropped (not clamped to the whole message)", fs)
+	}
+}
+
+func TestModelScanToleratesURLEndingInScan(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/scan" {
+			t.Errorf("path = %q, want /scan", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"findings":[]}`))
+	}))
+	defer srv.Close()
+
+	if _, _, err := ModelScan(context.Background(), srv.Client(), srv.URL+"/scan/", 0.5, "x"); err != nil {
+		t.Fatalf("ModelScan: %v", err)
+	}
+}
+
 // TestModelScanPropagatesTruncated covers the truncation-visibility fix: the
 // sidecar's "truncated" flag (set when it scanned only a DLP_MAX_CHARS
 // prefix) must reach the caller instead of being silently dropped, so a

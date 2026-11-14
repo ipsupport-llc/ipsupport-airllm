@@ -122,15 +122,17 @@ dlpBert:
     pullPolicy: IfNotPresent
   service:
     # The gateway's modelpool fans out to one endpoint PER POD by resolving
-    # this Service's hostname via DNS (net.LookupHost) — that only returns
-    # one A record per backing pod when the Service is headless. A
-    # non-headless (ClusterIP) Service resolves to a single virtual IP
-    # regardless of replicaCount, collapsing the pool to one endpoint and
-    # silently defeating per-pod scan concurrency limiting (modelMaxConcurrency)
-    # the moment this scales above 1 replica. Default true for that reason;
-    # set false only if you have a specific reason to route through
-    # kube-proxy's load balancing instead.
-    headless: true
+    # this Service's hostname via DNS — that only returns one A record per
+    # backing pod when the Service is headless. A ClusterIP Service resolves
+    # to a single virtual IP regardless of replica count, collapsing the pool
+    # to one endpoint, so modelMaxConcurrency then caps the WHOLE sidecar
+    # fleet instead of each pod. Set true for any install that runs (or
+    # autoscales to) more than one dlp-bert replica.
+    # Kept false by default only because a Service's clusterIP is immutable:
+    # flipping an existing install to true makes `helm upgrade` fail until the
+    # old Service is deleted (kubectl delete svc <release>-dlp-bert, then
+    # upgrade). Fresh installs can set it from the start.
+    headless: false
     port: 8000
   replicaCount: 1                               # used only when autoscaling.kind=none
   modelMaxConcurrency: 4                        # seeded into the DB-backed DLP config on first boot (see internal/seed.EnsureDLPDefaults); an operator save in the console always wins afterward
@@ -160,7 +162,9 @@ dlpBert:
       # AirLLM install, add a label selector (e.g. namespace="...", or
       # whatever your ServiceMonitor/scrape relabeling attaches) so one
       # installation's skip rate can't wake — or keep awake — another's pool.
-      query: sum(rate(airllm_dlp_model_skipped_total[2m]))
+      # reason="truncated" is excluded: it counts scans that succeeded on an
+      # over-long message, which more replicas cannot fix.
+      query: sum(rate(airllm_dlp_model_skipped_total{reason!="truncated"}[2m]))
       threshold: "1"                            # add replicas when the query exceeds this
       activationThreshold: "0"                  # query must exceed this to scale 0->1 (keep 0 so any demand wakes it)
       pollingInterval: 30
