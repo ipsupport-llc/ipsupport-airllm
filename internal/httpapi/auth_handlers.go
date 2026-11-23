@@ -12,17 +12,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeControlError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	if s.loginLimiter.Locked(r.Context(), body.Username) {
+	ip := clientIP(r)
+	if s.loginLimiter.Locked(r.Context(), body.Username, ip) {
 		writeControlError(w, http.StatusTooManyRequests, "too many failed login attempts; try again later")
 		return
 	}
 	p, ok := s.login.Login(body.Username, body.Password)
 	if !ok {
-		s.loginLimiter.RecordFailure(r.Context(), body.Username)
+		s.loginLimiter.RecordFailure(r.Context(), body.Username, ip)
 		writeControlError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
-	s.loginLimiter.RecordSuccess(r.Context(), body.Username)
+	s.loginLimiter.RecordSuccess(r.Context(), body.Username, ip)
 	s.login.SetSession(w, r, p)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"subject":  p.Subject,

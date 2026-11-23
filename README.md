@@ -70,13 +70,18 @@ All ports bind to **127.0.0.1 only** (intentional — never expose an
 unauthenticated service or an auth-less datastore). Then:
 
 ```sh
-# 1. get the generated admin password
-docker compose -f deploy/docker-compose.yml logs app | grep "mock login credential"
+# 1. get the generated admin password (written on the first boot only, never logged)
+docker compose -f deploy/docker-compose.yml exec app cat /tmp/airllm-bootstrap-admin-password
 # 2. open http://127.0.0.1:8080, sign in as admin, create an API key, then:
 curl http://127.0.0.1:8080/v1/chat/completions \
   -H "Authorization: Bearer <your-token>" \
   -d '{"model":"mock-gpt","messages":[{"role":"user","content":"hello"}]}'
 ```
+
+The file lives in the container's `/tmp`, so it is gone once the container is
+recreated, while the admin (in the `pgdata` volume) stays. Read it right after
+the first `compose-up`, or set `AIRLLM_ADMIN_PASSWORD` up front; start over with
+`make compose-down && make compose-up`.
 
 Full walkthrough: [docs/getting-started.md](docs/getting-started.md).
 
@@ -129,7 +134,8 @@ make run        # run against local DATABASE_URL / REDIS_URL
 | `DATABASE_URL` | — (required) | Postgres DSN |
 | `HTTP_ADDR` | `:8080` | listen address |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis URL |
-| `ENV` | `dev` | `dev` \| `prod`; API-key tag; dev seeds mock data |
+| `ENV` | `dev` | `dev` \| `prod`; API-key tag |
+| `SEED_DEV` | `0` | `1` seeds demo users + a well-known API key (needs `ENV=dev`, local auth; dev compose only) |
 | `AUTH_MODE` | `mock` | `mock` (password login) \| `oidc` (deploy) |
 | `AIRLLM_MASTER_KEY` | — | base64 32-byte AES key; **required in prod**, auto-generated per install in dev |
 | `CAPTURE_BLOB_DIR` | `capture-blobs` | writable dir for capture blobs |

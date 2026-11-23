@@ -6,6 +6,7 @@ metadata:
     {{- include "airllm.labels" . | nindent 4 }}
 data:
   ENV: {{ .Values.config.env | quote }}
+  SEED_DEV: {{ ternary "1" "0" (.Values.config.seedDev | default false) | quote }}
   HTTP_ADDR: {{ .Values.config.httpAddr | quote }}
   AUTH_MODE: {{ .Values.config.authMode | quote }}
   AIRLLM_ADMIN_USERNAME: {{ .Values.config.adminUsername | quote }}

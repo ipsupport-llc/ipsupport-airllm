@@ -9,7 +9,7 @@ import (
 )
 
 // TestDevSeedDoesNotOverwriteOperatorEdits proves a re-seed (every app boot
-// with ENV=dev+AUTH_MODE=local calls Dev unconditionally) does not clobber
+// with SEED_DEV=1 calls Dev unconditionally) does not clobber
 // an operator's later changes to the seeded pricing row or the seeded API
 // key's status (Store/config I4 fix) — both used to be a DO UPDATE that ran
 // on every boot, silently reverting a revoked dev key back to active or a

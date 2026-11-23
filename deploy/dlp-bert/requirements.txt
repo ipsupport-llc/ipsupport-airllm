@@ -1,0 +1,5 @@
+# Serving deps for the BERT-NER sidecar, pinned for reproducible builds.
+# torch is installed separately from the CPU-only index (see Dockerfile).
+fastapi==0.139.0
+uvicorn[standard]==0.51.0
+transformers==5.13.1

@@ -37,6 +37,9 @@ services:
       REDIS_URL: "redis://redis:6379/0"
       ENV: "dev"
       AUTH_MODE: "mock"
+      # Seed demo users (password devpass123) and the well-known demo API
+      # key. Local dev only; never set this on a reachable deployment.
+      SEED_DEV: "1"
       # Writable path for capture blobs (the app runs as a non-root user).
       # Ephemeral here; back it with a volume / object store on deploy.
       CAPTURE_BLOB_DIR: "/tmp/airllm-captures"
@@ -70,8 +73,10 @@ services:
     build:
       context: ./dlp-bert
     profiles: ["bert"]
+    # A host port range, so `--scale dlp-bert=N` (N <= 10) gives each replica
+    # its own loopback port instead of colliding on 8000.
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:8000-8009:8000"
 
   # Observability stack. Opt-in: `--profile metrics`.
   # Prometheus scrapes the app's /metrics endpoint; Grafana serves the

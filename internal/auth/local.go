@@ -24,7 +24,7 @@ func (l *LocalAuth) Login(username, password string) (Principal, bool) {
 	if u.Disabled || !pwOK {
 		return Principal{}, false
 	}
-	return Principal{Subject: u.Subject, Email: u.Email, Roles: u.Roles}, true
+	return Principal{Subject: u.Subject, Email: u.Email, Roles: u.Roles, UserID: u.ID}, true
 }
 
 // Compile-time interface checks: the embedded *Session promotes

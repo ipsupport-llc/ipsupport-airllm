@@ -17,7 +17,8 @@ Read by `internal/config` at startup. Invalid values fail fast.
 | `DATABASE_URL` | — | **yes** | Postgres DSN, e.g. `postgres://airllm:airllm@host:5432/airllm?sslmode=disable` |
 | `HTTP_ADDR` | `:8080` | no | Listen address. In compose this stays `:8080` inside the container; the host binding is controlled by `APP_BIND`. |
 | `REDIS_URL` | `redis://localhost:6379/0` | no | Redis URL for rolling usage counters |
-| `ENV` | `dev` | no | `dev` or `prod`. Used as the API-key environment tag (`air_<env>_…`). `dev` seeds mock data and a fixed demo key. |
+| `ENV` | `dev` | no | `dev` or `prod`. Used as the API-key environment tag (`air_<env>_…`). `dev` alone seeds nothing (see `SEED_DEV`). |
+| `SEED_DEV` | `0` | no | `1` seeds the local demo data: `operator`/`dev-auditor`/`dev-admin` users with the fixed password `devpass123`, the mock provider, and the well-known API key `air_dev_demo…`. Only accepted with `ENV=dev` and `AUTH_MODE=local`; startup fails otherwise. Never set it on a reachable deployment. The dev compose stack sets it. |
 | `AUTH_MODE` | `local` | no | `local` (DB-backed username/password) or `oidc` (generic OpenID Connect). `mock` is a **deprecated alias** for `local` — existing configs keep working but a deprecation warning is logged at startup. |
 | `AIRLLM_SESSION_KEY` | — | no | Base64-encoded **32-byte** HMAC session signing key. Optional: if unset, the key is derived deterministically from `AIRLLM_MASTER_KEY` via HKDF-SHA256 (`info="airllm-session-v1"`), so sessions survive restarts and work across replicas with no extra secret to manage. Never logged. |
 | `AIRLLM_ADMIN_USERNAME` | `admin` | no | Username for the bootstrap admin account created on first run. |
@@ -43,7 +44,7 @@ Read by `internal/config` at startup. Invalid values fail fast.
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `OIDC_ISSUER` | — | **required** | Issuer URL; discovery document fetched from `<issuer>/.well-known/openid-configuration`. Placeholder: `https://idp.example.com`. |
+| `OIDC_ISSUER` | — | **required** | Issuer URL; discovery document fetched from `<issuer>/.well-known/openid-configuration`. Placeholder: `https://idp.example.com`. Must be `https://`; plain `http://` is only accepted for `localhost`/`127.0.0.1` with `ENV=dev`. |
 | `OIDC_CLIENT_ID` | — | **required** | Relying-party client ID. Placeholder: `CHANGE_ME`. |
 | `OIDC_CLIENT_SECRET` | — | **required** | Relying-party client secret. Placeholder: `CHANGE_ME`. |
 | `OIDC_REDIRECT_URL` | — | **required** | Callback URL registered with the IdP, e.g. `https://airllm.example.com/auth/callback`. |
