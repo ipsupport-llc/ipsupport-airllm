@@ -25,6 +25,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/pricing"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/testdb"
 )
 
 // These are the seam tests for the API-key and alias lookup cache. Requests go
@@ -159,12 +160,12 @@ type cacheFixture struct {
 
 func newCacheFixture(t *testing.T, principal *auth.Principal) *cacheFixture {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_URL")
 	rurl := os.Getenv("TEST_REDIS_URL")
-	if dsn == "" || rurl == "" {
-		t.Skip("TEST_DATABASE_URL and TEST_REDIS_URL not set; skipping lookup cache test")
+	if rurl == "" {
+		t.Skip("TEST_REDIS_URL not set; skipping lookup cache test")
 	}
 	direct := testPool(t)
+	dsn := testdb.DSN(t, testMigrate)
 	ctx := context.Background()
 
 	u, err := url.Parse(dsn)

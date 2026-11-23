@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/config"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 )
 
@@ -154,7 +155,7 @@ func TestPutProviderSerializesConcurrentSaves(t *testing.T) {
 		t.Fatalf("held tx update: %v", err)
 	}
 
-	s := &Server{st: &store.Store{PG: pool}, sealer: sl}
+	s := &Server{st: &store.Store{PG: pool}, sealer: sl, cfg: &config.Config{}}
 
 	done := make(chan struct{})
 	go func() {

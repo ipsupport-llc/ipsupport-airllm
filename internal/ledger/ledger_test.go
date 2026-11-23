@@ -2,10 +2,10 @@ package ledger
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/testdb"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
@@ -54,16 +54,9 @@ func TestRecordAfterStopIsSafeNoOp(t *testing.T) {
 
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL not set; skipping ledger integration test")
-	}
-	pool, err := pgxpool.New(context.Background(), dsn)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return testdb.Pool(t, func(ctx context.Context, p *pgxpool.Pool) error {
+		return (&store.Store{PG: p}).Migrate(ctx)
+	})
 }
 
 // TestStopDrainsBufferedEntries proves the actual async pipeline end to end:

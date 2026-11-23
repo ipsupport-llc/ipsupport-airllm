@@ -3,26 +3,22 @@ package httpapi
 import (
 	"context"
 	"fmt"
-	"os"
 	"testing"
 
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/testdb"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// testPool connects to TEST_DATABASE_URL or skips. The DB must have the
-// migrations applied (run the dev compose stack: make compose-up).
+func testMigrate(ctx context.Context, p *pgxpool.Pool) error {
+	return (&store.Store{PG: p}).Migrate(ctx)
+}
+
+// testPool connects to this package's private, migrated database under
+// TEST_DATABASE_URL (see internal/testdb) or skips.
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL not set; skipping breakdown integration test")
-	}
-	pool, err := pgxpool.New(context.Background(), dsn)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return testdb.Pool(t, testMigrate)
 }
 
 // TestUsageBreakdownQueries exercises breakdownProviderQuery and
@@ -195,15 +191,18 @@ func TestRecentRequestsQuery(t *testing.T) {
 
 	// Explicit, distinct ts values: both rows would otherwise default to the
 	// same now() inside one transaction, making ORDER BY ts DESC ambiguous.
+	// They sit far in the future so they are the two newest rows whatever
+	// other tests have ledgered (some ledger asynchronously, so a row can
+	// land just before this transaction starts).
 	insert := `INSERT INTO usage_ledger
 		(ts, alias, provider_name, upstream_model, prompt_tokens, completion_tokens, reasoning_tokens, cost_usd, status, latency_ms, error)
-		VALUES (now() - interval '1 second', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
+		VALUES (now() + interval '100 years' - interval '1 second', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
 	if _, err := tx.Exec(ctx, insert, "rr-alias-a", "rr-openai", "gpt-4", 100, 50, 20, 1.00, 200, 120, ""); err != nil {
 		t.Fatalf("insert older row: %v", err)
 	}
 	insertNewer := `INSERT INTO usage_ledger
 		(ts, alias, provider_name, upstream_model, prompt_tokens, completion_tokens, reasoning_tokens, cost_usd, status, latency_ms, error)
-		VALUES (now(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
+		VALUES (now() + interval '100 years', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
 	if _, err := tx.Exec(ctx, insertNewer, "rr-alias-b", "", "", 0, 0, 0, 0, 502, 30, "provider busy"); err != nil {
 		t.Fatalf("insert failed row: %v", err)
 	}

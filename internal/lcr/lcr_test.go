@@ -2,6 +2,7 @@ package lcr
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -37,7 +38,7 @@ func TestRecordThenSnapshotEWMA(t *testing.T) {
 
 	clk := newFakeClock()
 	s := New(rdb).WithClock(clk.Now)
-	k := Key{Provider: "lcr-test", UpstreamModel: "m"}
+	k := Key{Provider: fmt.Sprintf("lcr-test-%d", time.Now().UnixNano()), UpstreamModel: "m"}
 	t.Cleanup(func() { _ = rdb.Del(context.Background(), k.redisKey()).Err() })
 
 	s.Record(context.Background(), k, false) // one failure from cold start (1.0)
@@ -55,7 +56,7 @@ func TestRecoveryTTLResetsToColdStart(t *testing.T) {
 	rdb := redis.NewClient(opt)
 	t.Cleanup(func() { _ = rdb.Close() })
 
-	k := Key{Provider: "lcr-ttl-test", UpstreamModel: "m"}
+	k := Key{Provider: fmt.Sprintf("lcr-ttl-test-%d", time.Now().UnixNano()), UpstreamModel: "m"}
 	t.Cleanup(func() { _ = rdb.Del(context.Background(), k.redisKey()).Err() })
 	s := New(rdb)
 	s.Record(context.Background(), k, false)

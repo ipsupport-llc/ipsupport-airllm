@@ -127,10 +127,22 @@ func TestUpdateUserOmittedFieldsKeepStoredValue(t *testing.T) {
 	s := &Server{st: &store.Store{PG: pool}}
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 
+	// The handler only accepts roles that exist in roles_policy; the demo
+	// airllm_user role is dev-seed-only, so the test brings its own.
+	role := "i3-role-" + suffix
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO roles_policy (role, allowed_models, allow_passthrough, limits)
+		VALUES ($1, '{}', false, '{}'::jsonb)`, role); err != nil {
+		t.Fatalf("seed role: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM roles_policy WHERE role = $1`, role)
+	})
+
 	var id string
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO users (subject, email, roles, disabled) VALUES ($1, $2, $3, true) RETURNING id::text`,
-		"i3-test-"+suffix, "old@example.com", []string{auth.UserRole},
+		"i3-test-"+suffix, "old@example.com", []string{role},
 	).Scan(&id); err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
@@ -143,7 +155,7 @@ func TestUpdateUserOmittedFieldsKeepStoredValue(t *testing.T) {
 	// of the bug from the unrelated NOT-NULL crash a nil roles slice would
 	// otherwise hit on the pre-fix code (a real, separate rough edge, not
 	// this finding's "silently re-enables" symptom).
-	body := `{"email":"new@example.com","roles":["` + auth.UserRole + `"]}`
+	body := `{"email":"new@example.com","roles":["` + role + `"]}`
 	req := httptest.NewRequest(http.MethodPut, "/api/admin/users/"+id, strings.NewReader(body))
 	req.SetPathValue("id", id)
 	rec := httptest.NewRecorder()
@@ -162,8 +174,8 @@ func TestUpdateUserOmittedFieldsKeepStoredValue(t *testing.T) {
 	if gotEmail != "new@example.com" {
 		t.Errorf("email = %q, want new@example.com", gotEmail)
 	}
-	if len(gotRoles) != 1 || gotRoles[0] != auth.UserRole {
-		t.Errorf("roles = %v, want unchanged [%s] — omitted roles must not be wiped", gotRoles, auth.UserRole)
+	if len(gotRoles) != 1 || gotRoles[0] != role {
+		t.Errorf("roles = %v, want unchanged [%s] — omitted roles must not be wiped", gotRoles, role)
 	}
 	if !gotDisabled {
 		t.Error("disabled = false, want unchanged true — omitting disabled must not silently re-enable a disabled account")
