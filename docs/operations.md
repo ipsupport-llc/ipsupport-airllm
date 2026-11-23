@@ -31,6 +31,35 @@ automatically on boot**, in lexicographic order, inside `store.Migrate`. To add
 one, drop a new `NNNN_name.sql` file with the next number; do not edit applied
 migrations. A clean re-bootstrap is `make compose-down && make compose-up`.
 
+### Upgrading to this release
+
+- **`config.env` now defaults to `prod`** (it was `dev`). A release that never
+  set it switches to prod on upgrade: the `master-key` Secret key must hold a
+  real key. An install that ran with an empty `master-key` used a random dev key
+  stored in the database; a new master key cannot decrypt provider credentials
+  or capture bodies sealed with it — either keep `config.env=dev` or re-enter
+  the provider credentials after switching.
+- **Demo data is no longer seeded on `ENV=dev`**; it needs `SEED_DEV=1`. On every
+  boot without it, the gateway revokes the well-known demo API key if it is still
+  active and disables `dev-admin`, `dev-auditor` and `operator` while their
+  password is still the demo one, logging a `WARN` for each. If `dev-admin` was
+  the only admin, a new bootstrap admin is created (see the README for its
+  password).
+- **Everyone signs in once more.** Session cookies now carry the user id;
+  cookies issued by older releases have none and get `401`.
+- **dlp-bert:** the chart now runs the sidecar as uid 10001 with a read-only root
+  filesystem, which needs the dlp-bert image from the same release (older images
+  run as root and keep the model under `/root`). Keep the chart and
+  `dlpBert.image.tag`/`digest` in step.
+- **`dlpBert.service.port`** now also moves the sidecar's listen port. Changing
+  it on an existing release does not update the DLP model URL already stored in
+  the database (the chart value only seeds it on first boot) — edit the Sidecar
+  URL under **Admin → DLP** as well.
+- **`TRUSTED_PROXY_CIDRS`** is new; the default keeps the previous behavior.
+  See [Security posture → Login lockout](#security-posture) for when to set it.
+- **`OIDC_ISSUER` must be https.** An existing internal plain-http issuer needs
+  `OIDC_ALLOW_HTTP_ISSUER=1` (`config.oidc.allowHttpIssuer` in the chart).
+
 ### Upgrades and long migrations
 
 Pending migrations run **before** the HTTP listener starts (each file in its
@@ -108,9 +137,20 @@ progress, so a single migration that needs longer never completes. Before an upg
   into either pod.
 - **Login lockout.** Ten failed password logins for one username from one client
   IP lock that pair out for 15 minutes (a correct password clears it). The
-  client IP comes from `X-Forwarded-For` only when the TCP peer is a private or
-  loopback address (a reverse proxy), using the rightmost public entry; a
-  directly connected client's header is ignored.
+  client IP (also shown in the live view) comes from `X-Forwarded-For` only
+  when the TCP peer is inside `TRUSTED_PROXY_CIDRS` (default: every loopback,
+  private and link-local range); walking the header from the right, the first
+  entry outside those ranges is the client. A peer outside them is the client,
+  whatever its header says.
+
+  Caveats of the default: anything that reaches the gateway from a private
+  address is believed when it sends `X-Forwarded-For` — another workload in the
+  cluster can claim any client IP, and so can anyone behind a source-NATing L4
+  load balancer that hands the gateway a private peer address. Conversely, when
+  the proxies' own address range is not private, every client looks like the
+  proxy and shares one lockout bucket. Set `TRUSTED_PROXY_CIDRS`
+  (`config.trustedProxyCIDRs` in the chart) to just your ingress controller's
+  pod CIDR (or the Caddy container's network), e.g. `10.42.0.0/16`.
 
 ## Datastores & backups
 
