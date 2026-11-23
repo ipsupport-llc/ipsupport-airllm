@@ -80,6 +80,40 @@ func TestFailEmitsErrorEventWithoutStop(t *testing.T) {
 	}
 }
 
+// TestFailAfterEndIsNoOp: once message_stop went out (or an error event),
+// a late Fail must write nothing — nothing may follow the end of a message.
+func TestFailAfterEndIsNoOp(t *testing.T) {
+	var buf bytes.Buffer
+	sw := NewStreamWriter(&buf, func() {}, "msg_t", "m", 1)
+	for _, c := range []llm.StreamChunk{{Content: "hi"}, {FinishReason: "stop"}} {
+		if err := sw.Chunk(c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sw.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	before := buf.String()
+	if err := sw.Fail("api_error", "late failure"); err != nil {
+		t.Fatal(err)
+	}
+	if buf.String() != before {
+		t.Fatalf("Fail after message_stop wrote more events: %q", strings.TrimPrefix(buf.String(), before))
+	}
+
+	var buf2 bytes.Buffer
+	sw2 := NewStreamWriter(&buf2, func() {}, "msg_t", "m", 1)
+	if err := sw2.Fail("api_error", "first"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sw2.Fail("api_error", "second"); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(buf2.String(), "event: error"); n != 1 {
+		t.Fatalf("want exactly one error event, got %d: %s", n, buf2.String())
+	}
+}
+
 func TestDecodeMapsStopSequencesTopPAndToolError(t *testing.T) {
 	body := `{"model":"m","max_tokens":10,"top_p":0.9,"top_k":40,"stop_sequences":["END"],
 	"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"boom"}]}]}`

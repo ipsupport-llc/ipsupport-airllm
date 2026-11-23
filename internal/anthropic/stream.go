@@ -161,8 +161,12 @@ func (s *StreamWriter) Finish() error {
 // Fail ends a stream that broke after it started with an Anthropic error
 // event, the way the real API reports a failure mid-stream: no
 // message_delta or message_stop follows, so a client cannot take the
-// truncated message for a complete one.
+// truncated message for a complete one. A no-op once the message has ended:
+// nothing may follow message_stop (or an earlier error event).
 func (s *StreamWriter) Fail(errType, message string) error {
+	if s.ended {
+		return nil
+	}
 	s.ended = true
 	return s.event("error", map[string]any{
 		"type":  "error",
