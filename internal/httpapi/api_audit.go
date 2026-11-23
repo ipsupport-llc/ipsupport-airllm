@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -111,15 +112,24 @@ func (s *Server) handleAuditGetCapture(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch and decrypt the body from the blob store.
+	// Fetch and decrypt the body from the blob store. A body that cannot be
+	// read or opened is an error, not an empty transcript: answering 200
+	// with "" would tell the auditor the capture was empty.
 	var body string
 	if s.blobStore != nil && row.BlobKey != "" {
 		sealed, berr := s.blobStore.Get(r.Context(), row.BlobKey)
-		if berr == nil {
-			if plain, oerr := s.sealer.Open(sealed); oerr == nil {
-				body = string(plain)
-			}
+		if berr != nil {
+			slog.Error("audit: read capture body failed", "id", id, "err", berr)
+			writeControlError(w, http.StatusInternalServerError, "failed to read capture body")
+			return
 		}
+		plain, oerr := s.sealer.Open(sealed)
+		if oerr != nil {
+			slog.Error("audit: open capture body failed", "id", id, "err", oerr)
+			writeControlError(w, http.StatusInternalServerError, "failed to read capture body")
+			return
+		}
+		body = string(plain)
 	}
 
 	// Every transcript read must be audit-logged (access control requirement).

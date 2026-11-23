@@ -247,6 +247,10 @@ func run() error {
 		MinScore: spMinScore,
 	}
 	spJob := secondpass.NewJob(spStoreAdapter, spBodyReader, spEngine, spWebhookSender, 50, spAllowRaw)
+	spJob.SetEnabled(func() bool {
+		srv := apiSrvPtr.Load()
+		return srv != nil && srv.SecondpassEnabled()
+	})
 
 	spCfg := apiSrv.SecondpassCfg()
 	spInterval := time.Duration(spCfg.IntervalSec) * time.Second
@@ -257,6 +261,9 @@ func run() error {
 		Addr:              cfg.HTTPAddr,
 		Handler:           apiSrv,
 		ReadHeaderTimeout: 10 * time.Second,
+		// Close idle keep-alive connections instead of holding them open
+		// forever; a client reconnects transparently.
+		IdleTimeout: 120 * time.Second,
 	}
 
 	ln, err := net.Listen("tcp", cfg.HTTPAddr)

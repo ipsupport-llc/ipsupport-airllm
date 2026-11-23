@@ -94,7 +94,7 @@ func (s *Server) handleVideoSpeech(w http.ResponseWriter, r *http.Request) {
 		entry.Status = code
 		entry.ErrorMsg = callErr.Error()
 		s.finalizeAudioUsage(r.Context(), entry, ak.KeyID, 0, 0, 0, "")
-		writeProtocolError(w, r, code, typ, callErr.Error())
+		writeProtocolError(w, r, code, typ, clientErrorMessage(callErr, plan.ExposeBackendHeaders))
 		return
 	}
 	chars := utf8.RuneCountInString(redactedInput)

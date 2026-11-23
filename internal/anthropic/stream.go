@@ -24,6 +24,7 @@ type StreamWriter struct {
 	blockTool int    // upstream tool-call index the open tool block belongs to
 	nextIdx   int    // next client-facing block index
 	stop      string
+	ended     bool // message_delta and message_stop are out
 }
 
 // NewStreamWriter builds a StreamWriter. inputTokens seeds the message_start
@@ -35,6 +36,19 @@ func NewStreamWriter(w io.Writer, flush func(), id, model string, inputTokens in
 // Chunk consumes one IR stream chunk and emits the corresponding Anthropic
 // event(s).
 func (s *StreamWriter) Chunk(c llm.StreamChunk) error {
+	if s.ended {
+		// Nothing may follow message_stop; a later usage report from an
+		// upstream that sends several is dropped.
+		return nil
+	}
+	if err := s.start(); err != nil {
+		return err
+	}
+	return s.chunk(c)
+}
+
+// start emits message_start once.
+func (s *StreamWriter) start() error {
 	if !s.started {
 		if err := s.event("message_start", map[string]any{
 			"type": "message_start",
@@ -53,7 +67,11 @@ func (s *StreamWriter) Chunk(c llm.StreamChunk) error {
 		}
 		s.started = true
 	}
+	return nil
+}
 
+// chunk emits the events for one IR chunk once message_start is out.
+func (s *StreamWriter) chunk(c llm.StreamChunk) error {
 	// Read the finish reason before dispatching, not inside a case. The cases
 	// below are mutually exclusive, so a chunk carrying both a delta and a
 	// finish reason would take the delta branch and lose the reason silently —
@@ -109,14 +127,6 @@ func (s *StreamWriter) Chunk(c llm.StreamChunk) error {
 		return s.closeBlock()
 
 	case c.Usage != nil:
-		// Anthropic's wire format has no way to close a block after
-		// message_delta, so the last chance to close one is here. Normally the
-		// finish chunk already did it and this is a no-op; it is not a no-op
-		// for a stream that ends without one, and an SDK reading a message
-		// whose block never closed is entitled to reject it.
-		if err := s.closeBlock(); err != nil {
-			return err
-		}
 		usage := map[string]int{"output_tokens": c.Usage.CompletionTokens}
 		if c.Usage.PromptTokens > 0 {
 			// message_start's input_tokens was only ever a rune/4 estimate (the
@@ -127,18 +137,61 @@ func (s *StreamWriter) Chunk(c llm.StreamChunk) error {
 			// a confident zero.
 			usage["input_tokens"] = c.Usage.PromptTokens
 		}
-		if err := s.event("message_delta", map[string]any{
-			"type":  "message_delta",
-			"delta": map[string]any{"stop_reason": s.stop, "stop_sequence": nil},
-			"usage": usage,
-		}); err != nil {
-			return err
-		}
-		return s.event("message_stop", map[string]any{"type": "message_stop"})
+		return s.end(usage)
 	}
 
 	// Role-only chunk: message_start already handled above.
 	return nil
+}
+
+// Finish ends a stream that completed successfully. The terminal events
+// normally go out with the upstream's usage chunk; an upstream that reports
+// no usage never sends one, and without this the client would wait for a
+// message_stop that never comes. A no-op once the message has ended.
+func (s *StreamWriter) Finish() error {
+	if s.ended {
+		return nil
+	}
+	if err := s.start(); err != nil {
+		return err
+	}
+	return s.end(map[string]int{"output_tokens": 0})
+}
+
+// Fail ends a stream that broke after it started with an Anthropic error
+// event, the way the real API reports a failure mid-stream: no
+// message_delta or message_stop follows, so a client cannot take the
+// truncated message for a complete one.
+func (s *StreamWriter) Fail(errType, message string) error {
+	s.ended = true
+	return s.event("error", map[string]any{
+		"type":  "error",
+		"error": map[string]any{"type": errType, "message": message},
+	})
+}
+
+// end emits message_delta with usage and then message_stop, exactly once.
+func (s *StreamWriter) end(usage map[string]int) error {
+	// Anthropic's wire format has no way to close a block after
+	// message_delta, so the last chance to close one is here. Normally the
+	// finish chunk already did it and this is a no-op; it is not a no-op
+	// for a stream that ends without one, and an SDK reading a message
+	// whose block never closed is entitled to reject it.
+	if err := s.closeBlock(); err != nil {
+		return err
+	}
+	if s.stop == "" {
+		s.stop = StopReason("")
+	}
+	s.ended = true
+	if err := s.event("message_delta", map[string]any{
+		"type":  "message_delta",
+		"delta": map[string]any{"stop_reason": s.stop, "stop_sequence": nil},
+		"usage": usage,
+	}); err != nil {
+		return err
+	}
+	return s.event("message_stop", map[string]any{"type": "message_stop"})
 }
 
 // ensureToolBlock opens a tool_use block for this delta's upstream index,

@@ -84,32 +84,17 @@ func (s *Server) SecondpassChat(ctx context.Context, prompt string) (string, err
 	if err != nil {
 		return "", fmt.Errorf("secondpass: resolve %q: %w", cfg.Model, err)
 	}
-	reg := s.reg()
-	lcrRank := s.lcrRank(ctx, plan)
-	// SecondpassChat has no breaker/unavail admission gate (unlike
-	// executePlan): lcr's own "both"-mode minimum-availability threshold is
-	// the only quality signal available on this path.
-	for _, t := range plan.Ordered(0, s.freeFunc(reg), lcrRank) {
-		e, ok := reg.Get(t.Provider)
-		if !ok {
-			continue
-		}
-		req := llm.ChatRequest{
-			Model: t.UpstreamModel,
-			Messages: []llm.Message{
-				{Role: "user", Content: prompt},
-			},
-		}
-		resp, err := e.Provider.Chat(ctx, req)
-		if err != nil {
-			return "", fmt.Errorf("secondpass: chat: %w", err)
-		}
-		if len(resp.Choices) > 0 {
-			return resp.Choices[0].Message.Content, nil
-		}
-		return "", nil
+	// The same executor the data plane uses: concurrency caps, breakers,
+	// unavailability marks and failover all apply, so a background scan
+	// neither overloads a provider nor keeps hammering one that is down.
+	resp, _, err := s.runChat(ctx, plan, llm.ChatRequest{
+		Model:    cfg.Model,
+		Messages: []llm.Message{{Role: "user", Content: prompt}},
+	})
+	if err != nil {
+		return "", fmt.Errorf("secondpass: chat: %w", err)
 	}
-	return "", errors.New("secondpass: no available targets")
+	return resp.Choices[0].Message.Content, nil
 }
 
 // handleAdminGetSecondpass returns the current second-pass config.
