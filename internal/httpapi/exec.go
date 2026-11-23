@@ -2,10 +2,12 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -143,8 +145,40 @@ func limitMessage(d limits.Decision) string {
 		d.Unit, d.Window, d.Used, d.Limit)
 }
 
+// settleTimeout bounds the limiter writes that settle a finished request.
+const settleTimeout = 2 * time.Second
+
+// settleContext is the context a finished request's limiter writes run
+// under: the request's own values without its cancellation, so a client that
+// hung up still has its reservation netted down or refunded (a canceled
+// context fails a Redis call at once), bounded by settleTimeout.
+func settleContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
+}
+
+// releaseReservation refunds the token headroom limitDenied reserved in rsv
+// if nothing settled it yet. Handlers defer it right after a passed limit
+// check, so every exit that never reaches finalizeUsage — a DLP block, an
+// unsupported stream — gives the headroom back; finalizeUsage clears rsv
+// when it settles, so the reservation is settled exactly once.
+func (s *Server) releaseReservation(ctx context.Context, keyID string, rsv *limits.Decision) {
+	if rsv == nil || rsv.ReservedTokens == 0 {
+		return
+	}
+	sctx, cancel := settleContext(ctx)
+	defer cancel()
+	if err := s.limiter.Add(sctx, keyID, 0, 0, 0, 0, rsv.ReservedTokens, rsv.ReservedBucket); err != nil {
+		slog.Error("limiter add failed", "err", err)
+	}
+	rsv.ReservedTokens, rsv.ReservedBucket = 0, 0
+}
+
 // finalizeUsage computes cost, fills the ledger entry, records it, and (on a
 // successful request with non-zero usage) increments the rolling counters.
+// rsv is the request's reservation (nil when none was made): it is netted
+// against the real usage, or refunded, and then cleared so a deferred
+// releaseReservation does nothing. It returns the finalized entry, cost
+// included.
 //
 // It takes the whole llm.Usage rather than a pair of counts because that type
 // carries the invariant the money depends on: CompletionTokens is everything
@@ -153,7 +187,7 @@ func limitMessage(d limits.Decision) string {
 // same two numbers they always did and are right for a reasoning model without
 // knowing what one is; the reasoning count rides along for the ledger, the
 // metrics and the log line, where an operator can see the split.
-func (s *Server) finalizeUsage(ctx context.Context, entry ledger.Entry, keyID, upstreamModel string, u llm.Usage, reservedTokens, reservedBucket int64) {
+func (s *Server) finalizeUsage(ctx context.Context, entry ledger.Entry, keyID, upstreamModel string, u llm.Usage, rsv *limits.Decision) ledger.Entry {
 	entry.PromptTokens = u.PromptTokens
 	entry.CompletionTokens = u.CompletionTokens
 	entry.ReasoningTokens = u.ReasoningTokens
@@ -179,18 +213,26 @@ func (s *Server) finalizeUsage(ctx context.Context, entry ledger.Entry, keyID, u
 		slog.Info("request completed", logAttrs...)
 	}
 
+	var reservedTokens, reservedBucket int64
+	if rsv != nil {
+		reservedTokens, reservedBucket = rsv.ReservedTokens, rsv.ReservedBucket
+		rsv.ReservedTokens, rsv.ReservedBucket = 0, 0
+	}
+	sctx, cancel := settleContext(ctx)
+	defer cancel()
 	if entry.Status == http.StatusOK && (u.PromptTokens > 0 || u.CompletionTokens > 0) {
-		if err := s.limiter.Add(ctx, keyID, u.BilledTokens(), costMicro, 0, 0, reservedTokens, reservedBucket); err != nil {
+		if err := s.limiter.Add(sctx, keyID, u.BilledTokens(), costMicro, 0, 0, reservedTokens, reservedBucket); err != nil {
 			slog.Error("limiter add failed", "err", err)
 		}
 	} else if reservedTokens != 0 {
 		// No billable usage (failed request, or a success with zero usage),
 		// but Check still reserved headroom optimistically before the
 		// outcome was known — refund it now rather than leak it forever.
-		if err := s.limiter.Add(ctx, keyID, 0, 0, 0, 0, reservedTokens, reservedBucket); err != nil {
+		if err := s.limiter.Add(sctx, keyID, 0, 0, 0, 0, reservedTokens, reservedBucket); err != nil {
 			slog.Error("limiter add failed", "err", err)
 		}
 	}
+	return entry
 }
 
 // finalizeAudioUsage records an audio request's usage the same way
@@ -231,7 +273,9 @@ func (s *Server) finalizeAudioUsage(ctx context.Context, entry ledger.Entry, key
 	}
 
 	if costMicro != 0 || audioSeconds != 0 || ttsChars != 0 {
-		if err := s.limiter.Add(ctx, keyID, 0, costMicro, audioSeconds, ttsChars, 0, 0); err != nil {
+		sctx, cancel := settleContext(ctx)
+		defer cancel()
+		if err := s.limiter.Add(sctx, keyID, 0, costMicro, audioSeconds, ttsChars, 0, 0); err != nil {
 			slog.Error("limiter add failed", "err", err)
 		}
 	}
@@ -247,6 +291,17 @@ func (s *Server) runChat(ctx context.Context, plan *routing.Plan, req llm.ChatRe
 	res, _, err := s.executePlan(ctx, plan, nil, func(ctx context.Context, p providers.Provider, t routing.Target, _ func() bool) error {
 		var err error
 		resp, err = p.Chat(ctx, upstreamRequest(req, t))
+		if err == nil && len(resp.Choices) == 0 {
+			// A 2xx with no choices is no answer — often an error envelope
+			// sent with a success status. Fail it like any upstream error so
+			// the next target is tried and the client never gets
+			// "choices": null.
+			return &providers.Error{
+				Status:    http.StatusBadGateway,
+				Retryable: true,
+				Message:   fmt.Sprintf("upstream %s returned no choices", t.Provider),
+			}
+		}
 		if err == nil && t.Options.ThinkingOff() {
 			for i := range resp.Choices {
 				resp.Choices[i].Message.Content = stripThinkBlocks(resp.Choices[i].Message.Content)
@@ -285,6 +340,8 @@ var errFirstChunkLate = errors.New("first chunk arrived after the time budget")
 // falls through instead of holding the caller silent. Without a budget the
 // first chunk of any kind starts the response, as it always has.
 func (s *Server) runStream(ctx context.Context, plan *routing.Plan, req llm.ChatRequest, sink streamSink) (served execResult, usage llm.Usage, started bool, err error) {
+	live := liveFrom(ctx)
+	live.setStream()
 	served, started, err = s.executePlan(ctx, plan, nil, func(ctx context.Context, p providers.Provider, t routing.Target, commit func() bool) error {
 		attemptStarted := false
 		var attemptUsage llm.Usage
@@ -317,6 +374,7 @@ func (s *Server) runStream(ctx context.Context, plan *routing.Plan, req llm.Chat
 					c.Content += think.flush()
 				}
 			}
+			live.observeChunk(c)
 			if c.Usage != nil {
 				attemptUsage = *c.Usage
 			}
@@ -391,6 +449,79 @@ func (o *openaiSink) chunk(c llm.StreamChunk) error {
 
 // assembled returns the full accumulated response text.
 func (o *openaiSink) assembled() string { return o.content.String() }
+
+// failCommittedStream handles a stream that failed after its first chunk
+// went out, when the status line is long sent. Unless the client itself went
+// away, it ends the stream with a protocol error event (emit, given the
+// classified status, OpenAI error type and client-facing message) and
+// returns the classified status for the ledger, so the request is recorded
+// as the failure it was rather than a 200. A client that hung up is not an
+// upstream failure: 200, and nothing is written.
+func failCommittedStream(r *http.Request, err error, plan *routing.Plan, emit func(code int, typ, msg string)) int {
+	if r.Context().Err() != nil {
+		return http.StatusOK
+	}
+	code, typ := classifyUpstreamErr(err)
+	emit(code, typ, clientErrorMessage(err, plan.ExposeBackendHeaders))
+	return code
+}
+
+// fail ends a committed stream that broke: an error event in the same
+// envelope a non-streamed error uses, and no [DONE], so a client cannot take
+// the truncated answer for a complete one.
+func (o *openaiSink) fail(typ, msg string) {
+	b, _ := json.Marshal(apiError{Error: apiErrorBody{Message: msg, Type: typ}})
+	_, _ = fmt.Fprintf(o.w, "data: %s\n\n", b)
+	o.flush()
+}
+
+// upstreamURLPattern and gcpProjectPattern match what clientErrorMessage
+// strips from a vendor's own message: endpoint URLs, and the Google project
+// a Vertex error names its resources under.
+var (
+	upstreamURLPattern = regexp.MustCompile(`https?://[^\s"']+`)
+	gcpProjectPattern  = regexp.MustCompile(`projects/[^\s"'/]+`)
+)
+
+// maxClientErrorRunes caps the vendor message a client is shown.
+const maxClientErrorRunes = 500
+
+// clientErrorMessage is the text of an upstream failure a client is shown.
+// The full error — provider name, base URL, raw upstream body — goes to the
+// server log and the ledger; the client gets it too only on a plan that
+// exposes its backend (Plan.ExposeBackendHeaders, always set for an explicit
+// provider/model passthrough). Otherwise a provider failure is reduced to
+// the vendor's own error message, sanitized, and anything else the gateway
+// did not phrase itself to a generic line.
+func clientErrorMessage(err error, exposeBackend bool) string {
+	if exposeBackend {
+		return err.Error()
+	}
+	var pe *providers.Error
+	if !errors.As(err, &pe) {
+		switch {
+		case errors.Is(err, errAllBusy), errors.Is(err, errAllQuarantined), errors.Is(err, errAllUnavailable):
+			return err.Error()
+		}
+		return "upstream request failed"
+	}
+	if pe.Code == errCodeTierTimeout {
+		return "upstream did not answer within its time budget"
+	}
+	msg := strings.TrimSpace(pe.VendorMessage)
+	if msg == "" {
+		if pe.Status >= 400 && pe.Status < 500 {
+			return "upstream rejected the request"
+		}
+		return "upstream request failed"
+	}
+	msg = upstreamURLPattern.ReplaceAllString(msg, "[url]")
+	msg = gcpProjectPattern.ReplaceAllString(msg, "projects/[redacted]")
+	if r := []rune(msg); len(r) > maxClientErrorRunes {
+		msg = string(r[:maxClientErrorRunes]) + "…"
+	}
+	return msg
+}
 
 // setBackendLabel names the target that served a response in its
 // X-Backend-Model header: only on an alias that exposes backend headers, and

@@ -36,8 +36,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
-          fetch-depth: 2
-      # main is squash-merged, so HEAD~1 is the previous main commit. A
+          fetch-depth: 0
+      # Diff against the commit the deployed images were last built from (the
+      # `built-from=` line of the newest bump commit), not HEAD~1: one push can
+      # carry several commits, and a workflow_run event has no push `before`
+      # to diff against. This also picks up changes from a push whose build
+      # failed or whose pending run was replaced. Falls back to HEAD~1. A
       # docs-only change rebuilds nothing; dlp-bert (torch + a model, slow)
       # rebuilds only when its own directory changed.
       - id: diff
@@ -48,7 +52,12 @@ jobs:
             echo "dlp_bert=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          files=$(git diff --name-only HEAD~1 HEAD)
+          base=$(git log -1 --grep='^built-from=' --format=%B HEAD | sed -n 's/^built-from=\([0-9a-f]\{40\}\)$/\1/p' | head -n1)
+          if [ -z "$base" ] || ! git merge-base --is-ancestor "$base" HEAD; then
+            base=$(git rev-parse HEAD~1)
+          fi
+          echo "diff base: $base"
+          files=$(git diff --name-only "$base" HEAD)
           echo "$files"
           if echo "$files" | grep -qvE '^docs/|\.md$|^deploy/dlp-bert/|^deploy/argocd/values-main\.yaml$'; then
             echo "gateway=true" >> "$GITHUB_OUTPUT"

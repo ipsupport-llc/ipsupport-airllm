@@ -72,6 +72,15 @@ func run() error {
 		return fmt.Errorf("ensure dlp defaults: %w", err)
 	}
 
+	// Without SEED_DEV, neutralize demo data an earlier dev seed left behind.
+	// Runs before the bootstrap admin check, so if dev-admin was the only
+	// admin, a fresh bootstrap admin is created below.
+	if !cfg.SeedDev {
+		if err := seed.CleanupDev(ctx, st); err != nil {
+			return fmt.Errorf("clean up dev demo data: %w", err)
+		}
+	}
+
 	// Wire the auth mode. AUTH_MODE=mock is a deprecated alias for local.
 	var authImpl auth.Authenticator
 	var loginImpl auth.LoginProvider
@@ -114,8 +123,9 @@ func run() error {
 		oidcImpl = oa
 	}
 
-	// Local-mode convenience: seed demo data + a fixed dev API key.
-	if cfg.Env == "dev" && cfg.AuthMode == "local" {
+	// Local-dev convenience, opt-in via SEED_DEV=1 (config enforces ENV=dev +
+	// AUTH_MODE=local): seed demo data + a fixed dev API key.
+	if cfg.SeedDev {
 		token, err := seed.Dev(ctx, st)
 		if err != nil {
 			return err
@@ -189,6 +199,10 @@ func run() error {
 	apiSrv.Metrics().RegisterWebhookDropped(func() float64 { return float64(webhook.Dropped()) })
 	apiSrv.StartModelPool(ctx)
 	apiSrv.StartConfigRefresh(ctx, cfg.ConfigRefreshInterval)
+	// Stopped only once serving has finished, so requests still running
+	// through the shutdown drain stay in the live view.
+	stopLive := apiSrv.StartLivePublisher()
+	defer stopLive()
 
 	// Build and start the second-pass background job. It uses an atomic
 	// pointer for the config (same pattern as capturePipeline) so model /
@@ -247,6 +261,10 @@ func run() error {
 		MinScore: spMinScore,
 	}
 	spJob := secondpass.NewJob(spStoreAdapter, spBodyReader, spEngine, spWebhookSender, 50, spAllowRaw)
+	spJob.SetEnabled(func() bool {
+		srv := apiSrvPtr.Load()
+		return srv != nil && srv.SecondpassEnabled()
+	})
 
 	spCfg := apiSrv.SecondpassCfg()
 	spInterval := time.Duration(spCfg.IntervalSec) * time.Second
@@ -257,6 +275,9 @@ func run() error {
 		Addr:              cfg.HTTPAddr,
 		Handler:           apiSrv,
 		ReadHeaderTimeout: 10 * time.Second,
+		// Close idle keep-alive connections instead of holding them open
+		// forever; a client reconnects transparently.
+		IdleTimeout: 120 * time.Second,
 	}
 
 	ln, err := net.Listen("tcp", cfg.HTTPAddr)

@@ -31,6 +31,11 @@ type Principal struct {
 	Subject string
 	Email   string
 	Roles   []string
+	// UserID is the immutable users.id the session was issued for. The
+	// session path checks it against the row it loads by subject, so a
+	// cookie issued to a deleted user can't attach to a later user that
+	// reuses the same subject.
+	UserID string
 }
 
 // HasRole reports whether the principal holds role.
@@ -66,6 +71,7 @@ type payload struct {
 	Sub   string   `json:"sub"`
 	Email string   `json:"email"`
 	Roles []string `json:"roles"`
+	UID   string   `json:"uid,omitempty"`
 	Exp   int64    `json:"exp"`
 }
 

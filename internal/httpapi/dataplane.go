@@ -45,6 +45,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeProtocolError(w, r, http.StatusTooManyRequests, "rate_limit_error", msg)
 		return
 	}
+	defer s.releaseReservation(r.Context(), ak.KeyID, &limDec)
 	s.metrics.ObserveComponent("limits", time.Since(t0))
 	t0 = time.Now()
 	blocked, msg, dlpRes := s.dlpEnforce(r.Context(), ak, "openai", &req, plan.DLPModelScan)
@@ -55,7 +56,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Stream {
-		s.streamChatCompletions(w, r, req, ak, start, plan, dlpRes, limDec)
+		s.streamChatCompletions(w, r, req, ak, start, plan, dlpRes, &limDec)
 		return
 	}
 
@@ -67,14 +68,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		code, typ := classifyUpstreamErr(callErr)
 		entry.Status = code
 		entry.ErrorMsg = callErr.Error()
-		s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, llm.Usage{}, limDec.ReservedTokens, limDec.ReservedBucket)
-		writeProtocolError(w, r, code, typ, callErr.Error())
+		s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, llm.Usage{}, &limDec)
+		writeProtocolError(w, r, code, typ, clientErrorMessage(callErr, plan.ExposeBackendHeaders))
 		return
 	}
 
 	resp.Model = req.Model
 	entry.Status = http.StatusOK
-	s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, resp.Usage, limDec.ReservedTokens, limDec.ReservedBucket)
+	entry = s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, resp.Usage, &limDec)
 
 	var responseText string
 	if len(resp.Choices) > 0 {
@@ -95,7 +96,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
-func (s *Server) streamChatCompletions(w http.ResponseWriter, r *http.Request, req llm.ChatRequest, ak authedKey, start time.Time, plan *routing.Plan, dlpRes dlpResult, limDec limits.Decision) {
+func (s *Server) streamChatCompletions(w http.ResponseWriter, r *http.Request, req llm.ChatRequest, ak authedKey, start time.Time, plan *routing.Plan, dlpRes dlpResult, limDec *limits.Decision) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeProtocolError(w, r, http.StatusInternalServerError, "internal_error", "streaming unsupported")
@@ -120,14 +121,14 @@ func (s *Server) streamChatCompletions(w http.ResponseWriter, r *http.Request, r
 		if !started {
 			code, typ := classifyUpstreamErr(err)
 			entry.Status = code
-			s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, llm.Usage{}, limDec.ReservedTokens, limDec.ReservedBucket)
-			writeProtocolError(w, r, code, typ, err.Error())
+			s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, llm.Usage{}, limDec)
+			writeProtocolError(w, r, code, typ, clientErrorMessage(err, plan.ExposeBackendHeaders))
 			return
 		}
-		entry.Status = http.StatusOK // headers already sent; cannot signal failure
-		s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, usage, limDec.ReservedTokens, limDec.ReservedBucket)
+		entry.Status = failCommittedStream(r, err, plan, func(_ int, typ, msg string) { sink.fail(typ, msg) })
+		entry = s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, usage, limDec)
 		s.enqueueCapture(ak, "openai", req.Model, target.Provider, target.UpstreamModel,
-			http.StatusOK, usage.PromptTokens, usage.CompletionTokens, entry.CostUSD,
+			entry.Status, usage.PromptTokens, usage.CompletionTokens, entry.CostUSD,
 			dlpRes, req.Messages, sink.assembled())
 		return
 	}
@@ -135,7 +136,7 @@ func (s *Server) streamChatCompletions(w http.ResponseWriter, r *http.Request, r
 	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher.Flush()
 	entry.Status = http.StatusOK
-	s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, usage, limDec.ReservedTokens, limDec.ReservedBucket)
+	entry = s.finalizeUsage(r.Context(), entry, ak.KeyID, target.UpstreamModel, usage, limDec)
 	s.enqueueCapture(ak, "openai", req.Model, target.Provider, target.UpstreamModel,
 		http.StatusOK, usage.PromptTokens, usage.CompletionTokens, entry.CostUSD,
 		dlpRes, req.Messages, sink.assembled())

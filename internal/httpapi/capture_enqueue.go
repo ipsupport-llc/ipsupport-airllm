@@ -35,6 +35,32 @@ func captureBody(msgs []llm.Message, response string, redact bool, msgFindings [
 	return b
 }
 
+// redactForCapture returns a copy of msgs masked for a capture stored as
+// redacted. Content uses the enforcement pass's per-message findings when it
+// produced some; otherwise — DLP disabled or off, or nothing found — it is
+// scanned here with the deterministic patterns, so a capture flagged
+// redacted never holds a secret just because enforcement was off. Tool-call
+// arguments are always scanned here, masked as valid JSON.
+func redactForCapture(msgs []llm.Message, msgFindings [][]dlp.Finding, ps dlp.PatternSet) []llm.Message {
+	out := make([]llm.Message, len(msgs))
+	copy(out, msgs)
+	for i := range out {
+		var fs []dlp.Finding
+		if msgFindings != nil {
+			if i < len(msgFindings) {
+				fs = msgFindings[i]
+			}
+		} else if out[i].Content != "" {
+			fs = dlp.ScanWith(out[i].Content, ps)
+		}
+		if len(fs) > 0 {
+			out[i].Content = dlp.Redact(out[i].Content, fs)
+		}
+		_, out[i].ToolCalls, _ = scanToolCallArgs(out[i].ToolCalls, ps)
+	}
+	return out
+}
+
 // enqueueCapture builds and enqueues a capture.Record if the pipeline is
 // configured. It is called after finalizeUsage so all usage fields are known.
 // The capture config (including Redact) is snapshotted here so the DB flag
@@ -58,9 +84,13 @@ func (s *Server) enqueueCapture(
 	}
 	// When DLP action="redact", messages are already masked in place; re-applying
 	// the original byte offsets would corrupt the stored body (label markers are
-	// longer than the redacted spans). Redact in captureBody only when the
-	// capture layer itself must apply redaction (action≠redact or no findings).
+	// longer than the redacted spans). The capture layer redacts only when it
+	// must itself (action≠redact, or enforcement did not run).
 	needRedact := capCfg.Redact && !dlpRes.AlreadyRedacted
+	bodyMsgs := msgs
+	if needRedact {
+		bodyMsgs = redactForCapture(msgs, dlpRes.MsgFindings, layer1Patterns(s.dlpCfg()))
+	}
 
 	// Raw training window: when enabled, attach an un-redacted copy so the
 	// flywheel can re-scan byte-aligned text. When DLP redacted in place, msgs
@@ -89,7 +119,7 @@ func (s *Server) enqueueCapture(
 		ModelVersion:     dlp.DetectorVersion,
 		Detected:         dlpRes.Findings,
 		HadIncident:      dlpRes.HadIncident,
-		Body:             captureBody(msgs, response, needRedact, dlpRes.MsgFindings),
+		Body:             captureBody(bodyMsgs, response, false, nil),
 		RawBody:          rawBody,
 		Redacted:         capCfg.Redact,
 	})

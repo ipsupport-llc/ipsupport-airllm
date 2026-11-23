@@ -5,6 +5,10 @@
 {{- if and $wif.enabled (or (not $wif.projectNumber) (not $wif.poolId) (not $wif.providerId) (not $wif.serviceAccount)) }}
 {{- fail "googleWorkloadIdentity.enabled=true requires projectNumber, poolId, providerId and serviceAccount" }}
 {{- end }}
+{{- if and .Values.config.seedDev (or (ne .Values.config.env "dev") (ne .Values.config.authMode "local")) }}
+{{- fail "config.seedDev=true requires config.env=dev and config.authMode=local" }}
+{{- end }}
+{{- $capture := .Values.app.capture.persistence }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -16,24 +20,40 @@ spec:
   {{- if not .Values.app.autoscaling.enabled }}
   replicas: {{ .Values.app.replicaCount }}
   {{- end }}
+  {{- if and $capture.enabled (eq ($capture.accessMode | default "ReadWriteOnce") "ReadWriteOnce") }}
+  # A ReadWriteOnce capture volume can't be mounted by the surge pod of a
+  # rolling update while the old pod still holds it (on another node), so the
+  # rollout would hang. Stop the old pod first instead.
+  # rollingUpdate: null — an existing release carries the API-defaulted
+  # rollingUpdate block, which Kubernetes rejects next to type: Recreate;
+  # the explicit null makes Helm's three-way merge remove it.
+  strategy:
+    type: Recreate
+    rollingUpdate: null
+  {{- end }}
   selector:
     matchLabels:
       {{- include "airllm.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: gateway
   template:
     metadata:
-      {{- if $wif.enabled }}
       annotations:
+        # The app reads its env once at startup; roll the pods when it changes.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-env.yaml") . | sha256sum }}
+        {{- if $wif.enabled }}
         # The impersonated service account lives ONLY in the credential ConfigMap, and
         # the Google SDK parses that file once at startup. Without this, changing it
         # would leave the pod impersonating the old identity until an unrelated restart.
         checksum/gcp-wif: {{ include (print $.Template.BasePath "/gcp-wif-credential-config.yaml") . | sha256sum }}
-      {{- end }}
+        {{- end }}
       labels:
         {{- include "airllm.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: gateway
     spec:
       serviceAccountName: {{ include "airllm.serviceAccountName" . }}
+      # The app never calls the Kubernetes API. (WIF mounts its own projected
+      # token below, which does not depend on this.)
+      automountServiceAccountToken: false
       # Covers config.shutdownDrain + config.shutdownTimeout, so the kubelet
       # does not kill a pod that is still finishing its in-flight requests.
       terminationGracePeriodSeconds: {{ .Values.app.terminationGracePeriodSeconds }}
@@ -51,7 +71,7 @@ spec:
             {{- toYaml .Values.app.securityContext | nindent 12 }}
           ports:
             - name: http
-              containerPort: 8080
+              containerPort: {{ include "airllm.httpPort" . }}
               protocol: TCP
           envFrom:
             - configMapRef:
@@ -97,13 +117,15 @@ spec:
               value: {{ include "airllm.gcpWifCredentialFile" . | quote }}
             {{- end }}
           startupProbe:
-            # Gates liveness until the app has booted (migrations run on start);
-            # allows up to ~60s before liveness takes over.
+            # Gates liveness until the app has booted. Migrations run before the
+            # listener starts, so a long migration needs a larger budget
+            # (periodSeconds x failureThreshold; default ~60s) — see
+            # docs/operations.md#upgrades-and-long-migrations.
             httpGet:
               path: /healthz
               port: http
-            periodSeconds: 3
-            failureThreshold: 20
+            periodSeconds: {{ .Values.app.startupProbe.periodSeconds }}
+            failureThreshold: {{ .Values.app.startupProbe.failureThreshold }}
           livenessProbe:
             httpGet:
               path: /healthz

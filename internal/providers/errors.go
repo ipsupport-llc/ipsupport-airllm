@@ -53,6 +53,10 @@ type Error struct {
 	// instead of the vendor's, so nil and "retry after 0s" must stay
 	// distinguishable.
 	RetryAfter *time.Duration
+	// VendorMessage is the upstream's own error message, when its error
+	// body carried one. Message holds the full detail for logs (provider
+	// name, status, raw body); this is the part a client may be shown.
+	VendorMessage string
 }
 
 func (e *Error) Error() string { return e.Message }
@@ -303,12 +307,62 @@ func httpError(name string, status int, body []byte, header http.Header) error {
 		}
 	}
 	return &Error{
-		Status:     status,
-		Retryable:  status == http.StatusTooManyRequests || status >= 500,
-		Code:       code,
-		RetryAfter: retryAfter,
-		Message:    fmt.Sprintf("upstream %s returned %d: %s", name, status, strings.TrimSpace(string(body))),
+		Status:        status,
+		Retryable:     status == http.StatusTooManyRequests || status >= 500,
+		Code:          code,
+		RetryAfter:    retryAfter,
+		Message:       fmt.Sprintf("upstream %s returned %d: %s", name, status, strings.TrimSpace(string(body))),
+		VendorMessage: vendorMessage(body),
 	}
+}
+
+// vendorMessage extracts the human-readable message from an upstream error
+// body: error.message in the OpenAI, Google and llama.cpp shapes, or error
+// itself when a vendor sends it as a bare string. "" when there is none.
+func vendorMessage(body []byte) string {
+	var env struct {
+		Error json.RawMessage `json:"error"`
+	}
+	if json.Unmarshal(body, &env) != nil || len(env.Error) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(env.Error, &s) == nil {
+		return s
+	}
+	var obj struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(env.Error, &obj) == nil {
+		return obj.Message
+	}
+	return ""
+}
+
+// streamErrorEnvelope recognizes an error an upstream reports inside an
+// already-answered 2xx stream — `data: {"error":{...}}`, as vLLM, llama.cpp
+// and OpenRouter send when generation fails part-way — and turns it into the
+// same *Error a non-2xx answer would have produced, so it is classified,
+// failed over and recorded like one. The status is the envelope's own
+// numeric code when it is an HTTP error status, else 502. nil when data is
+// not an error envelope.
+func streamErrorEnvelope(name string, data []byte) error {
+	var env struct {
+		Error json.RawMessage `json:"error"`
+	}
+	if json.Unmarshal(data, &env) != nil || len(env.Error) == 0 || string(env.Error) == "null" {
+		return nil
+	}
+	status := http.StatusBadGateway
+	var withCode struct {
+		Code json.RawMessage `json:"code"`
+	}
+	if json.Unmarshal(env.Error, &withCode) == nil && len(withCode.Code) > 0 {
+		if n, err := strconv.Atoi(strings.Trim(string(withCode.Code), `"`)); err == nil && n >= 400 && n <= 599 {
+			status = n
+		}
+	}
+	return httpError(name, status, data, nil)
 }
 
 // voiceRejection marks a synthesis upstream refusing the voice it was

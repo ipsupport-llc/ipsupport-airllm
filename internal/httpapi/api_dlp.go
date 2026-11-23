@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"time"
 
@@ -40,11 +42,18 @@ func (s *Server) handleAdminDLPPatterns(w http.ResponseWriter, _ *http.Request) 
 
 func (s *Server) handleAdminPutDLP(w http.ResponseWriter, r *http.Request) {
 	sess, _ := sessionFrom(r.Context())
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeControlError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(raw))
 	var body dlpConfig
 	if err := decodeJSON(r, &body); err != nil {
 		writeControlError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
+	keepOmittedDLPPatterns(raw, &body, s.dlpCfg())
 	if !validDLPAction(body.Action) {
 		writeControlError(w, http.StatusBadRequest, "action must be off | flag | redact | block")
 		return
@@ -61,14 +70,32 @@ func (s *Server) handleAdminPutDLP(w http.ResponseWriter, r *http.Request) {
 		writeControlError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	raw, _ := json.Marshal(body)
-	if err := s.st.PutSetting(r.Context(), "dlp", raw); err != nil {
+	stored, _ := json.Marshal(body)
+	if err := s.st.PutSetting(r.Context(), "dlp", stored); err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to save DLP config")
 		return
 	}
 	s.loadDLP(r.Context())
 	s.audit(r.Context(), sess.principal.Subject, "dlp.put", "dlp", body)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
+}
+
+// keepOmittedDLPPatterns carries the stored pattern toggles and custom
+// patterns over into a PUT body that does not mention them. The PUT otherwise
+// replaces the whole config, so a client that saved only the policy fields
+// (or whose pattern catalog failed to load) would silently wipe them. A key
+// that is present — even as [] or {} — is an explicit replacement.
+func keepOmittedDLPPatterns(raw []byte, body *dlpConfig, cur dlpConfig) {
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		return
+	}
+	if _, ok := keys["patterns"]; !ok {
+		body.Patterns = cur.Patterns
+	}
+	if _, ok := keys["custom_patterns"]; !ok {
+		body.CustomPatterns = cur.CustomPatterns
+	}
 }
 
 func (s *Server) handleAdminDLPIncidents(w http.ResponseWriter, r *http.Request) {

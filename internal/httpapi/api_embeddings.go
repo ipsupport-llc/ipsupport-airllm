@@ -55,15 +55,15 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 		code, typ := classifyUpstreamErr(callErr)
 		entry.Status = code
 		entry.ErrorMsg = callErr.Error()
-		s.finalizeUsage(r.Context(), entry, ak.KeyID, res.UpstreamModel, llm.Usage{}, 0, 0)
-		writeProtocolError(w, r, code, typ, callErr.Error())
+		s.finalizeUsage(r.Context(), entry, ak.KeyID, res.UpstreamModel, llm.Usage{}, nil)
+		writeProtocolError(w, r, code, typ, clientErrorMessage(callErr, plan.ExposeBackendHeaders))
 		return
 	}
 
 	resp.Model = req.Model
 	entry.Status = http.StatusOK
 	s.finalizeUsage(r.Context(), entry, ak.KeyID, res.UpstreamModel,
-		llm.Usage{PromptTokens: resp.PromptTokens, TotalTokens: resp.PromptTokens}, 0, 0)
+		llm.Usage{PromptTokens: resp.PromptTokens, TotalTokens: resp.PromptTokens}, nil)
 
 	body, err := openai.MarshalEmbeddingsResponse(resp, req.EncodingFormat)
 	if err != nil {

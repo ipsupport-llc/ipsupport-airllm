@@ -30,7 +30,7 @@ func NewSession(key []byte) *Session { return &Session{key: key} }
 func (s *Session) SetSession(w http.ResponseWriter, r *http.Request, p Principal) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieName,
-		Value:    s.sign(payload{Sub: p.Subject, Email: p.Email, Roles: p.Roles, Exp: time.Now().Add(sessionTTL).Unix()}),
+		Value:    s.sign(payload{Sub: p.Subject, Email: p.Email, Roles: p.Roles, UID: p.UserID, Exp: time.Now().Add(sessionTTL).Unix()}),
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   isHTTPS(r),
@@ -73,7 +73,7 @@ func (s *Session) Authenticate(r *http.Request) (Principal, error) {
 	if time.Now().Unix() > p.Exp {
 		return Principal{}, ErrNoSession
 	}
-	return Principal{Subject: p.Sub, Email: p.Email, Roles: p.Roles}, nil
+	return Principal{Subject: p.Sub, Email: p.Email, Roles: p.Roles, UserID: p.UID}, nil
 }
 
 func (s *Session) sign(p payload) string {

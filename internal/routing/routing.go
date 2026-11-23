@@ -466,8 +466,14 @@ func NewCachedRouter(st *store.Store, opts lookupcache.Options) *Router {
 // PurgeCache forgets every cached alias plan.
 func (r *Router) PurgeCache() { r.aliases.Purge() }
 
-// NextRR returns the next round-robin tick for an alias.
+// NextRR returns the next round-robin tick for an alias. A passthrough
+// "provider/model" name gets no counter: its plan is one target, so there is
+// nothing to rotate, and the name is whatever the client sent — keeping a
+// counter per name would grow the map without bound.
 func (r *Router) NextRR(alias string) uint64 {
+	if strings.Contains(alias, "/") {
+		return 0
+	}
 	v, _ := r.rr.LoadOrStore(alias, new(atomic.Uint64))
 	return v.(*atomic.Uint64).Add(1) - 1
 }

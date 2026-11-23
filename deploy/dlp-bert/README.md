@@ -35,9 +35,16 @@ Defaults to `dslim/bert-base-NER` (BERT-base fine-tuned on CoNLL-2003: PER,
 ORG, LOC, MISC) — the actual default baked in by `Dockerfile`'s `DLP_MODEL`
 build arg, and what every image released via `.github/workflows/release.yml`
 ships with (that workflow passes no `DLP_MODEL` override). Override at build
-time with `--build-arg DLP_MODEL=<hf-model-id>`, or at runtime with the
-`DLP_MODEL` env var if running from a local checkout instead of the prebuilt
-image. CPU inference is ~10–50 ms for short prompts.
+time with `--build-arg DLP_MODEL=<hf-model-id>` together with
+`--build-arg DLP_MODEL_REVISION=<commit sha or branch>` (the default revision
+pins the default model's commit), or at runtime with the `DLP_MODEL` env var if
+running from a local checkout instead of the prebuilt image. The image runs as
+uid 10001 with `HF_HUB_OFFLINE=1`: it serves only the baked-in model and never
+contacts the Hugging Face Hub. The pinned revision applies only to the baked-in
+model (`DLP_BAKED_MODEL`); a different `DLP_MODEL` set at runtime loads at its
+default revision and needs either network access (unset `HF_HUB_OFFLINE`, which
+the Helm chart also sets) or its own pre-populated cache under `HF_HOME`. Python dependencies are pinned in
+`requirements.txt`, the base image by digest. CPU inference is ~10–50 ms for short prompts.
 
 Swapping in a model with a different label vocabulary (e.g. an ai4privacy
 PII model, which emits labels like `EMAIL`/`GIVENNAME`/`STREET` instead of

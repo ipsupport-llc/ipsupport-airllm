@@ -401,16 +401,29 @@ func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, r
 	// cancelled inference to completion behind it. Once exhausted, skip the
 	// attempt entirely and record the same metric without touching the pool.
 	budgetExhausted := false
+	ps := layer1Patterns(cfg)
 	for i := range req.Messages {
+		// Tool-call arguments (an OpenAI tool_calls entry, or an Anthropic
+		// tool_use input) carry text upstream just like content does. They
+		// get the deterministic layer only; their findings count toward the
+		// incident but stay out of perMsg, whose offsets index Content.
+		if tf, masked, maskedSample := scanToolCallArgs(req.Messages[i].ToolCalls, ps); len(tf) > 0 {
+			total += len(tf)
+			for _, l := range dlp.Labels(tf) {
+				labelSet[l] = true
+			}
+			if sample == "" {
+				sample = excerpt(maskedSample)
+			}
+			if cfg.Action == "redact" {
+				req.Messages[i].ToolCalls = masked
+			}
+		}
 		content := req.Messages[i].Content
 		if content == "" {
 			continue
 		}
-		findings := dlp.ScanWith(content, dlp.PatternSet{
-			Enabled: cfg.Patterns,
-			Custom:  cfg.compiledCustom,
-			Entropy: dlpToggle(cfg.Patterns, "high_entropy", true),
-		})
+		findings := dlp.ScanWith(content, ps)
 		if modelOn && budgetExhausted && (cfg.ModelScanScope == "all" || i == lastUser) {
 			s.metrics.DLPModelSkipped("budget")
 		} else if modelOn && (cfg.ModelScanScope == "all" || i == lastUser) {
@@ -572,6 +585,98 @@ func (s *Server) dlpScanTexts(ctx context.Context, ak authedKey, ingress, alias 
 		return true, "request blocked: sensitive content detected (" + strings.Join(labels, ", ") + ")"
 	}
 	return false, ""
+}
+
+// layer1Patterns is the deterministic (regex + entropy) pattern set cfg
+// enables.
+func layer1Patterns(cfg dlpConfig) dlp.PatternSet {
+	return dlp.PatternSet{
+		Enabled: cfg.Patterns,
+		Custom:  cfg.compiledCustom,
+		Entropy: dlpToggle(cfg.Patterns, "high_entropy", true),
+	}
+}
+
+// scanToolCallArgs scans the arguments of calls with ps. It returns every
+// finding (offsets are into the individual JSON string values, so they are
+// good for labels and counts only), a copy of calls with each finding
+// masked — calls itself is never modified, it may be shared with the
+// pre-redaction snapshot — and the first masked arguments, for an incident
+// sample. No findings: nil, calls, "".
+func scanToolCallArgs(calls []llm.ToolCall, ps dlp.PatternSet) ([]dlp.Finding, []llm.ToolCall, string) {
+	var all []dlp.Finding
+	var masked []llm.ToolCall
+	sample := ""
+	for j, tc := range calls {
+		red, fs := redactJSONStrings(tc.Function.Arguments, ps)
+		if len(fs) == 0 {
+			continue
+		}
+		if masked == nil {
+			masked = make([]llm.ToolCall, len(calls))
+			copy(masked, calls)
+		}
+		masked[j].Function.Arguments = red
+		all = append(all, fs...)
+		if sample == "" {
+			sample = red
+		}
+	}
+	if masked == nil {
+		return nil, calls, ""
+	}
+	return all, masked, sample
+}
+
+// redactJSONStrings scans every string value of the JSON document args with
+// ps and masks what it finds, keeping the document valid JSON. Arguments
+// that are not one JSON document are scanned and masked as plain text.
+// Unchanged arguments are returned byte for byte.
+func redactJSONStrings(args string, ps dlp.PatternSet) (string, []dlp.Finding) {
+	if args == "" {
+		return args, nil
+	}
+	dec := json.NewDecoder(strings.NewReader(args))
+	dec.UseNumber()
+	var doc any
+	if dec.Decode(&doc) != nil || dec.More() {
+		fs := dlp.ScanWith(args, ps)
+		if len(fs) == 0 {
+			return args, nil
+		}
+		return dlp.Redact(args, fs), fs
+	}
+	var all []dlp.Finding
+	var walk func(v any) any
+	walk = func(v any) any {
+		switch t := v.(type) {
+		case string:
+			fs := dlp.ScanWith(t, ps)
+			if len(fs) == 0 {
+				return t
+			}
+			all = append(all, fs...)
+			return dlp.Redact(t, fs)
+		case map[string]any:
+			for k, e := range t {
+				t[k] = walk(e)
+			}
+		case []any:
+			for i, e := range t {
+				t[i] = walk(e)
+			}
+		}
+		return v
+	}
+	doc = walk(doc)
+	if len(all) == 0 {
+		return args, nil
+	}
+	var b strings.Builder
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(doc) // a value json just decoded always encodes
+	return strings.TrimSuffix(b.String(), "\n"), all
 }
 
 // labelSetOf collects the distinct labels across a findings slice, matching

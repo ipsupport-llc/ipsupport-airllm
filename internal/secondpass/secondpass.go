@@ -120,6 +120,9 @@ type Job struct {
 	// explicit opt-in, not a side effect of enabling raw_training for
 	// byte-alignment accuracy.
 	allowRaw func() bool
+	// enabled is read at the start of every batch (see SetEnabled); nil
+	// means always enabled.
+	enabled func() bool
 
 	stopCh    chan struct{}
 	doneCh    chan struct{}
@@ -151,6 +154,11 @@ func NewJob(
 		doneCh:    make(chan struct{}),
 	}
 }
+
+// SetEnabled installs the policy switch RunOnce reads before each batch, so
+// turning the job off or on via settings takes effect without a restart.
+// Call it before Start.
+func (j *Job) SetEnabled(enabled func() bool) { j.enabled = enabled }
 
 // Start launches the background ticker. interval <= 0 defaults to 5 minutes.
 // Calling Start more than once is a no-op (guarded by sync.Once).
@@ -189,6 +197,11 @@ func (j *Job) Stop() {
 // RunOnce processes one batch of pending captures. It is also called directly
 // in tests.
 func (j *Job) RunOnce(ctx context.Context) {
+	if j.enabled != nil && !j.enabled() {
+		// Disabled: no rows listed, no bodies read or decrypted, and no
+		// engine call that could only fail.
+		return
+	}
 	rows, err := j.store.PendingForSecondPass(ctx, j.batchSize)
 	if err != nil {
 		slog.Error("secondpass: list pending failed", "err", err)

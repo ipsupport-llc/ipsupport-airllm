@@ -103,7 +103,8 @@ func (o *OIDCAuth) Callback(w http.ResponseWriter, r *http.Request) {
 	roles := applyRoleMap(parseRoles(claims[o.cfg.RolesClaim]), o.cfg.RoleMap)
 	email, _ := claims["email"].(string)
 	p := Principal{Subject: idt.Subject, Email: email, Roles: roles}
-	if _, err := o.store.UpsertOIDC(r.Context(), p); err != nil {
+	id, err := o.store.UpsertOIDC(r.Context(), p)
+	if err != nil {
 		if errors.Is(err, ErrLocalUserSubjectConflict) {
 			http.Error(w, "this account is managed locally; SSO login is not available for it", http.StatusConflict)
 			return
@@ -111,6 +112,7 @@ func (o *OIDCAuth) Callback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "user upsert failed", http.StatusInternalServerError)
 		return
 	}
+	p.UserID = id
 	o.SetSession(w, r, p)
 	for _, name := range []string{"air_oidc_state", "air_oidc_nonce", "air_oidc_pkce"} {
 		http.SetCookie(w, &http.Cookie{Name: name, Path: "/", HttpOnly: true, MaxAge: -1})

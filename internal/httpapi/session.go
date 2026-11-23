@@ -3,9 +3,11 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/auth"
+	"github.com/jackc/pgx/v5"
 )
 
 type sessCtx int
@@ -18,8 +20,9 @@ type session struct {
 	userID    string
 }
 
-// requireSession authenticates the caller, ensures a backing user row, and
-// stores the session on the request context.
+// requireSession authenticates the caller, loads the backing user row, and
+// stores the session on the request context. It never creates a user: a
+// cookie whose user row is gone (deleted) or disabled gets a 401.
 func (s *Server) requireSession(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p, err := s.auth.Authenticate(r)
@@ -32,6 +35,10 @@ func (s *Server) requireSession(next http.HandlerFunc) http.HandlerFunc {
 			ensureUser = s.ensureUserFn
 		}
 		u, err := ensureUser(r.Context(), p)
+		if errors.Is(err, errSessionUserGone) {
+			writeControlError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
 		if err != nil {
 			writeControlError(w, http.StatusInternalServerError, "failed to load user")
 			return
@@ -39,8 +46,7 @@ func (s *Server) requireSession(next http.HandlerFunc) http.HandlerFunc {
 		// A disabled account stops authenticating on its very next request,
 		// not just once its session cookie's TTL eventually expires — the
 		// cookie is a stateless signed blob with no revocation list, so
-		// this per-request DB read (already happening below for ensureUser
-		// regardless) is the only place that can catch it.
+		// this per-request DB read is the only place that can catch it.
 		if u.disabled {
 			writeControlError(w, http.StatusUnauthorized, "unauthorized")
 			return
@@ -80,29 +86,43 @@ func (s *Server) requireAuditor(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // ensuredUser is the backing DB row for a session's principal, read fresh on
-// every request so a role change or disable takes effect immediately.
+// every request so a role change, disable, or delete takes effect immediately.
 type ensuredUser struct {
 	id       string
 	roles    []string
 	disabled bool
 }
 
+// errSessionUserGone means the session's user row no longer exists, or its
+// subject now belongs to a different user than the one the cookie was issued
+// for. requireSession answers it with 401.
+var errSessionUserGone = errors.New("session user no longer exists")
+
+// ensureUser loads the session's user row. It is read-only on purpose: users
+// are provisioned only by the OIDC callback (UpsertOIDC), the local bootstrap
+// admin, and the admin API. Recreating the row here from the stateless cookie
+// would bring a deleted user back, with the roles baked into their cookie,
+// for the rest of the cookie's TTL. The caller uses the returned roles and
+// disabled flag, not the cookie's, as the source of truth for this request.
 func (s *Server) ensureUser(ctx context.Context, p auth.Principal) (ensuredUser, error) {
-	// Resolve the user id by subject. On an existing row, touch only updated_at —
-	// never overwrite roles/email from the stateless session cookie, or an admin's
-	// role change to an active user would be silently reverted on their next request.
-	// (OIDC refreshes roles in the callback's UpsertOIDC before the session is set;
-	// local users are admin-managed in the DB.) The caller uses the returned roles
-	// and disabled flag — not the cookie's — as the source of truth for this request.
 	var u ensuredUser
 	err := s.st.PG.QueryRow(ctx, `
-		INSERT INTO users (subject, email, display, roles)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (subject) DO UPDATE SET updated_at = now()
-		RETURNING id::text, roles, disabled`,
-		p.Subject, p.Email, p.Subject, p.Roles,
+		SELECT id::text, roles, disabled FROM users WHERE subject = $1`,
+		p.Subject,
 	).Scan(&u.id, &u.roles, &u.disabled)
-	return u, err
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ensuredUser{}, errSessionUserGone
+	}
+	if err != nil {
+		return ensuredUser{}, err
+	}
+	// The cookie must name this exact user. Cookies issued before sessions
+	// carried the user id have none and are refused, so everyone logs in
+	// once after the upgrade.
+	if p.UserID == "" || p.UserID != u.id {
+		return ensuredUser{}, errSessionUserGone
+	}
+	return u, nil
 }
 
 func sessionFrom(ctx context.Context) (session, bool) {

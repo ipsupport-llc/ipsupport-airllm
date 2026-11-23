@@ -91,7 +91,7 @@ func (s *Server) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reques
 		entry.Status = code
 		entry.ErrorMsg = callErr.Error()
 		s.finalizeAudioUsage(r.Context(), entry, ak.KeyID, 0, 0, 0, "")
-		writeProtocolError(w, r, code, typ, callErr.Error())
+		writeProtocolError(w, r, code, typ, clientErrorMessage(callErr, plan.ExposeBackendHeaders))
 		return
 	}
 
@@ -229,7 +229,7 @@ func (s *Server) handleAudioCapabilities(w http.ResponseWriter, r *http.Request)
 	}
 	if out.Synthesis == nil && voicesErr != nil {
 		code, typ := classifyUpstreamErr(voicesErr)
-		writeProtocolError(w, r, code, typ, voicesErr.Error())
+		writeProtocolError(w, r, code, typ, clientErrorMessage(voicesErr, plan.ExposeBackendHeaders))
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -344,7 +344,7 @@ func (s *Server) handleAudioSpeech(w http.ResponseWriter, r *http.Request) {
 		entry.Status = code
 		entry.ErrorMsg = callErr.Error()
 		s.finalizeAudioUsage(r.Context(), entry, ak.KeyID, 0, 0, 0, "")
-		writeProtocolError(w, r, code, typ, callErr.Error())
+		writeProtocolError(w, r, code, typ, clientErrorMessage(callErr, plan.ExposeBackendHeaders))
 		return
 	}
 

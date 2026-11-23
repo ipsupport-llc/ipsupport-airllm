@@ -31,6 +31,51 @@ automatically on boot**, in lexicographic order, inside `store.Migrate`. To add
 one, drop a new `NNNN_name.sql` file with the next number; do not edit applied
 migrations. A clean re-bootstrap is `make compose-down && make compose-up`.
 
+### Upgrading to this release
+
+- **`config.env` now defaults to `prod`** (it was `dev`). A release that never
+  set it switches to prod on upgrade: the `master-key` Secret key must hold a
+  real key. An install that ran with an empty `master-key` used a random dev key
+  stored in the database; a new master key cannot decrypt provider credentials
+  or capture bodies sealed with it — either keep `config.env=dev` or re-enter
+  the provider credentials after switching.
+- **Demo data is no longer seeded on `ENV=dev`**; it needs `SEED_DEV=1`. On every
+  boot without it, the gateway revokes the well-known demo API key if it is still
+  active and disables `dev-admin`, `dev-auditor` and `operator` while their
+  password is still the demo one, logging a `WARN` for each. If `dev-admin` was
+  the only admin, a new bootstrap admin is created (see the README for its
+  password).
+- **Everyone signs in once more.** Session cookies now carry the user id;
+  cookies issued by older releases have none and get `401`.
+- **dlp-bert:** the chart now runs the sidecar as uid 10001 with a read-only root
+  filesystem, which needs the dlp-bert image from the same release (older images
+  run as root and keep the model under `/root`). Keep the chart and
+  `dlpBert.image.tag`/`digest` in step.
+- **`dlpBert.service.port`** now also moves the sidecar's listen port. Changing
+  it on an existing release does not update the DLP model URL already stored in
+  the database (the chart value only seeds it on first boot) — edit the Sidecar
+  URL under **Admin → DLP** as well.
+- **`TRUSTED_PROXY_CIDRS`** is new; the default keeps the previous behavior.
+  See [Security posture → Login lockout](#security-posture) for when to set it.
+- **`OIDC_ISSUER` must be https.** An existing internal plain-http issuer needs
+  `OIDC_ALLOW_HTTP_ISSUER=1` (`config.oidc.allowHttpIssuer` in the chart).
+
+### Upgrades and long migrations
+
+Pending migrations run **before** the HTTP listener starts (each file in its
+own transaction), so until they finish the pod answers no probe. The Helm
+chart's startup probe allows `app.startupProbe.periodSeconds ×
+app.startupProbe.failureThreshold` (3 s × 20 ≈ 60 s by default) before the
+kubelet restarts the container — and a restart rolls back the migration in
+progress, so a single migration that needs longer never completes. Before an upgrade that rewrites or indexes a large table:
+
+1. Raise the budget for that rollout, e.g.
+   `--set app.startupProbe.failureThreshold=400` (~20 min).
+2. Optionally scale to one replica first, so only one pod runs the migration
+   (the others wait on the migration advisory lock and would also need the
+   larger budget).
+3. Lower the value again once the new version is up.
+
 ## Security posture
 
 - **Bind to loopback.** On a host with a public IP, never publish the gateway on
@@ -71,11 +116,14 @@ migrations. A clean re-bootstrap is `make compose-down && make compose-up`.
   user's subject, the SSO login is refused with `409 Conflict` instead of
   silently taking over that account's email/roles — a local user's subject
   can never be claimed by a federated login.
-- **Disabling a user.** Setting `disabled=true` on a user blocks new logins
-  immediately. However, an existing session cookie remains valid until its 12-hour
-  TTL expires (stateless HMAC; no per-request DB lookup). The user's API keys
-  keep working until individually revoked — disabling does **not** auto-revoke
-  keys. Revoke keys explicitly via **Admin → Keys** or
+- **Disabling or deleting a user.** Every console request re-reads the user's
+  row, so disabling or deleting a user ends their existing sessions on the next
+  request (`401`), and role changes apply immediately. The console session never
+  creates users: they are created only by the OIDC callback (first SSO login),
+  the bootstrap admin, and **Admin → Users**. A session is bound to the user id
+  it was issued for, so a new account that reuses a deleted user's name does not
+  inherit their old cookie. The user's API keys keep working until individually
+  revoked — disabling does **not** auto-revoke keys. Revoke keys explicitly via **Admin → Keys** or
   `POST /api/admin/keys/{id}/revoke`.
 - **Secrets stay out of git.** The repository is written public-grade: no
   secrets, English-only. `deploy/.env` is git-ignored; use
@@ -84,7 +132,25 @@ migrations. A clean re-bootstrap is `make compose-down && make compose-up`.
   action. The raw training window is the only path that stores un-redacted
   secrets, and only encrypted and TTL-bounded — see
   [DLP, capture & audit](dlp-capture-audit.md#the-raw-training-window).
-- **Least privilege.** The container runs as a non-root user (`uid 10001`).
+- **Least privilege.** The gateway and the DLP BERT sidecar containers run as
+  a non-root user (`uid 10001`); the Helm chart mounts no Kubernetes API token
+  into either pod.
+- **Login lockout.** Ten failed password logins for one username from one client
+  IP lock that pair out for 15 minutes (a correct password clears it). The
+  client IP (also shown in the live view) comes from `X-Forwarded-For` only
+  when the TCP peer is inside `TRUSTED_PROXY_CIDRS` (default: every loopback,
+  private and link-local range); walking the header from the right, the first
+  entry outside those ranges is the client. A peer outside them is the client,
+  whatever its header says.
+
+  Caveats of the default: anything that reaches the gateway from a private
+  address is believed when it sends `X-Forwarded-For` — another workload in the
+  cluster can claim any client IP, and so can anyone behind a source-NATing L4
+  load balancer that hands the gateway a private peer address. Conversely, when
+  the proxies' own address range is not private, every client looks like the
+  proxy and shares one lockout bucket. Set `TRUSTED_PROXY_CIDRS`
+  (`config.trustedProxyCIDRs` in the chart) to just your ingress controller's
+  pod CIDR (or the Caddy container's network), e.g. `10.42.0.0/16`.
 
 ## Datastores & backups
 
@@ -176,12 +242,29 @@ kubectl -n airllm create secret generic airllm-secrets \
 
 helm install airllm deploy/helm/airllm -n airllm --create-namespace \
   --set existingSecret=airllm-secrets \
-  --set image.repository=ghcr.io/OWNER/ipsupport-airllm
+  --set image.repository=ghcr.io/OWNER/ipsupport-airllm \
+  --set config.env=prod
 ```
+
+`config.env` defaults to `prod` (master key required, no demo data). The demo
+seed (`config.seedDev=true`: users with the fixed password `devpass123` and a
+well-known API key) is only for a throwaway local cluster and is refused unless
+`config.env=dev` and `config.authMode=local`.
 
 Templating **fails fast** if `existingSecret` is empty. After install, `NOTES.txt`
 prints the in-cluster Sidecar URL to paste into **Admin → DLP**:
 `http://<release>-airllm-dlp-bert:8000`.
+
+**`/metrics` and the Ingress.** `app.ingress.enabled=true` routes **every** path
+on the host to the gateway, including the unauthenticated `/metrics`. On a
+public host, block `/metrics` at the ingress controller (or keep the Ingress
+private) and let Prometheus scrape the Service in-cluster. The compose `tls`
+profile's Caddy already answers `/metrics` with 404.
+
+A ConfigMap change (any `config.*` value) rolls the gateway pods via a
+`checksum/config` annotation. With `app.capture.persistence.enabled=true` and a
+`ReadWriteOnce` volume the gateway uses the `Recreate` strategy, since a rolling
+update's new pod could not mount the volume the old pod still holds.
 
 ### Autoscaling
 
@@ -404,6 +487,30 @@ p95 latency/hour) without requiring Prometheus. They are fed by the
 - `GET /api/usage/series` — current user's data (last 24 h, hourly buckets).
 - `GET /api/admin/usage/series` — gateway-wide data (admin only).
 
+### Live requests
+
+The console's Live page lists the data-plane requests (`/v1/chat/completions`,
+`/v1/messages`, `/v1/embeddings`, `/v1/audio/transcriptions`,
+`/v1/audio/speech`, `/v1/video/speech`) that are running right now, from
+`GET /api/admin/live` (admin only). A request appears once its API key is
+authenticated and disappears when its handler returns.
+
+Each replica keeps its own in-flight requests in memory and publishes them to
+Redis every 2 s as one key, `air:live:pod:<pod name>` (TTL 10 s; the pod name
+is `HOSTNAME`). An idle replica only refreshes the key's TTL, so it is still
+listed under `pods`. The endpoint reads every `air:live:pod:*` key and merges
+them with the answering replica's own fresh list, so the view lags by up to
+2 s and a replica that dies drops out within 10 s. On a clean shutdown the
+replica keeps publishing through the drain and deletes its key at the end. If
+Redis cannot be read, the answer is the answering replica's requests alone
+with `partial: true`.
+
+`output_tokens` is best effort: one per streamed chunk that carries output,
+replaced by the upstream's own count when it reports one; always `0` for
+unary requests. `client_ip` is resolved the same way as for the
+login lockout: the TCP peer, or — when the peer is a private/loopback proxy —
+the rightmost public `X-Forwarded-For` entry. No prompt or response content and no key secret is ever kept.
+
 ### Reasoning tokens
 
 A model that thinks before it answers spends tokens doing it, and every vendor
@@ -605,6 +712,9 @@ and the pool distributes scans round-robin across endpoints.
 ```sh
 docker compose --profile bert up -d --scale dlp-bert=3
 ```
+
+(The dev stack publishes replicas on host ports `127.0.0.1:8000-8009`, one per
+replica, for debugging from the host; the gateway itself uses the service name.)
 
 Then set **Sidecar URL** (under **Admin → DLP**) to the service name:
 `http://dlp-bert:8000`. The pool resolves the hostname to all three container

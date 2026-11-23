@@ -27,7 +27,13 @@ async function api(method, path, body) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
-  const res = await fetch(path, opts);
+  let res;
+  // A network failure (gateway restarting, connection reset) is reported
+  // like any other failed call, so views show their error state instead of
+  // an unhandled rejection leaving a half-rendered page.
+  try { res = await fetch(path, opts); } catch (_) {
+    return { ok: false, status: 0, data: { error: "Network error — the gateway did not answer" } };
+  }
   let data = null;
   try { data = await res.json(); } catch (_) { /* no body */ }
   // On a signed-in console the control API only answers 401 when the session
@@ -44,6 +50,7 @@ async function api(method, path, body) {
 // sessionExpired drops back to the login form, keeping location.hash so a
 // fresh sign-in (init -> renderShell -> route) reopens the same page.
 function sessionExpired() {
+  stopLive();
   me = null;
   window.onhashchange = null;
   renderLogin();
@@ -58,7 +65,12 @@ function toast(msg, kind = "ok") {
   setTimeout(() => t.remove(), 3500);
 }
 
-function fmtUSD(n) { return "$" + Number(n || 0).toFixed(4); }
+// fmtUSD groups thousands and shows cents for amounts of a dollar or more;
+// smaller amounts keep up to 4 decimals so a $0.0012 request is not "$0.00".
+function fmtUSD(n) {
+  const v = Number(n) || 0;
+  return "$" + v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: Math.abs(v) >= 1 ? 2 : 4 });
+}
 function fmtNum(n) { return Number(n || 0).toLocaleString("en-US"); }
 function fmtTime(s) { return s ? new Date(s).toLocaleString() : "—"; }
 // sparkline renders an inline SVG polyline from numeric values. No deps.
@@ -81,6 +93,35 @@ function fmtLimits(lim) {
     }
   }
   return parts.length ? parts.join(", ") : "—";
+}
+
+// shortVersion shortens a build stamp for the sidebar: "main-<40-hex sha>"
+// becomes "main-<7-hex>", a plain release "0.1.86" becomes "v0.1.86".
+// Top-level so web/consolehelpers.test.mjs can extract it.
+function shortVersion(v) {
+  const s = String(v || "dev");
+  const m = s.match(/^(.*?)-?([0-9a-f]{12,40})$/);
+  if (m) return (m[1] ? m[1] + "-" : "") + m[2].slice(0, 7);
+  return /^\d+\.\d+/.test(s) ? "v" + s : s;
+}
+
+// apiError is the message to show for a failed api() result.
+function apiError(r) {
+  return (r && r.data && r.data.error) || (r && r.status ? `HTTP ${r.status}` : "Request failed");
+}
+
+// loadFailed renders an error panel with a Retry button into el when any of
+// the results failed, and reports whether it did. Views call it before
+// rendering so a failed GET never shows up as "nothing here" or $0 — and,
+// for editors, never becomes the starting point of a save.
+function loadFailed(el, results, retry) {
+  const bad = results.find((r) => !r || !r.ok);
+  if (!bad || !el) return false;
+  el.innerHTML = `<div class="panel load-error"><div class="panel-head"><h2>Could not load</h2></div>
+    <div class="load-error-body"><p class="err-text">${esc(apiError(bad))}</p>
+    <button class="btn sm" type="button" data-retry>Retry</button></div></div>`;
+  el.querySelector("[data-retry]").addEventListener("click", retry);
+  return true;
 }
 
 let me = null;
@@ -150,7 +191,8 @@ const NAV = [
 const ADMIN_TABS = ["users", "keys", "usage", "roles", "aliases", "providers", "pricing", "dlp", "audit"];
 
 function renderShell() {
-  const adminLink = me.is_admin ? `<div class="sect">Admin</div><a href="#/admin/users" data-nav>Admin console</a>` : "";
+  // Live is an org-wide view, so it sits with the other admin-only views.
+  const adminLink = me.is_admin ? `<div class="sect">Admin</div><a href="#/live" data-nav>Live</a><a href="#/admin/users" data-nav>Admin console</a>` : "";
   const capturesLink = isAuditor() ? `<a href="#/captures" data-nav>Captures</a><a href="#/review" data-nav>Review</a>` : "";
   app.innerHTML = `
     <div class="shell">
@@ -162,11 +204,15 @@ function renderShell() {
           ${adminLink}
         </nav>
         <div class="sidebar-foot">
-          <div class="who">${esc(me.subject)}</div>
-          <div>${esc((me.roles || []).join(", ")) || "no roles"}</div>
-          ${authMode.mode !== "oidc" ? `<button class="btn ghost sm" id="change-pw" style="margin-top:.3rem">Change password</button>` : ""}
-          <button class="btn ghost sm" id="logout" style="margin-top:.6rem">Sign out</button>
-          <div class="ver">AirLLM v${esc(me.version || "dev")}</div>
+          <div class="who-block">
+            <div class="who">${esc(me.subject)}</div>
+            <div class="roles">${esc((me.roles || []).join(", ")) || "no roles"}</div>
+          </div>
+          <div class="foot-actions">
+            ${authMode.mode !== "oidc" ? `<button class="btn ghost sm" id="change-pw">Change password</button>` : ""}
+            <button class="btn ghost sm" id="logout">Sign out</button>
+          </div>
+          <div class="ver" title="AirLLM ${esc(me.version || "dev")}">AirLLM ${esc(shortVersion(me.version))}</div>
           <div class="copyright">© 2026 <a href="https://ipsupport.us" target="_blank" rel="noopener">IPSupport LLC</a></div>
         </div>
       </aside>
@@ -174,7 +220,7 @@ function renderShell() {
     </div>`;
   const cpBtn = $("#change-pw");
   if (cpBtn) cpBtn.addEventListener("click", changePassword);
-  $("#logout").addEventListener("click", async () => { await api("POST", "/auth/logout"); me = null; renderLogin(); });
+  $("#logout").addEventListener("click", async () => { stopLive(); await api("POST", "/auth/logout"); me = null; renderLogin(); });
   window.onhashchange = route;
   route();
 }
@@ -201,6 +247,7 @@ function setActiveNav() {
 }
 
 function route() {
+  stopLive();
   setActiveNav();
   const view = $("#view");
   const hash = location.hash || "#/";
@@ -214,6 +261,9 @@ function route() {
   } else if (hash === "#/review") {
     if (!isAuditor()) { view.innerHTML = `<p class="err-text">Auditor role required.</p>`; return; }
     viewReview(view);
+  } else if (hash === "#/live") {
+    if (!me.is_admin) { view.innerHTML = `<p class="err-text">Admin role required.</p>`; return; }
+    viewLive(view);
   } else if (hash === "#/keys") viewKeys(view);
   else if (hash === "#/usage") viewUsage(view);
   else viewDashboard(view);
@@ -227,6 +277,7 @@ async function viewDashboard(view) {
   const seriesPath = me.is_admin ? "/api/admin/usage/series" : "/api/usage/series";
   const [u, k, sr] = await Promise.all([api("GET", "/api/usage"), api("GET", "/api/keys"), api("GET", seriesPath)]);
   if (!dashGuard.current(token)) return;
+  if (loadFailed($("#dash"), [u, k, sr], () => viewDashboard(view))) return;
   const usage = u.data || {};
   const keys = (k.data && k.data.keys) || [];
   const active = keys.filter((x) => x.status === "active").length;
@@ -237,15 +288,19 @@ async function viewDashboard(view) {
     return `<div class="card"><div class="sub">${esc(label)} · 24h</div>
       <div class="value">${fmt(last)}</div>${sparkline(vals)}</div>`;
   };
+  // The cards above are always the signed-in user's own keys; an admin's
+  // sparklines are organization-wide, so each block says whose it is.
   const sparksHtml = series.length
-    ? `<div class="cards" style="margin-top:1rem">
+    ? `<h2 class="section-label">${me.is_admin ? "Organization · all keys" : "Your keys"} · hourly</h2>
+      <div class="cards">
         ${spark("Tokens/hr", "tokens", fmtNum)}
-        ${spark("Cost/hr", "cost_usd", (v) => "$" + Number(v).toFixed(4))}
+        ${spark("Cost/hr", "cost_usd", fmtUSD)}
         ${spark("Requests/hr", "requests", fmtNum)}
         ${spark("p95 latency", "p95_ms", (v) => fmtNum(v) + " ms")}
       </div>`
     : `<div class="empty" style="margin-top:1rem">No usage history yet.</div>`;
   $("#dash").innerHTML = `
+    <h2 class="section-label">Your usage</h2>
     ${usageCards(usage)}
     ${sparksHtml}
     <div class="panel">
@@ -298,6 +353,7 @@ async function viewUsage(view) {
     api("GET", "/api/usage/breakdown?hours=24"),
   ]);
   if (!usageGuard.current(token)) return;
+  if (loadFailed($("#u"), [u, b], () => viewUsage(view))) return;
   $("#u").innerHTML = usageCards(u.data || {}) +
     `<p class="card-sub" style="color:var(--muted)">Rolling windows, enforced per API key. Limits are configured by your role policy.</p>` +
     breakdownTables(b.data || {});
@@ -331,7 +387,7 @@ async function viewCaptures(view) {
           </label>
           <label class="field" style="flex:0 1 100px;margin:0">
             <span class="lab">Limit</span>
-            <input type="number" id="cap-limit" value="50" min="1" max="1000" />
+            <input type="number" id="cap-limit" value="50" min="1" max="500" />
           </label>
           <div style="display:flex;align-items:flex-end">
             <button class="btn" id="cap-search">Search</button>
@@ -356,14 +412,15 @@ async function loadCaptures() {
   const params = new URLSearchParams();
   if (status) params.set("review_status", status);
   if (limit) params.set("limit", limit);
-  if (fromEl && fromEl.value) params.set("from", new Date(fromEl.value).toISOString());
-  if (toEl && toEl.value) params.set("to", new Date(toEl.value).toISOString());
+  if (fromEl && fromEl.value) params.set("from", utcInputToISO(fromEl.value));
+  if (toEl && toEl.value) params.set("to", utcInputToISO(toEl.value));
 
   const r = await api("GET", "/api/audit/captures?" + params.toString());
   if (!capturesGuard.current(token)) return;
-  const captures = (r.data && r.data.captures) || [];
   const el = $("#cap-results");
   if (!el) return;
+  if (loadFailed(el, [r], loadCaptures)) return;
+  const captures = (r.data && r.data.captures) || [];
 
   const labelBadges = (findings) => {
     if (!findings || !findings.length) return `<span class="badge neutral">clean</span>`;
@@ -378,7 +435,7 @@ async function loadCaptures() {
       <td class="mono">${esc(c.ingress_protocol)}</td>
       <td class="mono">${esc(c.alias) || "—"}</td>
       <td>${esc(c.provider_name) || "—"}</td>
-      <td><span class="badge ${c.status < 300 ? "active" : "revoked"}">${c.status || "?"}</span></td>
+      <td>${statusBadge(c.status)}</td>
       <td>${c.redacted ? `<span class="badge neutral">yes</span>` : "no"}</td>
       <td>${labelBadges(c.detected)}</td>
       <td><span class="badge neutral">${esc(c.review_status || "unreviewed")}</span></td>
@@ -386,6 +443,21 @@ async function loadCaptures() {
 
   el.querySelectorAll("[data-cid]").forEach((row) =>
     row.addEventListener("click", () => openCaptureDrawer(row.getAttribute("data-cid"))));
+}
+
+// utcInputToISO reads a datetime-local value ("2026-11-22T10:00") as UTC —
+// the filter is labeled UTC, while new Date(value) would take it as local.
+function utcInputToISO(v) {
+  const d = new Date(v + (v.length === 16 ? ":00Z" : "Z"));
+  return isNaN(d) ? "" : d.toISOString();
+}
+
+// statusBadge shows an HTTP status; 0/missing (no response recorded) is
+// neutral rather than a green success.
+function statusBadge(st) {
+  const n = Number(st) || 0;
+  if (!n) return `<span class="badge neutral">—</span>`;
+  return `<span class="badge ${n < 300 ? "active" : "revoked"}">${n}</span>`;
 }
 
 async function openCaptureDrawer(id) {
@@ -479,6 +551,7 @@ async function loadReviewQueue() {
   const el = $("#rev-table");
   if (!el) return;
   const r = await api("GET", "/api/audit/review");
+  if (loadFailed(el, [r], loadReviewQueue)) return;
   const captures = (r.data && r.data.captures) || [];
 
   const labelBadges = (findings) => {
@@ -524,13 +597,17 @@ async function openReviewModal(id) {
   const cap = (r.data && r.data.capture) || {};
   const body = (r.data && r.data.body) || "";
   const detected = cap.detected || [];
+  // The review endpoint replaces gold_labels wholesale, so every save sends
+  // the reviewer labels already stored plus any new one.
+  const gold = cap.gold_labels || [];
+  let msgs = [];
 
   // Build transcript HTML.
   let bodyHtml = "";
   if (body) {
     try {
       const parsed = JSON.parse(body);
-      const msgs = parsed.messages || [];
+      msgs = parsed.messages || [];
       const resp = parsed.response || "";
       const lines = msgs.map((m) =>
         `<div style="margin:.4rem 0;padding:.4rem .7rem;border-radius:6px;background:var(--bg-soft,#1e1e2e);border-left:3px solid ${m.role === "user" ? "var(--accent,#7c3aed)" : "var(--rule,#333)"}">
@@ -570,11 +647,15 @@ async function openReviewModal(id) {
         <button class="btn sm" data-rev-status="false_negative">False negative</button>
         <button class="btn ghost sm" data-rev-status="unreviewed">Reset</button>
       </div>
-      <div class="lab" style="margin-bottom:.3rem">Add missed span</div>
+      <div class="lab" style="margin-bottom:.3rem">Add missed span${gold.length ? ` <span class="badge neutral">${gold.length} stored</span>` : ""}</div>
       <div class="row" style="flex-wrap:wrap;gap:.4rem;align-items:flex-end;margin-bottom:.5rem">
         <label class="field" style="flex:0 1 160px;margin:0">
           <span class="lab">Label</span>
           <input id="rev-label" placeholder="e.g. openai_key" />
+        </label>
+        <label class="field" style="flex:1 1 220px;margin:0">
+          <span class="lab">Missed text (paste — fills start/end)</span>
+          <input id="rev-text" class="mono" placeholder="the secret as it appears in the transcript" />
         </label>
         <label class="field" style="flex:0 1 90px;margin:0">
           <span class="lab">Start</span>
@@ -593,12 +674,19 @@ async function openReviewModal(id) {
   $("#rev-close3").addEventListener("click", () => { modal.innerHTML = ""; });
   modal.scrollIntoView({ behavior: "smooth" });
 
-  // Status buttons (no extra span).
+  $("#rev-text").addEventListener("input", () => {
+    const t = $("#rev-text").value;
+    const sp = t ? findSpan(msgs, t) : null;
+    $("#rev-err").textContent = t && !sp ? "Text not found in any message." : "";
+    if (sp) { $("#rev-start").value = sp.start; $("#rev-end").value = sp.end; }
+  });
+
+  // Status buttons (no extra span; stored gold labels are kept).
   modal.querySelectorAll("[data-rev-status]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const status = btn.getAttribute("data-rev-status");
       const res = await api("POST", `/api/audit/captures/${encodeURIComponent(id)}/review`,
-        { review_status: status, labels: [] });
+        { review_status: status, labels: gold });
       if (res.ok) {
         toast(`Marked ${status}`);
         modal.innerHTML = "";
@@ -619,7 +707,7 @@ async function openReviewModal(id) {
     if (end <= start) { errEl.textContent = "End must be greater than start."; return; }
     errEl.textContent = "";
     const res = await api("POST", `/api/audit/captures/${encodeURIComponent(id)}/review`,
-      { review_status: "false_negative", labels: [{ label, start, end }] });
+      { review_status: "false_negative", labels: [...gold, { label, start, end }] });
     if (res.ok) {
       toast("Submitted as false_negative");
       modal.innerHTML = "";
@@ -628,6 +716,169 @@ async function openReviewModal(id) {
       errEl.textContent = (res.data && res.data.error) || "Failed";
     }
   });
+}
+
+// findSpan locates snippet in the first message whose content contains it
+// and returns its UTF-8 byte offsets in that message — the unit dlp.Finding
+// and the dataset export use. null when no message contains it.
+function findSpan(messages, snippet) {
+  const enc = new TextEncoder();
+  for (const m of messages || []) {
+    const c = typeof (m && m.content) === "string" ? m.content : "";
+    const i = c.indexOf(snippet);
+    if (i < 0) continue;
+    const start = enc.encode(c.slice(0, i)).length;
+    return { start, end: start + enc.encode(snippet).length };
+  }
+  return null;
+}
+
+// ---------- live (admin) ----------
+// Requests in flight right now, from GET /api/admin/live. Polled every 2s
+// while the page is visible and not paused; elapsed times tick client-side
+// between polls from each row's server-side elapsed_ms.
+
+// fmtElapsed renders a duration in ms compactly: 4.2s, 1m 05s, 2h 03m.
+// Top-level so web/live.test.mjs can extract it (as the helpers below).
+function fmtElapsed(ms) {
+  const v = Math.max(0, Number(ms) || 0);
+  if (v < 60000) return (v / 1000).toFixed(1) + "s";
+  const s = Math.floor(v / 1000);
+  const pad = (n) => String(n).padStart(2, "0");
+  if (s < 3600) return `${Math.floor(s / 60)}m ${pad(s % 60)}s`;
+  return `${Math.floor(s / 3600)}h ${pad(Math.floor(s / 60) % 60)}m`;
+}
+
+// fmtBytes renders a byte count: 812 B, 47.1 KB, 3.2 MB.
+function fmtBytes(n) {
+  const v = Math.max(0, Number(n) || 0);
+  if (v < 1024) return `${v} B`;
+  if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
+  return `${(v / 1024 / 1024).toFixed(1)} MB`;
+}
+
+// groupLive groups in-flight requests that share a session_id. Returns a
+// list in the order of each item's first request (the API sorts by
+// started_at): {session_id, requests} for a session with 2+ requests, and
+// {session_id: "", requests: [r]} for everything else.
+function groupLive(requests) {
+  const list = requests || [];
+  const count = {};
+  list.forEach((r) => { if (r.session_id) count[r.session_id] = (count[r.session_id] || 0) + 1; });
+  const out = [], bySession = {};
+  list.forEach((r) => {
+    if (r.session_id && count[r.session_id] > 1) {
+      if (!bySession[r.session_id]) { bySession[r.session_id] = { session_id: r.session_id, requests: [] }; out.push(bySession[r.session_id]); }
+      bySession[r.session_id].requests.push(r);
+    } else {
+      out.push({ session_id: "", requests: [r] });
+    }
+  });
+  return out;
+}
+
+// stalePods returns the pods whose last heartbeat is more than maxAgeMs
+// older than the snapshot, each with its age in ms.
+function stalePods(pods, generatedAt, maxAgeMs) {
+  const at = Date.parse(generatedAt);
+  if (isNaN(at)) return [];
+  return (pods || [])
+    .map((p) => ({ pod: p.pod, age_ms: at - Date.parse(p.seen_at) }))
+    .filter((p) => p.age_ms > maxAgeMs);
+}
+
+const live = { timer: null, tick: null, paused: false, fetchedAt: 0 };
+
+function stopLive() {
+  clearTimeout(live.timer);
+  clearInterval(live.tick);
+  live.timer = live.tick = null;
+  document.removeEventListener("visibilitychange", onLiveVisibility);
+}
+
+function onLiveVisibility() {
+  if (!document.hidden && !live.paused && !live.timer) pollLive();
+}
+
+function viewLive(view) {
+  live.paused = false;
+  view.innerHTML = `<div class="page-head"><h1 class="page-title">Live</h1>
+      <div class="row"><span class="muted" id="live-status"></span>
+        <button class="btn ghost sm" id="live-pause" type="button">Pause</button></div></div>
+    <div id="live-root"><div class="empty">Loading…</div></div>`;
+  $("#live-pause").addEventListener("click", () => {
+    live.paused = !live.paused;
+    $("#live-pause").textContent = live.paused ? "Resume" : "Pause";
+    if (live.paused) { clearTimeout(live.timer); live.timer = null; liveStatus(); } else pollLive();
+  });
+  document.addEventListener("visibilitychange", onLiveVisibility);
+  live.tick = setInterval(tickLive, 1000);
+  pollLive();
+}
+
+function liveStatus() {
+  const el = $("#live-status");
+  if (!el) return;
+  if (live.paused) el.textContent = "Paused";
+  else if (document.hidden) el.textContent = "Paused while hidden";
+  else el.textContent = live.fetchedAt ? `Updated ${new Date(live.fetchedAt).toLocaleTimeString()} · every 2s` : "";
+}
+
+async function pollLive() {
+  clearTimeout(live.timer);
+  live.timer = null;
+  if (live.paused || document.hidden) { liveStatus(); return; }
+  const r = await api("GET", "/api/admin/live");
+  const root = $("#live-root");
+  if (!root || live.paused) return; // navigated away or paused meanwhile
+  // A failed poll stops polling until Retry, rather than hammering a
+  // backend that is already failing.
+  if (loadFailed(root, [r], pollLive)) { liveStatus(); return; }
+  live.fetchedAt = Date.now();
+  renderLive(root, r.data || {});
+  liveStatus();
+  if (!document.hidden) live.timer = setTimeout(pollLive, 2000);
+}
+
+function tickLive() {
+  if (live.paused || !live.fetchedAt) return;
+  const delta = Date.now() - live.fetchedAt;
+  document.querySelectorAll("#live-root [data-elapsed]").forEach((el) => {
+    el.textContent = fmtElapsed(Number(el.getAttribute("data-elapsed")) + delta);
+  });
+}
+
+function renderLive(root, d) {
+  const reqs = d.requests || [];
+  const pods = d.pods || [];
+  const stale = stalePods(pods, d.generated_at, 10000);
+  const phaseBadge = { routing: "neutral", upstream: "admin", streaming: "active" };
+  const row = (r, inGroup) => `<tr class="${inGroup ? "in-group" : ""}${r.attempt > 1 ? " failover" : ""}">
+    <td class="mono num" data-elapsed="${Number(r.elapsed_ms) || 0}">${fmtElapsed(r.elapsed_ms)}</td>
+    <td>${esc(r.user) || `<span class="muted">—</span>`}<div class="sub mono">${esc(r.key_name || r.key_id)}</div></td>
+    <td class="mono">${esc(r.endpoint)}${r.stream ? ` <span class="badge neutral">stream</span>` : ""}</td>
+    <td class="mono wrap">${esc(r.alias)}<div class="sub">${r.provider ? `→ ${esc(r.provider)}/${esc(r.upstream_model)}` : `<span class="muted">not routed yet</span>`}</div></td>
+    <td><span class="badge ${phaseBadge[r.phase] || "neutral"}">${esc(r.phase)}</span></td>
+    <td>${r.attempt > 1 ? `<span class="badge warn" title="failed over to attempt ${Number(r.attempt)}">#${Number(r.attempt)} failover</span>` : Number(r.attempt) || 1}</td>
+    <td class="mono num">${fmtNum(r.output_tokens)} tok<div class="sub">${fmtBytes(r.bytes_out)}</div></td>
+    <td class="mono" title="${esc(r.pod)}">${esc(String(r.pod || "").split("-").pop())}</td>
+    <td class="mono">${esc(r.client_ip)}</td></tr>`;
+  const body = groupLive(reqs).map((g) => g.session_id
+    ? `<tr class="session-head"><td colspan="9"><span class="badge neutral">session</span>
+        <span class="mono" title="${esc(g.session_id)}">${esc(g.session_id)}</span>
+        <span class="muted">· ${g.requests.length} requests in flight · ${esc(g.requests[0].user || g.requests[0].key_name || "")}</span></td></tr>`
+      + g.requests.map((r) => row(r, true)).join("")
+    : row(g.requests[0], false)).join("");
+  const notes = [];
+  if (d.partial) notes.push(`<div class="notice warn">Partial view: the shared store is unreachable, so only this pod's own requests are shown.</div>`);
+  if (stale.length) notes.push(`<div class="notice warn">No recent heartbeat from ${stale.map((p) => `<span class="mono">${esc(p.pod)}</span> (${fmtElapsed(p.age_ms)} ago)`).join(", ")} — its requests may be missing or finished.</div>`);
+  const podChips = pods.map((p) => `<span class="pod-chip${stale.some((s) => s.pod === p.pod) ? " stale" : ""}"><span class="mono">${esc(p.pod)}</span> · ${fmtNum(p.inflight)}</span>`).join("");
+  root.innerHTML = notes.join("") + `<div class="panel">
+    <div class="panel-head"><h2>${reqs.length} in flight</h2><div class="pod-chips">${podChips}</div></div>
+    ${reqs.length === 0 ? `<div class="empty">No requests in flight</div>` : `<div class="table-scroll"><table class="live-table">
+      <thead><tr>${["Elapsed", "User / key", "Endpoint", "Alias → upstream", "Phase", "Attempt", "Output", "Pod", "Client IP"].map((c) => `<th>${c}</th>`).join("")}</tr></thead>
+      <tbody>${body}</tbody></table></div>`}
+  </div>`;
 }
 
 // ---------- keys ----------
@@ -651,6 +902,7 @@ async function loadKeys() {
   const token = keysGuard.start();
   const r = await api("GET", "/api/keys");
   if (!keysGuard.current(token)) return;
+  if (loadFailed($("#keys-panel"), [r], loadKeys)) return;
   const keys = (r.data && r.data.keys) || [];
   $("#keys-panel").innerHTML = `
     <div class="panel">
@@ -660,12 +912,12 @@ async function loadKeys() {
       <tbody>${keys.map(keyRow).join("")}</tbody></table>`}
     </div>`;
   document.querySelectorAll("[data-revoke]").forEach((b) =>
-    b.addEventListener("click", () => revokeKey(b.getAttribute("data-revoke"))));
+    b.addEventListener("click", () => revokeKey(b.getAttribute("data-revoke"), b.getAttribute("data-name"))));
 }
 
 function keyRow(k) {
   const revoke = k.status === "active"
-    ? `<button class="btn danger sm" data-revoke="${esc(k.id)}">Revoke</button>` : "";
+    ? `<button class="btn danger sm" data-revoke="${esc(k.id)}" data-name="${esc(k.name)}">Revoke</button>` : "";
   return `<tr>
     <td>${esc(k.name)}</td>
     <td class="mono">${esc(k.prefix)}…${esc(k.last4)}</td>
@@ -709,8 +961,8 @@ async function createKey() {
   loadKeys();
 }
 
-async function revokeKey(id) {
-  if (!confirm("Revoke this key? Clients using it will stop working.")) return;
+async function revokeKey(id, name) {
+  if (!confirm(`Revoke key "${name}"? Clients using it will stop working.`)) return;
   const r = await api("POST", `/api/keys/${id}/revoke`);
   if (r.ok) { toast("Key revoked"); loadKeys(); }
   else toast((r.data && r.data.error) || "Failed to revoke", "err");
@@ -735,6 +987,7 @@ async function adminUsage(c) {
     api("GET", "/api/admin/usage/breakdown?hours=24"),
     api("GET", "/api/admin/usage/recent?limit=50"),
   ]);
+  if (loadFailed(c, [u, b, r], () => adminUsage(c))) return;
   c.innerHTML = `<h2 style="font-size:1.05rem">Organization usage</h2>` + usageCards(u.data || {}) +
     breakdownTables(b.data || {}) + recentRequestsTable((r.data || {}).requests || []);
 }
@@ -754,21 +1007,22 @@ function tokensOut(out, reasoning) {
 function recentRequestsTable(reqs) {
   const tok = (n) => (+n || 0).toLocaleString("en-US");
   const rows = reqs.map((x) => `<tr class="${x.status >= 400 ? "err-row" : ""}">
-    <td class="mono">${esc(new Date(x.ts).toLocaleString())}</td>
+    <td class="mono nw">${esc(new Date(x.ts).toLocaleString())}</td>
     <td class="mono">${esc(x.alias)}</td>
     <td>${esc(x.provider) || "(none)"}</td>
     <td class="mono">${esc(x.upstream_model)}</td>
     <td>${x.status}</td>
-    <td>${x.latency_ms} ms</td>
-    <td class="mono">${tok(x.tokens_in)} / ${tokensOut(x.tokens_out, x.tokens_reasoning)}</td>
-    <td>$${(+x.cost_usd).toFixed(4)}</td>
-    <td class="mono">${esc(x.error || "")}</td></tr>`);
+    <td class="nw">${fmtNum(x.latency_ms)} ms</td>
+    <td class="mono nw">${tok(x.tokens_in)} / ${tokensOut(x.tokens_out, x.tokens_reasoning)}</td>
+    <td class="nw">${fmtUSD(x.cost_usd)}</td>
+    <td class="mono trunc" title="${esc(x.error || "")}">${esc(x.error || "")}</td></tr>`);
   return panelTable("Recent requests",
     ["Time", "Alias", "Provider", "Upstream model", "Status", "Latency", "Tokens in / out", "Cost", "Error"], rows);
 }
 
 async function adminUsers(c) {
   const r = await api("GET", "/api/admin/users");
+  if (loadFailed(c, [r], () => adminUsers(c))) return;
   const users = (r.data && r.data.users) || [];
   c.innerHTML = `<div class="row" style="margin-bottom:1rem"><button class="btn sm" id="new-user">New user</button></div>` +
     panelTable("Users", ["Subject", "Email", "Roles", "Auth", "Status", "Created", ""],
@@ -779,10 +1033,10 @@ async function adminUsers(c) {
         <td>${esc(u.auth_source || "local")}</td>
         <td>${u.disabled ? `<span class="badge revoked">disabled</span>` : `<span class="badge active">active</span>`}</td>
         <td>${fmtTime(u.created_at)}</td>
-        <td style="text-align:right">
+        <td class="actions">
           <button class="btn ghost sm" data-edit-user='${esc(JSON.stringify(u))}'>Edit</button>
-          <button class="btn ghost sm" data-reset-user="${esc(u.id)}">Reset pw</button>
-          <button class="btn danger sm" data-del-user="${esc(u.id)}">Delete</button>
+          ${u.auth_source === "oidc" ? "" : `<button class="btn ghost sm" data-reset-user="${esc(u.id)}">Reset pw</button>`}
+          ${u.subject === me.subject ? "" : `<button class="btn danger sm" data-del-user="${esc(u.id)}" data-name="${esc(u.subject)}">Delete</button>`}
         </td></tr>`));
   $("#new-user").addEventListener("click", () => editUser(c, null));
   document.querySelectorAll("[data-edit-user]").forEach((b) =>
@@ -790,7 +1044,7 @@ async function adminUsers(c) {
   document.querySelectorAll("[data-reset-user]").forEach((b) =>
     b.addEventListener("click", () => resetUserPassword(c, b.getAttribute("data-reset-user"))));
   document.querySelectorAll("[data-del-user]").forEach((b) => b.addEventListener("click", async () => {
-    if (!confirm("Delete user " + b.getAttribute("data-del-user") + "?")) return;
+    if (!confirm(`Delete user "${b.getAttribute("data-name")}"?`)) return;
     const x = await api("DELETE", `/api/admin/users/${encodeURIComponent(b.getAttribute("data-del-user"))}`);
     if (x.ok) { toast("User deleted"); adminUsers(c); }
     else toast((x.data && x.data.error) || "Failed", "err");
@@ -799,20 +1053,23 @@ async function adminUsers(c) {
 
 async function editUser(c, u) {
   const rolesR = await api("GET", "/api/admin/roles");
+  if (!rolesR.ok) { toast("Could not load roles: " + apiError(rolesR), "err"); return; }
   const availRoles = ((rolesR.data && rolesR.data.roles) || []).map((rp) => rp.role);
-  const hint = availRoles.length ? ` (available: ${availRoles.join(", ")})` : "";
+  // Roles are picked, not typed, so a typo can't be saved silently. A role
+  // the user already holds stays listed even without a policy row.
+  const roleOptions = [...new Set([...availRoles, ...((u && u.roles) || [])])];
   const isNew = !u;
   const fields = [];
   if (isNew) fields.push({ name: "username", label: "Username", value: "" });
   fields.push(
     { name: "email", label: "Email", value: u ? (u.email || "") : "" },
     { name: "display", label: "Display name", value: u ? (u.display || "") : "" },
-    { name: "roles", label: `Roles (comma-separated)${hint}`, value: u ? (u.roles || []).join(", ") : "" },
+    { name: "roles", label: "Roles", type: "checkgroup", options: roleOptions, value: u ? (u.roles || []) : [] },
     { name: "disabled", label: "Disabled", type: "checkbox", value: u ? !!u.disabled : false },
   );
   if (isNew) fields.push({ name: "password", label: "Password", type: "password", value: "" });
   modalForm(isNew ? "New user" : `Edit user ${u.subject}`, fields, async (v) => {
-    const roles = v.roles.split(",").map((s) => s.trim()).filter(Boolean);
+    const roles = v.roles;
     let x;
     if (isNew) {
       x = await api("POST", "/api/admin/users", {
@@ -841,15 +1098,16 @@ function resetUserPassword(_c, id) {
 
 async function adminKeys(c) {
   const r = await api("GET", "/api/admin/keys");
+  if (loadFailed(c, [r], () => adminKeys(c))) return;
   const keys = (r.data && r.data.keys) || [];
   c.innerHTML = panelTable("All API keys", ["Owner", "Name", "Key", "Status", "Last used", ""],
     keys.map((k) => `<tr><td>${esc(k.owner)}</td><td>${esc(k.name)}</td>
       <td class="mono">${esc(k.prefix)}…${esc(k.last4)}</td>
       <td><span class="badge ${esc(k.status)}">${esc(k.status)}</span></td>
       <td>${fmtTime(k.last_used_at)}</td>
-      <td style="text-align:right">${k.status === "active" ? `<button class="btn danger sm" data-arev="${esc(k.id)}">Revoke</button>` : ""}</td></tr>`));
+      <td class="actions">${k.status === "active" ? `<button class="btn danger sm" data-arev="${esc(k.id)}" data-name="${esc(k.name)}" data-owner="${esc(k.owner)}">Revoke</button>` : ""}</td></tr>`));
   document.querySelectorAll("[data-arev]").forEach((b) => b.addEventListener("click", async () => {
-    if (!confirm("Revoke this key?")) return;
+    if (!confirm(`Revoke key "${b.getAttribute("data-name")}" of ${b.getAttribute("data-owner")}?`)) return;
     const x = await api("POST", `/api/admin/keys/${b.getAttribute("data-arev")}/revoke`);
     if (x.ok) { toast("Revoked"); adminKeys(c); } else toast("Failed", "err");
   }));
@@ -857,14 +1115,18 @@ async function adminKeys(c) {
 
 async function adminAudit(c) {
   const r = await api("GET", "/api/admin/audit");
+  if (loadFailed(c, [r], () => adminAudit(c))) return;
   const rows = (r.data && r.data.audit) || [];
-  c.innerHTML = panelTable("Audit log", ["Time", "Actor", "Action", "Target"],
+  const detail = (d) => (d == null ? "" : JSON.stringify(d));
+  c.innerHTML = panelTable("Audit log", ["Time", "Actor", "Action", "Target", "Detail"],
     rows.map((e) => `<tr><td>${fmtTime(e.ts)}</td><td>${esc(e.actor)}</td>
-      <td class="mono">${esc(e.action)}</td><td class="mono">${esc(e.target)}</td></tr>`));
+      <td class="mono">${esc(e.action)}</td><td class="mono">${esc(e.target)}</td>
+      <td class="mono trunc" title="${esc(detail(e.detail))}">${esc(detail(e.detail)) || "—"}</td></tr>`));
 }
 
 async function adminRoles(c) {
   const r = await api("GET", "/api/admin/roles");
+  if (loadFailed(c, [r], () => adminRoles(c))) return;
   const roles = (r.data && r.data.roles) || [];
   c.innerHTML = `<div class="row" style="margin-bottom:1rem"><button class="btn sm" id="new-role">New role</button></div>` +
     panelTable("Role policies", ["Role", "Allowed models", "Passthrough", "Limits", ""],
@@ -872,7 +1134,7 @@ async function adminRoles(c) {
         <td>${(rp.allowed_models || []).map(esc).join(", ")}</td>
         <td>${rp.allow_passthrough ? "yes" : "no"}</td>
         <td>${fmtLimits(rp.limits)}</td>
-        <td style="text-align:right"><button class="btn ghost sm" data-edit='${esc(JSON.stringify(rp))}'>Edit</button></td></tr>`));
+        <td class="actions"><button class="btn ghost sm" data-edit='${esc(JSON.stringify(rp))}'>Edit</button></td></tr>`));
   $("#new-role").addEventListener("click", () => editRole(c, {}));
   document.querySelectorAll("[data-edit]").forEach((b) =>
     b.addEventListener("click", () => editRole(c, JSON.parse(b.getAttribute("data-edit")))));
@@ -883,14 +1145,12 @@ function editRole(c, rp) {
     { name: "role", label: "Role name", value: rp.role || "", disabled: !!rp.role },
     { name: "allowed_models", label: "Allowed models (comma; * = all)", value: (rp.allowed_models || []).join(", ") },
     { name: "allow_passthrough", label: "Allow explicit provider passthrough", type: "checkbox", value: !!rp.allow_passthrough },
-    { name: "limits", label: "Limits (JSON)", type: "textarea", value: JSON.stringify(rp.limits || {}, null, 2) },
+    { name: "limits", label: "Limits per rolling window (empty = no limit)", type: "limits", value: rp.limits || {} },
   ], async (v) => {
-    let limits;
-    try { limits = JSON.parse(v.limits || "{}"); } catch (_) { toast("Limits must be valid JSON", "err"); return false; }
     const body = {
       allowed_models: v.allowed_models.split(",").map((s) => s.trim()).filter(Boolean),
       allow_passthrough: v.allow_passthrough,
-      limits,
+      limits: v.limits,
     };
     const x = await api("PUT", `/api/admin/roles/${encodeURIComponent(v.role)}`, body);
     if (x.ok) { toast("Role saved"); adminRoles(c); return true; }
@@ -900,6 +1160,7 @@ function editRole(c, rp) {
 
 async function adminProviders(c) {
   const r = await api("GET", "/api/admin/providers");
+  if (loadFailed(c, [r], () => adminProviders(c))) return;
   const ps = (r.data && r.data.providers) || [];
   c.innerHTML = `<div class="row" style="margin-bottom:1rem"><button class="btn sm" id="new-prov">New provider</button></div>` +
     panelTable("Providers", ["Name", "Kind", "Base URL", "Key", "Concurrency", "Enabled", ""],
@@ -908,7 +1169,7 @@ async function adminProviders(c) {
         <td>${credentialBadge(p)}</td>
         <td>${p.max_concurrency > 0 ? p.max_concurrency : "∞"}</td>
         <td>${p.enabled ? "yes" : "no"}</td>
-        <td style="text-align:right"><button class="btn ghost sm" data-edit='${esc(JSON.stringify(p))}'>Edit</button></td></tr>`));
+        <td class="actions"><button class="btn ghost sm" data-edit='${esc(JSON.stringify(p))}'>Edit</button></td></tr>`));
   $("#new-prov").addEventListener("click", () => editProvider(c, {}));
   document.querySelectorAll("[data-edit]").forEach((b) =>
     b.addEventListener("click", () => editProvider(c, JSON.parse(b.getAttribute("data-edit")))));
@@ -974,19 +1235,20 @@ function editProvider(c, p) {
 
 async function adminPricing(c) {
   const r = await api("GET", "/api/admin/pricing");
-  const ps = (r.data && r.data.pricing) || [];
   const pr = await api("GET", "/api/admin/providers");
+  if (loadFailed(c, [r, pr], () => adminPricing(c))) return;
+  const ps = (r.data && r.data.pricing) || [];
   const providers = ((pr.data && pr.data.providers) || []).map((p) => p.name);
   c.innerHTML = `<div class="row" style="margin-bottom:1rem;gap:.5rem">
       <button class="btn sm" id="new-price">New price</button>
       <select id="import-provider">${providers.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("")}</select>
       <button class="btn ghost sm" id="import-prices">Import prices</button>
     </div>` +
-    panelTable("Pricing", ["Provider", "Model", "Unit", "Input", "Output", "Long-prompt tier", ""],
+    panelTable("Pricing", ["Provider", "Model", "Unit", "Input $/1M", "Output $/1M", "Long-prompt tier ($/1M)", ""],
       ps.map((p) => `<tr><td class="mono">${esc(p.provider) || "(any)"}</td><td class="mono">${esc(p.model)}</td>
-        <td>${esc(p.unit || "tokens")}</td><td>${p.input_per_1m}</td><td>${p.output_per_1m}</td>
+        <td>${esc(p.unit || "tokens")}</td><td>${fmtUSD(p.input_per_1m)}</td><td>${fmtUSD(p.output_per_1m)}</td>
         <td class="mono">${esc(contextTierLabel(p))}</td>
-        <td style="text-align:right"><button class="btn ghost sm" data-edit='${esc(JSON.stringify(p))}'>Edit</button></td></tr>`));
+        <td class="actions"><button class="btn ghost sm" data-edit='${esc(JSON.stringify(p))}'>Edit</button></td></tr>`));
   $("#new-price").addEventListener("click", () => editPrice(c, {}));
   document.querySelectorAll("[data-edit]").forEach((b) =>
     b.addEventListener("click", () => editPrice(c, JSON.parse(b.getAttribute("data-edit")))));
@@ -1012,11 +1274,12 @@ async function adminPricing(c) {
 function contextTierLabel(p) {
   const t = Number(p.context_threshold) || 0;
   if (t <= 0) return "—";
-  return `> ${t.toLocaleString("en-US")} → ${p.input_per_1m_above} / ${p.output_per_1m_above}`;
+  return `> ${t.toLocaleString("en-US")} tok → ${fmtUSD(p.input_per_1m_above)} / ${fmtUSD(p.output_per_1m_above)}`;
 }
 
 async function editPrice(c, p) {
   const pr = await api("GET", "/api/admin/providers");
+  if (!pr.ok) { toast("Could not load providers: " + apiError(pr), "err"); return; }
   const providers = ((pr.data && pr.data.providers) || []).map((x) => x.name);
   const providerOptions = [{ value: "", label: "(any)" }, ...providers.map((n) => ({ value: n, label: n }))];
   // The two above-threshold rates are only meaningful on a token row that has a
@@ -1122,13 +1385,13 @@ async function showTierHealth(alias) {
   if (!r.ok) { toast("Failed to load tier health", "err"); return; }
   const bg = document.createElement("div");
   bg.className = "modal-bg";
-  bg.innerHTML = `<div class="modal" style="max-width:820px">
+  bg.innerHTML = `<div class="modal modal-wide" style="max-width:820px">
     ${panelTable("Tier health — " + alias, ["Tier", "Targets", "Breaker", "Reason", "Open until", "Cooldown", ""], tierHealthRows(r.data.tiers))}
-    <div class="row" style="justify-content:flex-end;margin-top:1rem">
+    <div class="row modal-foot">
       <button type="button" class="btn ghost" id="th-refresh">Refresh</button>
       <button type="button" class="btn" id="th-close">Close</button></div></div>`;
   document.body.appendChild(bg);
-  const close = () => bg.remove();
+  const close = wireModalDismiss(bg);
   $("#th-close", bg).addEventListener("click", close);
   $("#th-refresh", bg).addEventListener("click", () => { close(); showTierHealth(alias); });
   bg.querySelectorAll("[data-release]").forEach((b) => b.addEventListener("click", async () => {
@@ -1160,16 +1423,18 @@ function parseSynthCacheTTL(text) {
 
 async function adminAliases(c) {
   const r = await api("GET", "/api/admin/aliases");
+  if (loadFailed(c, [r], () => adminAliases(c))) return;
   const al = (r.data && r.data.aliases) || [];
   c.innerHTML = `<div class="row" style="margin-bottom:1rem"><button class="btn sm" id="new-alias">New alias</button></div>` +
     panelTable("Model aliases", ["Alias", "Protocol", "Strategy", "BERT", "Targets", ""],
       al.map((a) => `<tr><td class="mono">${esc(a.alias)}</td><td>${esc(a.protocol)}</td>
         <td>${esc(a.strategy || "round_robin")}</td>
         <td>${a.dlp_model_scan ? `<span class="badge neutral">on</span>` : `<span class="badge revoked">off</span>`}</td>
-        <td class="mono">${(a.targets || []).map((t) => `${esc(t.provider)}/${esc(t.upstream_model)} (p${t.priority}${t.options && t.options.timeout_ms ? `, ${Number(t.options.timeout_ms)}ms` : ""})`).join(", ") || "—"}</td>
-        <td style="text-align:right"><button class="btn ghost sm" data-health="${esc(a.alias)}">Health</button>
+        <td class="mono">${(a.targets || []).map((t) => `${esc(t.provider)}/${esc(t.upstream_model)} (p${t.priority}${t.options && t.options.timeout_ms ? `, ${fmtNum(t.options.timeout_ms)}ms` : ""})`).join("<br>") || "—"}</td>
+        <td class="actions"><button class="btn ghost sm" data-health="${esc(a.alias)}">Health</button>
           <button class="btn ghost sm" data-edit='${esc(JSON.stringify(a))}'>Edit</button>
-          <button class="btn danger sm" data-del="${esc(a.alias)}">Delete</button></td></tr>`));
+          <button class="btn danger sm" data-del="${esc(a.alias)}">Delete</button></td></tr>`)) +
+    `<div id="failover-panel"></div>`;
   $("#new-alias").addEventListener("click", () => editAlias(c, {}));
   document.querySelectorAll("[data-health]").forEach((b) =>
     b.addEventListener("click", () => showTierHealth(b.getAttribute("data-health"))));
@@ -1180,14 +1445,54 @@ async function adminAliases(c) {
     const x = await api("DELETE", `/api/admin/aliases/${encodeURIComponent(b.getAttribute("data-del"))}`);
     if (x.ok) { toast("Deleted"); adminAliases(c); } else toast("Failed", "err");
   }));
+  failoverPanel($("#failover-panel"));
+}
+
+// failoverPanel edits the gateway-wide failover defaults
+// (GET/PUT /api/admin/failover) that every alias target falls back to for
+// an option it does not set itself.
+async function failoverPanel(el) {
+  const r = await api("GET", "/api/admin/failover");
+  if (!el.isConnected) return;
+  if (loadFailed(el, [r], () => failoverPanel(el))) return;
+  const f = r.data || {};
+  el.innerHTML = `<div class="panel"><div class="panel-head"><h2>Failover defaults (all aliases)</h2></div>
+    <div class="panel-body">
+      <div class="hint">Used by every target whose own options do not set the key.</div>
+      <div class="form-grid">
+        <label class="field"><span class="lab">Time budget per target, ms (0 = none)</span>
+          <input id="fo-timeout" type="number" min="0" value="${Number(f.timeout_ms) || 0}" /></label>
+        <label class="field check"><input type="checkbox" id="fo-auth" ${f.fallback_on_auth ? "checked" : ""} /><span class="lab">Try the next tier on upstream auth/billing errors</span></label>
+        <label class="field"><span class="lab">Unavailable backoff start, ms</span>
+          <input id="fo-uinit" type="number" min="0" value="${Number(f.unavailable_initial_ms) || 0}" /></label>
+        <label class="field"><span class="lab">Unavailable backoff ceiling, ms</span>
+          <input id="fo-umax" type="number" min="0" value="${Number(f.unavailable_max_ms) || 0}" /></label>
+        <label class="field span-2"><span class="lab">Circuit breaker defaults (JSON, same keys as a target's <span class="mono">breaker</span> option)</span>
+          <input id="fo-breaker" class="mono" value="${esc(targetOptionsText(f.breaker))}" placeholder='e.g. {"enabled":true,"failures":3,"cooldown_ms":60000}' /></label>
+      </div>
+      <div class="panel-actions"><button class="btn" id="fo-save">Save failover defaults</button></div>
+    </div></div>`;
+  $("#fo-save", el).addEventListener("click", async () => {
+    let breaker;
+    try { breaker = parseTargetOptions($("#fo-breaker", el).value); } catch (e) { toast("breaker: " + e.message, "err"); return; }
+    const x = await api("PUT", "/api/admin/failover", {
+      timeout_ms: Number($("#fo-timeout", el).value) || 0,
+      fallback_on_auth: $("#fo-auth", el).checked,
+      unavailable_initial_ms: Number($("#fo-uinit", el).value) || 0,
+      unavailable_max_ms: Number($("#fo-umax", el).value) || 0,
+      breaker,
+    });
+    if (x.ok) toast("Failover defaults saved"); else toast(apiError(x), "err");
+  });
 }
 
 async function editAlias(c, a) {
   const pr = await api("GET", "/api/admin/providers");
-  let providers = ((pr.data && pr.data.providers) || []).map((p) => p.name);
-  if (providers.length === 0) providers = ["mock"];
   // Existing alias names, for the rename-collision guard on save.
   const ar = await api("GET", "/api/admin/aliases");
+  if (!pr.ok || !ar.ok) { toast("Could not open the editor: " + apiError(!pr.ok ? pr : ar), "err"); return; }
+  let providers = ((pr.data && pr.data.providers) || []).map((p) => p.name);
+  if (providers.length === 0) providers = ["mock"];
   const existingAliases = ((ar.data && ar.data.aliases) || []).map((x) => x.alias);
 
   const targets = (a.targets && a.targets.length)
@@ -1196,54 +1501,71 @@ async function editAlias(c, a) {
 
   const bg = document.createElement("div");
   bg.className = "modal-bg";
-  bg.innerHTML = `<div class="modal" style="max-width:560px">
+  bg.innerHTML = `<div class="modal modal-wide">
     <h3>${esc(a.alias ? "Edit alias " + a.alias : "New alias")}</h3>
-    <label class="field"><span class="lab">Alias (the model name clients request)</span>
-      <input id="al-alias" value="${esc(a.alias || "")}" /></label>
-    <label class="field"><span class="lab">Client protocol</span>
-      <select id="al-proto">
-        <option ${a.protocol !== "anthropic" ? "selected" : ""}>openai</option>
-        <option ${a.protocol === "anthropic" ? "selected" : ""}>anthropic</option>
-      </select></label>
-    <label class="field"><span class="lab">Balancing within a priority tier</span>
-      <select id="al-strategy">
-        <option value="round_robin" ${a.strategy !== "least_busy" && a.strategy !== "lcr" ? "selected" : ""}>round_robin</option>
-        <option value="least_busy" ${a.strategy === "least_busy" ? "selected" : ""}>least_busy</option>
-        <option value="lcr" ${a.strategy === "lcr" ? "selected" : ""}>lcr (price / availability)</option>
-      </select></label>
-    <label class="field"><span class="lab">LCR mode (used only when strategy = lcr)</span>
-      <select id="al-lcr-mode">
-        <option value="price" ${(a.lcr_mode || "price") === "price" ? "selected" : ""}>price</option>
-        <option value="availability" ${a.lcr_mode === "availability" ? "selected" : ""}>availability</option>
-        <option value="both" ${a.lcr_mode === "both" ? "selected" : ""}>both (availability gate, then price)</option>
-      </select></label>
-    <label class="field"><span class="lab">LCR minimum availability (0..1, used only in "both" mode)</span>
-      <input id="al-lcr-minavail" type="number" min="0" max="1" step="0.01" value="${esc(String(a.lcr_min_availability ?? 0.5))}" style="width:96px" /></label>
-    <label class="field"><span class="lab">Layer-2 BERT scan (fuzzy PII)</span>
-      <input id="al-bert" type="checkbox" ${a.dlp_model_scan === false ? "" : "checked"} style="width:auto" /></label>
-    <label class="field"><span class="lab">Expose which target answered (X-Backend-Model header)</span>
-      <input id="al-expose" type="checkbox" ${a.expose_backend_headers ? "checked" : ""} style="width:auto" /></label>
-    <label class="field"><span class="lab">DLP scan on audio transcripts/input (STT/TTS)</span>
-      <input id="al-dlpaudio" type="checkbox" ${a.dlp_audio_scan === false ? "" : "checked"} style="width:auto" /></label>
-    <label class="field"><span class="lab">Session affinity: a session (X-Session-Id) served by a fallback tier stays on it</span>
-      <input id="al-affinity" type="checkbox" ${a.session_affinity ? "checked" : ""} style="width:auto" /></label>
-    <label class="field"><span class="lab">Session pin TTL, hours (empty = 4)</span>
-      <input id="al-affinity-ttl" type="number" min="0" max="168" step="any" value="${esc(affinityTTLText(a.session_affinity_ttl_s))}" style="width:96px" /></label>
-    <label class="field"><span class="lab">Synthesis cache: answer a repeated speech request with the clip the serving tier rendered</span>
-      <input id="al-ttscache" type="checkbox" ${a.synthesis_cache ? "checked" : ""} style="width:auto" /></label>
-    <label class="field"><span class="lab">Synthesis cache TTL, days (empty = 7)</span>
-      <input id="al-ttscache-ttl" type="number" min="0" max="30" step="any" value="${esc(synthCacheTTLText(a.synthesis_cache_ttl_s))}" style="width:96px" /></label>
-    <div class="lab" style="color:var(--muted);font-size:.82rem;margin-bottom:.3rem">Targets: same priority = load-balanced tier; higher number = fallback tier. Label is what the header shows — real provider/model names never leak. Options (JSON, optional): <span class="mono">timeout_ms</span> — time budget (first chunk for streams, whole call otherwise); <span class="mono">fallback_on_auth</span> — try the next tier on upstream auth/billing errors; <span class="mono">breaker</span> — circuit breaker for the tier, e.g. <span class="mono">{"enabled":true,"failures":3,"cooldown_ms":60000}</span>; <span class="mono">recognition_models</span> — recognition model per BCP-47 language, e.g. <span class="mono">{"en-US":"telephony"}</span> (google-speech); <span class="mono">voices</span> — canonical voice → <span class="mono">{"voice","model"}</span> this target speaks it with; <span class="mono">default_voices</span> — voice per BCP-47 language for unmapped voices, e.g. <span class="mono">{"en":{"voice":"onyx"}}</span>; <span class="mono">send_language</span> — <span class="mono">true</span> sends an OpenAI-compatible speech target the request language (multilingual models with one voice); <span class="mono">stream_speech</span> — <span class="mono">true</span> streams this speech target's audio as it arrives.</div>
+    <div class="form-grid">
+      <label class="field span-2"><span class="lab">Alias (the model name clients request)</span>
+        <input id="al-alias" value="${esc(a.alias || "")}" /></label>
+      <label class="field"><span class="lab">Client protocol</span>
+        <select id="al-proto">
+          <option ${a.protocol !== "anthropic" ? "selected" : ""}>openai</option>
+          <option ${a.protocol === "anthropic" ? "selected" : ""}>anthropic</option>
+        </select></label>
+      <label class="field"><span class="lab">Balancing within a priority tier</span>
+        <select id="al-strategy">
+          <option value="round_robin" ${a.strategy !== "least_busy" && a.strategy !== "lcr" ? "selected" : ""}>round_robin</option>
+          <option value="least_busy" ${a.strategy === "least_busy" ? "selected" : ""}>least_busy</option>
+          <option value="lcr" ${a.strategy === "lcr" ? "selected" : ""}>lcr (price / availability)</option>
+        </select></label>
+      <label class="field" data-al="lcr"><span class="lab">LCR mode</span>
+        <select id="al-lcr-mode">
+          <option value="price" ${(a.lcr_mode || "price") === "price" ? "selected" : ""}>price</option>
+          <option value="availability" ${a.lcr_mode === "availability" ? "selected" : ""}>availability</option>
+          <option value="both" ${a.lcr_mode === "both" ? "selected" : ""}>both (availability gate, then price)</option>
+        </select></label>
+      <label class="field" data-al="lcr-both"><span class="lab">LCR minimum availability (0..1)</span>
+        <input id="al-lcr-minavail" type="number" min="0" max="1" step="0.01" value="${esc(String(a.lcr_min_availability ?? 0.5))}" /></label>
+    </div>
+    <div class="form-sect">Targets</div>
+    <div class="hint">Same priority = load-balanced tier; higher number = fallback tier. Label is what the X-Backend-Model header shows — real provider/model names never leak.</div>
+    <div class="tgt-head"><span>Tier</span><span>Provider</span><span>Upstream model</span><span>Label</span><span></span></div>
     <div id="al-targets"></div>
-    <button type="button" class="btn ghost sm" id="al-add" style="margin-top:.3rem">+ Add target</button>
-    <div class="row" style="justify-content:flex-end;margin-top:1rem">
+    <button type="button" class="btn ghost sm" id="al-add">+ Add target</button>
+    <details class="hint opts-ref"><summary>Target options reference (JSON, optional)</summary>
+      <span class="mono">timeout_ms</span> — time budget (first chunk for streams, whole call otherwise); <span class="mono">fallback_on_auth</span> — try the next tier on upstream auth/billing errors; <span class="mono">breaker</span> — circuit breaker for the tier, e.g. <span class="mono">{"enabled":true,"failures":3,"cooldown_ms":60000}</span>; <span class="mono">recognition_models</span> — recognition model per BCP-47 language, e.g. <span class="mono">{"en-US":"telephony"}</span> (google-speech); <span class="mono">voices</span> — canonical voice → <span class="mono">{"voice","model"}</span> this target speaks it with; <span class="mono">default_voices</span> — voice per BCP-47 language for unmapped voices, e.g. <span class="mono">{"en":{"voice":"onyx"}}</span>; <span class="mono">send_language</span> — <span class="mono">true</span> sends an OpenAI-compatible speech target the request language (multilingual models with one voice); <span class="mono">stream_speech</span> — <span class="mono">true</span> streams this speech target's audio as it arrives.
+    </details>
+    <div class="form-sect">Behaviour</div>
+    <div class="form-grid">
+      <label class="field check"><input id="al-bert" type="checkbox" ${a.dlp_model_scan === false ? "" : "checked"} /><span class="lab">Layer-2 BERT scan (fuzzy PII)</span></label>
+      <label class="field check"><input id="al-dlpaudio" type="checkbox" ${a.dlp_audio_scan === false ? "" : "checked"} /><span class="lab">DLP scan on audio transcripts/input (STT/TTS)</span></label>
+      <label class="field check span-2"><input id="al-expose" type="checkbox" ${a.expose_backend_headers ? "checked" : ""} /><span class="lab">Expose which target answered (X-Backend-Model header)</span></label>
+      <label class="field check span-2"><input id="al-affinity" type="checkbox" ${a.session_affinity ? "checked" : ""} /><span class="lab">Session affinity: a session (X-Session-Id) served by a fallback tier stays on it</span></label>
+      <label class="field" data-al="affinity"><span class="lab">Session pin TTL, hours (empty = 4)</span>
+        <input id="al-affinity-ttl" type="number" min="0" max="168" step="any" value="${esc(affinityTTLText(a.session_affinity_ttl_s))}" /></label>
+      <label class="field check span-2"><input id="al-ttscache" type="checkbox" ${a.synthesis_cache ? "checked" : ""} /><span class="lab">Synthesis cache: answer a repeated speech request with the clip the serving tier rendered</span></label>
+      <label class="field" data-al="ttscache"><span class="lab">Synthesis cache TTL, days (empty = 7)</span>
+        <input id="al-ttscache-ttl" type="number" min="0" max="30" step="any" value="${esc(synthCacheTTLText(a.synthesis_cache_ttl_s))}" /></label>
+    </div>
+    <div class="row modal-foot">
       <button type="button" class="btn ghost" id="al-cancel">Cancel</button>
       <button type="button" class="btn" id="al-save">Save</button>
     </div>
   </div>`;
   document.body.appendChild(bg);
-  const close = () => bg.remove();
+  const close = wireModalDismiss(bg);
   const tdiv = $("#al-targets", bg);
+
+  // Fields that only apply under another setting stay hidden until it is
+  // on. Hidden inputs keep their values and are saved as before.
+  const applyVisibility = () => {
+    const lcr = $("#al-strategy", bg).value === "lcr";
+    $('[data-al="lcr"]', bg).hidden = !lcr;
+    $('[data-al="lcr-both"]', bg).hidden = !(lcr && $("#al-lcr-mode", bg).value === "both");
+    $('[data-al="affinity"]', bg).hidden = !$("#al-affinity", bg).checked;
+    $('[data-al="ttscache"]', bg).hidden = !$("#al-ttscache", bg).checked;
+  };
+  applyVisibility();
+  bg.addEventListener("change", applyVisibility);
 
   const provOpts = (sel) => providers.map((p) =>
     `<option value="${esc(p)}" ${p === sel ? "selected" : ""}>${esc(p)}</option>`).join("");
@@ -1277,12 +1599,12 @@ async function editAlias(c, a) {
     // fetch was in flight — never overwrite a newer selection's control.
     if (provSel.value !== prov) return;
     if (models.length === 0) {
-      slot.innerHTML = `<input class="t-model" placeholder="upstream model" value="${esc(current)}" style="width:100%" />`;
+      slot.innerHTML = `<input class="t-model" placeholder="upstream model" value="${esc(current)}" />`;
     } else {
       // Keep `current` selectable even if the catalog doesn't list it — an
       // existing alias may point at a model since removed from the catalog.
       const opts = current && !models.includes(current) ? [current, ...models] : models;
-      slot.innerHTML = `<select class="t-model" style="width:100%">${opts.map((m) =>
+      slot.innerHTML = `<select class="t-model">${opts.map((m) =>
         `<option value="${esc(m)}" ${m === current ? "selected" : ""}>${esc(m)}</option>`).join("")}</select>`;
     }
     const modelEl = slot.querySelector(".t-model");
@@ -1291,15 +1613,14 @@ async function editAlias(c, a) {
   }
   function addRow(t) {
     const row = document.createElement("div");
-    row.className = "row tgt";
-    row.style.marginBottom = ".4rem";
+    row.className = "tgt";
     row.innerHTML = `
-      <input class="t-prio" type="number" min="0" value="${Number(t.priority) || 0}" title="priority / tier (same number = load-balanced)" style="width:64px" />
-      <select class="t-prov" style="width:auto">${provOpts(t.provider)}</select>
-      <span class="t-model-slot" style="flex:1;min-width:120px;display:inline-flex"></span>
-      <input class="t-label" placeholder="label (X-Backend-Model)" value="${esc(t.display_label || "")}" style="width:150px" />
-      <button type="button" class="btn danger sm t-del" title="remove">×</button>
-      <input class="t-opts mono" placeholder='options, e.g. {"timeout_ms":2000,"fallback_on_auth":true}' value="${esc(targetOptionsText(t.options))}" style="flex-basis:100%" />`;
+      <input class="t-prio" type="number" min="0" value="${Number(t.priority) || 0}" title="priority / tier (same number = load-balanced)" aria-label="tier" />
+      <select class="t-prov" aria-label="provider">${provOpts(t.provider)}</select>
+      <span class="t-model-slot"></span>
+      <input class="t-label" placeholder="label (X-Backend-Model)" value="${esc(t.display_label || "")}" aria-label="label" />
+      <button type="button" class="btn danger sm t-del" title="remove target">×</button>
+      <input class="t-opts mono" placeholder='options, e.g. {"timeout_ms":2000,"fallback_on_auth":true}' value="${esc(targetOptionsText(t.options))}" aria-label="options" />`;
     row.querySelector(".t-del").addEventListener("click", () => row.remove());
     const slot = row.querySelector(".t-model-slot");
     const provSel = row.querySelector(".t-prov");
@@ -1331,7 +1652,6 @@ async function editAlias(c, a) {
   $("#al-add", bg).addEventListener("click", () =>
     addRow({ provider: providers[0], upstream_model: "" }));
   $("#al-cancel", bg).addEventListener("click", close);
-  bg.addEventListener("click", (e) => { if (e.target === bg) close(); });
   $("#al-save", bg).addEventListener("click", async () => {
     const alias = $("#al-alias", bg).value.trim();
     if (!alias) { toast("Alias is required", "err"); return; }
@@ -1374,181 +1694,218 @@ async function editAlias(c, a) {
 }
 
 async function adminDLP(c) {
-  const [cfgR, incR, whR, capR, patR] = await Promise.all([
+  const [cfgR, incR, whR, capR, patR, spR] = await Promise.all([
     api("GET", "/api/admin/dlp"),
     api("GET", "/api/admin/dlp/incidents"),
     api("GET", "/api/admin/webhooks"),
     api("GET", "/api/admin/capture"),
     api("GET", "/api/admin/dlp/patterns"),
+    api("GET", "/api/admin/secondpass"),
   ]);
-  const d = cfgR.data || { enabled: false, action: "off" };
-  const incidents = (incR.data && incR.data.incidents) || [];
-  const hooks = (whR.data && whR.data.webhooks) || [];
-  const cap = capR.data || { enabled: false, sample_rate: 0, redact: true, retention_days: 30, raw_training: false, raw_ttl_hours: 24 };
+  // Every editor below is built only from a successful GET. A failed load
+  // shows an error box with Retry in place of the form, so there is no Save
+  // button that could write defaults over the stored policy.
+  const failBox = (title, rs) => {
+    const bad = rs.find((r) => !r.ok);
+    return `<div class="panel load-error"><div class="panel-head"><h2>${esc(title)}</h2></div>
+      <div class="load-error-body"><p class="err-text">Could not load: ${esc(apiError(bad))}</p>
+      <button class="btn sm" type="button" data-retry>Retry</button></div></div>`;
+  };
+  const policyOK = cfgR.ok && patR.ok;
+  const d = cfgR.data || {};
+  const cap = capR.data || {};
+  const sp = spR.data || {};
   const actBadge = (a) => a === "blocked" ? "revoked" : (a === "redacted" ? "admin" : "neutral");
 
   // Sensitive Info Detection (guardrails): build grouped pattern toggles.
   const catalog = (patR.data && patR.data.patterns) || [];
   const curPat = d.patterns || {};
   const patOn = (p) => (p.label in curPat) ? curPat[p.label] : p.default_on;
-  const togRow = (p) => `<label class="field" style="display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem">
-      <input type="checkbox" class="pat-tog" data-label="${esc(p.label)}" ${patOn(p) ? "checked" : ""} style="width:auto" />
-      <span class="mono" style="font-size:.85rem">${esc(p.label)}${p.model ? ` <span style="color:var(--muted)">· adds latency</span>` : ""}</span></label>`;
-  const group = (title, items) => items.length ? `<div class="lab" style="color:var(--muted);font-size:.78rem;text-transform:uppercase;margin:.7rem 0 .35rem">${title}</div>${items.map(togRow).join("")}` : "";
+  const togRow = (p) => `<label class="check">
+      <input type="checkbox" class="pat-tog" data-label="${esc(p.label)}" ${patOn(p) ? "checked" : ""} />
+      <span class="mono">${esc(p.label)}${p.model ? ` <span class="muted">· adds latency</span>` : ""}</span></label>`;
+  const group = (title, items) => items.length ? `<div class="form-sect">${title}</div><div class="pat-grid">${items.map(togRow).join("")}</div>` : "";
   const patGroups =
     group("Secrets", catalog.filter((p) => p.category === "secret")) +
     group("PII", catalog.filter((p) => p.category === "pii" && !p.model)) +
     group("Model (BERT sidecar)", catalog.filter((p) => p.model));
-  const customRow = (cp) => `<div class="custom-row" style="display:flex;gap:.5rem;margin-bottom:.4rem;align-items:center">
-      <input class="cp-label" placeholder="label" value="${esc(cp.label || "")}" style="max-width:150px" />
-      <input class="cp-regex mono" placeholder="regex" value="${esc(cp.regex || "")}" style="flex:1" />
-      <label style="display:flex;align-items:center;gap:.3rem;font-size:.8rem;color:var(--muted)"><input type="checkbox" class="cp-en" ${cp.enabled ? "checked" : ""} style="width:auto" />on</label>
-      <button class="btn danger sm cp-del" type="button">×</button></div>`;
+  const customRow = (cp) => `<div class="custom-row">
+      <input class="cp-label" placeholder="label" value="${esc(cp.label || "")}" />
+      <input class="cp-regex mono" placeholder="regex" value="${esc(cp.regex || "")}" />
+      <label class="check"><input type="checkbox" class="cp-en" ${cp.enabled ? "checked" : ""} />on</label>
+      <button class="btn danger sm cp-del" type="button" title="remove">×</button></div>`;
   const customRows = ((d.custom_patterns) || []).map(customRow).join("");
 
-  c.innerHTML = `
-    <div class="panel"><div class="panel-head"><h2>DLP policy</h2></div>
-      <div style="padding:1rem 1.1rem">
-        <label class="field"><span class="lab">Scan requests for secrets / tokens</span>
-          <input type="checkbox" id="dlp-en" ${d.enabled ? "checked" : ""} style="width:auto" /></label>
-        <label class="field"><span class="lab">Action on detection</span>
-          <select id="dlp-act">${["off", "flag", "redact", "block"].map((a) =>
-            `<option ${a === d.action ? "selected" : ""}>${a}</option>`).join("")}</select></label>
-        <div class="lab" style="color:var(--muted);font-size:.82rem;margin:.6rem 0 .3rem">BERT NER sidecar (layer 2 — fuzzy/contextual PII)</div>
-        <label class="field"><span class="lab">Use model sidecar</span>
-          <input type="checkbox" id="dlp-men" ${d.model_enabled ? "checked" : ""} style="width:auto" /></label>
-        <label class="field"><span class="lab">Sidecar URL</span>
-          <input id="dlp-murl" value="${esc(d.model_url || "http://dlp-bert:8000")}" /></label>
-        <label class="field"><span class="lab">Min score (0–1)</span>
-          <input id="dlp-mscore" type="number" step="0.05" min="0" max="1" value="${d.model_min_score ?? 0.5}" /></label>
-        <label class="field"><span class="lab">Sidecar URLs (one per line — overrides the single URL above)</span>
-          <textarea id="dlp-murls" rows="3" class="mono" placeholder="http://dlp-bert:8000">${esc((d.model_urls || []).join("\n"))}</textarea></label>
-        <label class="field"><span class="lab">Max concurrent scans per endpoint (0 = unlimited)</span>
-          <input id="dlp-mconc" type="number" min="0" value="${d.model_max_concurrency ?? 0}" /></label>
-        <label class="field"><span class="lab">Model scan scope</span>
-          <select id="dlp-mscope">
-            <option value="last_user" ${d.model_scan_scope !== "all" ? "selected" : ""}>last user message (default)</option>
-            <option value="all" ${d.model_scan_scope === "all" ? "selected" : ""}>all messages</option>
-          </select></label>
-        <label class="field"><span class="lab">Model scan budget per request (ms)</span>
-          <input id="dlp-mbudget" type="number" min="100" value="${Number(d.model_scan_budget_ms) || 2000}" /></label>
-        <button class="btn" id="dlp-save">Save policy</button>
-      </div>
-    </div>
-    <div class="panel"><div class="panel-head"><h2>Sensitive Info Detection</h2>
-      <button class="btn ghost sm" id="pat-all" type="button">Enable all</button></div>
-      <div style="padding:1rem 1.1rem">
-        <div class="lab" style="color:var(--muted);font-size:.82rem;margin-bottom:.6rem">Choose which patterns are detected. Secrets are on by default; PII is opt-in. Model patterns need the BERT sidecar enabled above.</div>
+  const policyPanel = !policyOK ? failBox("DLP policy & detection", [cfgR, patR]) : `
+    <div class="panel"><div class="panel-head"><h2>DLP policy &amp; detection</h2>
+      <button class="btn ghost sm" id="pat-all" type="button">Enable all patterns</button></div>
+      <div class="panel-body">
+        <div class="form-grid">
+          <label class="field check"><input type="checkbox" id="dlp-en" ${d.enabled ? "checked" : ""} /><span class="lab">Scan requests for secrets / tokens</span></label>
+          <label class="field"><span class="lab">Action on detection</span>
+            <select id="dlp-act">${["off", "flag", "redact", "block"].map((a) =>
+              `<option ${a === d.action ? "selected" : ""}>${a}</option>`).join("")}</select></label>
+        </div>
+        <div class="form-sect">BERT NER sidecar (layer 2 — fuzzy/contextual PII)</div>
+        <div class="form-grid">
+          <label class="field check"><input type="checkbox" id="dlp-men" ${d.model_enabled ? "checked" : ""} /><span class="lab">Use model sidecar</span></label>
+          <label class="field"><span class="lab">Sidecar URL</span>
+            <input id="dlp-murl" value="${esc(d.model_url || "http://dlp-bert:8000")}" /></label>
+          <label class="field"><span class="lab">Min score (0–1)</span>
+            <input id="dlp-mscore" type="number" step="0.05" min="0" max="1" value="${d.model_min_score ?? 0.5}" /></label>
+          <label class="field"><span class="lab">Max concurrent scans per endpoint (0 = unlimited)</span>
+            <input id="dlp-mconc" type="number" min="0" value="${d.model_max_concurrency ?? 0}" /></label>
+          <label class="field"><span class="lab">Model scan scope</span>
+            <select id="dlp-mscope">
+              <option value="last_user" ${d.model_scan_scope !== "all" ? "selected" : ""}>last user message (default)</option>
+              <option value="all" ${d.model_scan_scope === "all" ? "selected" : ""}>all messages</option>
+            </select></label>
+          <label class="field"><span class="lab">Model scan budget per request (ms)</span>
+            <input id="dlp-mbudget" type="number" min="100" value="${Number(d.model_scan_budget_ms) || 2000}" /></label>
+          <label class="field span-2"><span class="lab">Sidecar URLs (one per line — overrides the single URL above)</span>
+            <textarea id="dlp-murls" rows="2" class="mono" placeholder="http://dlp-bert:8000">${esc((d.model_urls || []).join("\n"))}</textarea></label>
+        </div>
+        <div class="hint">Sensitive Info Detection: choose which patterns are detected. Secrets are on by default; PII is opt-in. Model patterns need the BERT sidecar enabled above.</div>
         ${patGroups}
-        <div class="lab" style="color:var(--muted);font-size:.78rem;text-transform:uppercase;margin:.9rem 0 .35rem">Custom patterns (regex)</div>
+        <div class="form-sect">Custom patterns (regex)</div>
         <div id="custom-rows">${customRows}</div>
-        <button class="btn ghost sm" id="add-custom" type="button" style="margin-top:.3rem">Add pattern</button>
-        <div style="margin-top:1rem"><button class="btn" id="pat-save">Save detection</button></div>
+        <button class="btn ghost sm" id="add-custom" type="button">+ Add pattern</button>
+        <div class="panel-actions"><button class="btn" id="dlp-save">Save DLP policy &amp; detection</button></div>
       </div>
-    </div>
+    </div>`;
+
+  const capturePanel = !capR.ok ? failBox("Capture & flywheel", [capR]) : `
     <div class="panel"><div class="panel-head"><h2>Capture &amp; flywheel</h2></div>
-      <div style="padding:1rem 1.1rem">
-        <div class="lab" style="color:var(--muted);font-size:.82rem;margin-bottom:.6rem">Records prompts (redacted by default) for audit and DLP model training. Off by default.</div>
-        <label class="field"><span class="lab">Enable capture</span>
-          <input type="checkbox" id="cap-en" ${cap.enabled ? "checked" : ""} style="width:auto" /></label>
-        <label class="field"><span class="lab">Sample rate (0–1, incidents always captured)</span>
-          <input id="cap-rate" type="number" step="0.05" min="0" max="1" value="${cap.sample_rate ?? 0}" /></label>
-        <label class="field"><span class="lab">Redact stored bodies</span>
-          <input type="checkbox" id="cap-red" ${cap.redact ? "checked" : ""} style="width:auto" /></label>
-        <label class="field"><span class="lab">Retention (days)</span>
-          <input id="cap-ret" type="number" min="1" value="${cap.retention_days ?? 30}" /></label>
-        <div class="lab" style="color:var(--muted);font-size:.82rem;margin:.6rem 0 .3rem">Raw training window — stores a short-lived un-redacted copy so the flywheel scans aligned text. Stores real secrets (encrypted) until the TTL.</div>
-        <label class="field"><span class="lab">Enable raw training window</span>
-          <input type="checkbox" id="cap-raw" ${cap.raw_training ? "checked" : ""} style="width:auto" /></label>
-        <label class="field"><span class="lab">Raw copy TTL (hours)</span>
-          <input id="cap-rawttl" type="number" min="1" value="${cap.raw_ttl_hours ?? 24}" /></label>
-        <button class="btn" id="cap-save">Save capture</button>
+      <div class="panel-body">
+        <div class="hint">Records prompts (redacted by default) for audit and DLP model training. Off by default.</div>
+        <div class="form-grid">
+          <label class="field check"><input type="checkbox" id="cap-en" ${cap.enabled ? "checked" : ""} /><span class="lab">Enable capture</span></label>
+          <label class="field check"><input type="checkbox" id="cap-red" ${cap.redact ? "checked" : ""} /><span class="lab">Redact stored bodies</span></label>
+          <label class="field"><span class="lab">Sample rate (0–1, incidents always captured)</span>
+            <input id="cap-rate" type="number" step="0.05" min="0" max="1" value="${cap.sample_rate ?? 0}" /></label>
+          <label class="field"><span class="lab">Retention (days)</span>
+            <input id="cap-ret" type="number" min="1" value="${cap.retention_days ?? 30}" /></label>
+        </div>
+        <div class="hint">Raw training window — stores a short-lived un-redacted copy so the flywheel scans aligned text. Stores real secrets (encrypted) until the TTL.</div>
+        <div class="form-grid">
+          <label class="field check"><input type="checkbox" id="cap-raw" ${cap.raw_training ? "checked" : ""} /><span class="lab">Enable raw training window</span></label>
+          <label class="field"><span class="lab">Raw copy TTL (hours)</span>
+            <input id="cap-rawttl" type="number" min="1" value="${cap.raw_ttl_hours ?? 24}" /></label>
+        </div>
+        <div class="panel-actions"><button class="btn" id="cap-save">Save capture</button></div>
       </div>
-    </div>
-    <div class="row" style="margin-bottom:1rem"><button class="btn sm" id="new-hook">New alert webhook</button></div>
-    ${panelTable("Alert webhooks", ["Name", "URL", "Events", "Secret", "Enabled", ""],
-      hooks.map((h) => `<tr><td>${esc(h.name) || "—"}</td><td class="mono">${esc(h.url)}</td>
-        <td>${(h.events || []).join(", ")}</td>
+    </div>`;
+
+  const secondpassPanel = !spR.ok ? failBox("Second-pass re-scan", [spR]) : `
+    <div class="panel"><div class="panel-head"><h2>Second-pass re-scan</h2></div>
+      <div class="panel-body">
+        <div class="hint">Off-hot-path job that re-scans captures with a model alias, confirms or clears detections and reports misses (webhook events <span class="mono">dlp.false_negative</span> / <span class="mono">dlp.alert_cleared</span>).</div>
+        <div class="form-grid">
+          <label class="field check"><input type="checkbox" id="sp-en" ${sp.enabled ? "checked" : ""} /><span class="lab">Enable second-pass</span></label>
+          <label class="field"><span class="lab">Model alias used to scan</span>
+            <input id="sp-model" value="${esc(sp.model || "")}" placeholder="e.g. sonnet" /></label>
+          <label class="field"><span class="lab">Interval (seconds, applied at start)</span>
+            <input id="sp-int" type="number" min="1" value="${Number(sp.interval_sec) || 60}" /></label>
+          <label class="field"><span class="lab">Min score (0–1)</span>
+            <input id="sp-score" type="number" step="0.05" min="0" max="1" value="${sp.min_score ?? 0.7}" /></label>
+          <label class="field check span-2"><input type="checkbox" id="sp-raw" ${sp.allow_raw ? "checked" : ""} /><span class="lab">Allow raw: send the un-redacted raw window to the scanning model (it may be a third-party provider)</span></label>
+        </div>
+        <div class="panel-actions"><button class="btn" id="sp-save">Save second-pass</button></div>
+      </div>
+    </div>`;
+
+  const hooks = (whR.data && whR.data.webhooks) || [];
+  const hooksPanel = !whR.ok ? failBox("Alert webhooks", [whR]) :
+    `<div class="row" style="margin-bottom:1rem"><button class="btn sm" id="new-hook">New alert webhook</button></div>` +
+    panelTable("Alert webhooks", ["Name", "URL", "Events", "Secret", "Enabled", ""],
+      hooks.map((h) => `<tr><td>${esc(h.name) || "—"}</td><td class="mono trunc" title="${esc(h.url)}">${esc(h.url)}</td>
+        <td class="mono">${(h.events || []).map(esc).join(", ")}</td>
         <td>${h.has_secret ? `<span class="badge active">set</span>` : `<span class="badge neutral">none</span>`}</td>
         <td>${h.enabled ? "yes" : "no"}</td>
-        <td style="text-align:right"><button class="btn danger sm" data-delhook="${h.id}">Delete</button></td></tr>`))}
-    ${panelTable("Recent incidents", ["Time", "User", "Ingress", "Model", "Action", "Labels", "Matches", "Sample"],
+        <td class="actions"><button class="btn danger sm" data-delhook="${esc(h.id)}" data-name="${esc(h.name || h.url)}">Delete</button></td></tr>`));
+  const incidents = (incR.data && incR.data.incidents) || [];
+  const incidentsPanel = !incR.ok ? failBox("Recent incidents", [incR]) :
+    panelTable("Recent incidents", ["Time", "User", "Ingress", "Model", "Action", "Labels", "Matches", "Sample"],
       incidents.map((i) => `<tr><td>${fmtTime(i.ts)}</td><td>${esc(i.user) || "—"}</td><td>${esc(i.ingress)}</td>
         <td class="mono">${esc(i.alias)}</td>
         <td><span class="badge ${actBadge(i.action)}">${esc(i.action)}</span></td>
-        <td>${(i.labels || []).map(esc).join(", ")}</td><td>${i.match_count}</td>
-        <td class="mono" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(i.sample)}</td></tr>`))}
-  `;
-  // PUT /api/admin/dlp replaces the whole config, so every save gathers ALL
-  // fields on screen (policy + patterns + custom) to avoid clobbering the other
-  // panel's settings.
-  const gatherDLP = () => {
-    const body = {
-      enabled: $("#dlp-en").checked, action: $("#dlp-act").value, scan_responses: false,
-      model_enabled: $("#dlp-men").checked, model_url: $("#dlp-murl").value.trim(),
-      model_min_score: Number($("#dlp-mscore").value) || 0,
-      model_urls: $("#dlp-murls").value.split("\n").map((s) => s.trim()).filter(Boolean),
-      model_max_concurrency: Number($("#dlp-mconc").value) || 0,
-      model_scan_scope: $("#dlp-mscope").value, model_scan_budget_ms: Number($("#dlp-mbudget").value) || 2000,
-    };
-    // Only send patterns/custom when the panel actually rendered, so a failed
-    // catalog fetch can't silently wipe the operator's toggles on save.
-    const togs = document.querySelectorAll(".pat-tog");
-    if (togs.length) {
+        <td>${(i.labels || []).map(esc).join(", ")}</td><td>${fmtNum(i.match_count)}</td>
+        <td class="mono trunc" title="${esc(i.sample)}">${esc(i.sample)}</td></tr>`));
+
+  c.innerHTML = policyPanel + capturePanel + secondpassPanel + hooksPanel + incidentsPanel;
+  c.querySelectorAll("[data-retry]").forEach((b) => b.addEventListener("click", () => adminDLP(c)));
+
+  if (policyOK) {
+    // One PUT carries policy + patterns + custom patterns, gathered from the
+    // form that was rendered from the stored config.
+    const gatherDLP = () => {
       const patterns = {};
-      togs.forEach((t) => { patterns[t.getAttribute("data-label")] = t.checked; });
-      body.patterns = patterns;
+      document.querySelectorAll(".pat-tog").forEach((t) => { patterns[t.getAttribute("data-label")] = t.checked; });
       const custom_patterns = [];
       document.querySelectorAll(".custom-row").forEach((r) => {
         const label = r.querySelector(".cp-label").value.trim();
         const regex = r.querySelector(".cp-regex").value;
         if (label || regex) custom_patterns.push({ label, regex, enabled: r.querySelector(".cp-en").checked });
       });
-      body.custom_patterns = custom_patterns;
-    }
-    return body;
-  };
-  const saveDLP = async (okMsg) => {
-    const x = await api("PUT", "/api/admin/dlp", gatherDLP());
-    if (x.ok) toast(okMsg);
-    else toast((x.data && x.data.error) || "Failed", "err");
-  };
-  $("#dlp-save").addEventListener("click", () => saveDLP("DLP policy saved"));
-  $("#pat-save").addEventListener("click", () => saveDLP("Detection settings saved"));
-  $("#pat-all").addEventListener("click", () => {
-    document.querySelectorAll(".pat-tog").forEach((t) => { t.checked = true; });
-  });
-  const wireDel = (btn) => btn.addEventListener("click", () => btn.closest(".custom-row").remove());
-  document.querySelectorAll(".cp-del").forEach(wireDel);
-  $("#add-custom").addEventListener("click", () => {
-    const wrap = document.createElement("div");
-    wrap.innerHTML = `<div class="custom-row" style="display:flex;gap:.5rem;margin-bottom:.4rem;align-items:center">
-      <input class="cp-label" placeholder="label" style="max-width:150px" />
-      <input class="cp-regex mono" placeholder="regex" style="flex:1" />
-      <label style="display:flex;align-items:center;gap:.3rem;font-size:.8rem;color:var(--muted)"><input type="checkbox" class="cp-en" checked style="width:auto" />on</label>
-      <button class="btn danger sm cp-del" type="button">×</button></div>`;
-    const row = wrap.firstElementChild;
-    $("#custom-rows").appendChild(row);
-    wireDel(row.querySelector(".cp-del"));
-  });
-  $("#cap-save").addEventListener("click", async () => {
-    const x = await api("PUT", "/api/admin/capture", {
-      enabled: $("#cap-en").checked,
-      sample_rate: Number($("#cap-rate").value) || 0,
-      redact: $("#cap-red").checked,
-      retention_days: Number($("#cap-ret").value) || 30,
-      raw_training: $("#cap-raw").checked,
-      raw_ttl_hours: Number($("#cap-rawttl").value) || 24,
+      return {
+        enabled: $("#dlp-en").checked, action: $("#dlp-act").value, scan_responses: false,
+        model_enabled: $("#dlp-men").checked, model_url: $("#dlp-murl").value.trim(),
+        model_min_score: Number($("#dlp-mscore").value) || 0,
+        model_urls: $("#dlp-murls").value.split("\n").map((s) => s.trim()).filter(Boolean),
+        model_max_concurrency: Number($("#dlp-mconc").value) || 0,
+        model_scan_scope: $("#dlp-mscope").value, model_scan_budget_ms: Number($("#dlp-mbudget").value) || 2000,
+        patterns, custom_patterns,
+      };
+    };
+    $("#dlp-save").addEventListener("click", async () => {
+      const x = await api("PUT", "/api/admin/dlp", gatherDLP());
+      if (x.ok) toast("DLP policy saved"); else toast(apiError(x), "err");
     });
-    if (x.ok) toast("Capture config saved");
-    else toast((x.data && x.data.error) || "Failed", "err");
-  });
-  $("#new-hook").addEventListener("click", () => editWebhook(c));
-  document.querySelectorAll("[data-delhook]").forEach((b) => b.addEventListener("click", async () => {
-    if (!confirm("Delete this webhook?")) return;
-    const x = await api("DELETE", `/api/admin/webhooks/${b.getAttribute("data-delhook")}`);
-    if (x.ok) { toast("Deleted"); adminDLP(c); } else toast("Failed", "err");
-  }));
+    $("#pat-all").addEventListener("click", () => {
+      document.querySelectorAll(".pat-tog").forEach((t) => { t.checked = true; });
+    });
+    const wireDel = (btn) => btn.addEventListener("click", () => btn.closest(".custom-row").remove());
+    document.querySelectorAll(".cp-del").forEach(wireDel);
+    $("#add-custom").addEventListener("click", () => {
+      const wrap = document.createElement("div");
+      wrap.innerHTML = customRow({ enabled: true });
+      const row = wrap.firstElementChild;
+      $("#custom-rows").appendChild(row);
+      wireDel(row.querySelector(".cp-del"));
+    });
+  }
+  if (capR.ok) {
+    $("#cap-save").addEventListener("click", async () => {
+      const x = await api("PUT", "/api/admin/capture", {
+        enabled: $("#cap-en").checked,
+        sample_rate: Number($("#cap-rate").value) || 0,
+        redact: $("#cap-red").checked,
+        retention_days: Number($("#cap-ret").value) || 30,
+        raw_training: $("#cap-raw").checked,
+        raw_ttl_hours: Number($("#cap-rawttl").value) || 24,
+      });
+      if (x.ok) toast("Capture config saved"); else toast(apiError(x), "err");
+    });
+  }
+  if (spR.ok) {
+    $("#sp-save").addEventListener("click", async () => {
+      const x = await api("PUT", "/api/admin/secondpass", {
+        enabled: $("#sp-en").checked, model: $("#sp-model").value.trim(),
+        interval_sec: Number($("#sp-int").value) || 60,
+        min_score: Number($("#sp-score").value) || 0,
+        allow_raw: $("#sp-raw").checked,
+      });
+      if (x.ok) toast("Second-pass config saved"); else toast(apiError(x), "err");
+    });
+  }
+  if (whR.ok) {
+    $("#new-hook").addEventListener("click", () => editWebhook(c));
+    document.querySelectorAll("[data-delhook]").forEach((b) => b.addEventListener("click", async () => {
+      if (!confirm(`Delete webhook "${b.getAttribute("data-name")}"?`)) return;
+      const x = await api("DELETE", `/api/admin/webhooks/${encodeURIComponent(b.getAttribute("data-delhook"))}`);
+      if (x.ok) { toast("Deleted"); adminDLP(c); } else toast(apiError(x), "err");
+    }));
+  }
 }
 
 function editWebhook(c) {
@@ -1556,11 +1913,14 @@ function editWebhook(c) {
     { name: "name", label: "Name", value: "" },
     { name: "url", label: "URL", value: "" },
     { name: "secret", label: "Signing secret (HMAC, optional)", type: "password", value: "" },
+    { name: "events", label: "Events", type: "checkgroup",
+      options: ["dlp.incident", "dlp.false_negative", "dlp.alert_cleared"], value: ["dlp.incident"] },
     { name: "enabled", label: "Enabled", type: "checkbox", value: true },
   ], async (v) => {
     if (!v.url) { toast("URL is required", "err"); return false; }
+    if (!v.events.length) { toast("Pick at least one event", "err"); return false; }
     const x = await api("POST", "/api/admin/webhooks", {
-      name: v.name, url: v.url, secret: v.secret, enabled: v.enabled, events: ["dlp.incident"],
+      name: v.name, url: v.url, secret: v.secret, enabled: v.enabled, events: v.events,
     });
     if (x.ok) { toast("Webhook created"); adminDLP(c); return true; }
     toast((x.data && x.data.error) || "Failed", "err"); return false;
@@ -1574,14 +1934,14 @@ function editWebhook(c) {
 function breakdownTables(d) {
   const tok = (n) => (+n || 0).toLocaleString("en-US");
   const provRows = (d.providers || []).map((p) => `<tr>
-    <td>${esc(p.provider)}</td><td>${p.requests}</td>
+    <td>${esc(p.provider)}</td><td>${fmtNum(p.requests)}</td>
     <td class="mono">${tok(p.tokens_in)} / ${tokensOut(p.tokens_out, p.tokens_reasoning)}</td>
-    <td>$${(+p.cost_usd).toFixed(4)}</td><td>${p.p95_ms} ms</td><td>${p.errors}</td></tr>`);
+    <td>${fmtUSD(p.cost_usd)}</td><td>${fmtNum(p.p95_ms)} ms</td><td>${fmtNum(p.errors)}</td></tr>`);
   const modelRows = (d.models || []).map((m) => `<tr>
     <td class="mono">${esc(m.alias)}</td><td>${esc(m.provider)}</td><td class="mono">${esc(m.upstream_model)}</td>
-    <td>${m.requests}</td><td class="mono">${tok(m.tokens_in)} / ${tokensOut(m.tokens_out, m.tokens_reasoning)}</td>
-    <td>$${(+m.cost_usd).toFixed(4)}</td>
-    <td>${m.p95_ms} ms</td><td>${m.errors}</td></tr>`);
+    <td>${fmtNum(m.requests)}</td><td class="mono">${tok(m.tokens_in)} / ${tokensOut(m.tokens_out, m.tokens_reasoning)}</td>
+    <td>${fmtUSD(m.cost_usd)}</td>
+    <td>${fmtNum(m.p95_ms)} ms</td><td>${fmtNum(m.errors)}</td></tr>`);
   const empty = (title) => `<div class="panel">
     <div class="panel-head"><h2>${esc(title)}</h2></div>
     <div class="empty">No traffic in this window.</div></div>`;
@@ -1597,9 +1957,33 @@ function panelTable(title, cols, rowsHtml) {
   return `<div class="panel">
     <div class="panel-head"><h2>${esc(title)}</h2></div>
     ${rowsHtml.length === 0 ? `<div class="empty">Nothing here yet.</div>` : `
-    <table><thead><tr>${cols.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead>
-    <tbody>${rowsHtml.join("")}</tbody></table>`}
+    <div class="table-scroll"><table><thead><tr>${cols.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead>
+    <tbody>${rowsHtml.join("")}</tbody></table></div>`}
   </div>`;
+}
+
+// wireModalDismiss gives a modal backdrop the usual ways out and returns
+// its close function. A click closes only when it both started and ended on
+// the backdrop (a text selection dragged out of an input must not count)
+// and nothing was edited; Esc closes the topmost modal, asking first when
+// there are unsaved edits.
+function wireModalDismiss(bg) {
+  let dirty = false, downOnBg = false;
+  const close = () => { document.removeEventListener("keydown", onKey); bg.remove(); };
+  const onKey = (e) => {
+    if (e.key !== "Escape" || [...document.querySelectorAll(".modal-bg")].pop() !== bg) return;
+    if (dirty && !confirm("Discard unsaved changes?")) return;
+    close();
+  };
+  bg.addEventListener("input", () => { dirty = true; });
+  bg.addEventListener("change", () => { dirty = true; });
+  bg.addEventListener("mousedown", (e) => { downOnBg = e.target === bg; });
+  bg.addEventListener("click", (e) => {
+    if (downOnBg && e.target === bg && !dirty) close();
+    downOnBg = false;
+  });
+  document.addEventListener("keydown", onKey);
+  return close;
 }
 
 // modalForm renders a small form in a modal. A field may carry
@@ -1615,8 +1999,30 @@ function panelTable(title, cols, rowsHtml) {
 function renderFormField(f) {
   const open = `<label class="field" data-field="${f.name}"><span class="lab">${esc(f.label)}</span>`;
   if (f.type === "checkbox") {
-    return `${open}
-      <input type="checkbox" name="${f.name}" ${f.value ? "checked" : ""} style="width:auto" /></label>`;
+    return `<label class="field check" data-field="${f.name}">
+      <input type="checkbox" name="${f.name}" ${f.value ? "checked" : ""} /><span class="lab">${esc(f.label)}</span></label>`;
+  }
+  if (f.type === "checkgroup") {
+    // A set of known values picked with checkboxes; f.value is the array of
+    // selected ones.
+    const sel = new Set(f.value || []);
+    return `<div class="field" data-field="${f.name}"><span class="lab">${esc(f.label)}</span>
+      <div class="checkgroup">${(f.options || []).map((o) => `<label class="check">
+        <input type="checkbox" data-group="${f.name}" value="${esc(o)}" ${sel.has(o) ? "checked" : ""} /><span class="mono">${esc(o)}</span></label>`).join("")
+      }</div></div>`;
+  }
+  if (f.type === "limits") {
+    // Role limits ({dim: {window: N}}) as a dimension × window grid of
+    // number inputs; an empty cell is no limit.
+    const lim = f.value || {};
+    const dims = [["tokens", "Tokens"], ["cost_usd", "Cost $"], ["audio_seconds", "Audio sec"], ["tts_chars", "TTS chars"]];
+    const wins = ["5h", "24h", "7d"];
+    return `<div class="field" data-field="${f.name}"><span class="lab">${esc(f.label)}</span>
+      <div class="limits-grid"><span></span>${wins.map((w) => `<span class="lab">${w}</span>`).join("")}
+      ${dims.map(([d, label]) => `<span class="lab">${label}</span>${wins.map((w) => {
+        const v = lim[d] && lim[d][w] != null ? lim[d][w] : "";
+        return `<input type="number" min="0" step="any" data-limit="${d}.${w}" value="${esc(v)}" aria-label="${label} per ${w}" />`;
+      }).join("")}`).join("")}</div></div>`;
   }
   if (f.type === "textarea") {
     return `${open}
@@ -1656,21 +2062,36 @@ function modalForm(title, fields, onSubmit) {
   bg.className = "modal-bg";
   bg.innerHTML = `<div class="modal"><h3>${esc(title)}</h3><form id="mf">
     ${fields.map(renderFormField).join("")}
-    <div class="row" style="justify-content:flex-end;margin-top:.5rem">
+    <div class="row modal-foot">
       <button type="button" class="btn ghost" id="mf-cancel">Cancel</button>
       <button type="submit" class="btn">Save</button>
     </div></form></div>`;
   document.body.appendChild(bg);
   const form = $("#mf", bg);
-  const close = () => bg.remove();
+  const close = wireModalDismiss(bg);
   $("#mf-cancel", bg).addEventListener("click", close);
-  bg.addEventListener("click", (e) => { if (e.target === bg) close(); });
 
   const values = () => {
     const v = {};
     fields.forEach((f) => {
-      const el = form[f.name];
-      v[f.name] = f.type === "checkbox" ? el.checked : el.value;
+      if (f.type === "checkgroup") {
+        v[f.name] = [...form.querySelectorAll(`[data-group="${f.name}"]:checked`)].map((el) => el.value);
+      } else if (f.type === "limits") {
+        // Start from the stored object so a dimension or window the grid
+        // does not show is kept; every shown cell is rewritten.
+        const out = JSON.parse(JSON.stringify(f.value || {}));
+        form.querySelectorAll("[data-limit]").forEach((el) => {
+          const [d, w] = el.getAttribute("data-limit").split(".");
+          out[d] = out[d] || {};
+          if (el.value.trim() === "") delete out[d][w];
+          else out[d][w] = Number(el.value);
+          if (!Object.keys(out[d]).length) delete out[d];
+        });
+        v[f.name] = out;
+      } else {
+        const el = form[f.name];
+        v[f.name] = f.type === "checkbox" ? el.checked : el.value;
+      }
     });
     return v;
   };

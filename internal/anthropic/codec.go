@@ -24,6 +24,12 @@ type messagesRequestWire struct {
 	MaxTokens   int             `json:"max_tokens"`
 	Temperature *float64        `json:"temperature,omitempty"`
 	Stream      bool            `json:"stream,omitempty"`
+	// StopSequences and TopP map onto OpenAI's stop and top_p. top_k has
+	// no OpenAI counterpart and OpenAI-shaped upstreams differ on whether
+	// they accept it (OpenAI itself rejects it), so it is not decoded and
+	// never forwarded.
+	StopSequences []string        `json:"stop_sequences,omitempty"`
+	TopP          json.RawMessage `json:"top_p,omitempty"`
 }
 
 type messageWire struct {
@@ -47,6 +53,7 @@ type contentBlockWire struct {
 	// tool_result
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   json.RawMessage `json:"content,omitempty"`
+	IsError   bool            `json:"is_error,omitempty"`
 	// image — base64 (inline) or url (Anthropic's remote-fetch source)
 	Source *struct {
 		Type      string `json:"type"`
@@ -106,6 +113,16 @@ func DecodeMessagesRequest(r io.Reader) (llm.ChatRequest, error) {
 		Temperature: w.Temperature,
 		Stream:      w.Stream,
 	}
+	if len(w.StopSequences) > 0 {
+		b, _ := json.Marshal(w.StopSequences)
+		req.Extra = map[string]json.RawMessage{"stop": b}
+	}
+	if len(w.TopP) > 0 && string(w.TopP) != "null" {
+		if req.Extra == nil {
+			req.Extra = map[string]json.RawMessage{}
+		}
+		req.Extra["top_p"] = w.TopP
+	}
 	return req, nil
 }
 
@@ -149,6 +166,10 @@ func translateToolChoice(raw json.RawMessage) json.RawMessage {
 		return nil
 	}
 }
+
+// toolErrorPrefix marks the content of a tool_result the client flagged
+// is_error.
+const toolErrorPrefix = "[tool error] "
 
 // convertMessage maps one Anthropic message to one or more IR messages. A
 // message bearing tool_result blocks splits those into IR "tool" messages,
@@ -210,6 +231,11 @@ func convertMessage(mw messageWire) []llm.Message {
 		case "tool_result":
 			flush()
 			text, toolImages := blocksTextAndImages(blk.Content, "tool")
+			if blk.IsError {
+				// An OpenAI-shaped tool message has no error flag; say it in
+				// the content so the model knows the call failed.
+				text = toolErrorPrefix + text
+			}
 			out = append(out, llm.Message{
 				Role:       "tool",
 				ToolCallID: blk.ToolUseID,

@@ -29,10 +29,13 @@ func newLocal(t *testing.T, users map[string]UserRow) *LocalAuth {
 
 func TestLocalLoginSuccess(t *testing.T) {
 	h, _ := HashPassword("pw12345678")
-	la := newLocal(t, map[string]UserRow{"admin": {Subject: "admin", Roles: []string{AdminRole}, PasswordHash: h}})
+	la := newLocal(t, map[string]UserRow{"admin": {ID: "u-admin", Subject: "admin", Roles: []string{AdminRole}, PasswordHash: h}})
 	p, ok := la.Login("admin", "pw12345678")
 	if !ok || !p.IsAdmin() {
 		t.Fatalf("admin login should succeed with admin role, ok=%v p=%+v", ok, p)
+	}
+	if p.UserID != "u-admin" {
+		t.Fatalf("login principal must carry the user id for the session, got %q", p.UserID)
 	}
 }
 

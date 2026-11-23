@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/netip"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -37,6 +39,11 @@ type Config struct {
 	RedisURL    string // redis URL, e.g. "redis://host:6379/0"
 	Env         string // "dev" | "prod"; used as the API-key environment tag
 	AuthMode    string // "local" | "oidc"; "mock" is a deprecated alias for "local"
+
+	// SeedDev (SEED_DEV=1) seeds the local demo data: fixed-password demo
+	// users and a well-known API key. Only allowed with ENV=dev and
+	// AUTH_MODE=local; ENV=dev alone never seeds anything.
+	SeedDev bool
 
 	MasterKey    []byte // 32-byte AES key for sealing provider credentials
 	MasterKeyDev bool   // true when a deterministic dev key was derived (insecure)
@@ -80,6 +87,25 @@ type Config struct {
 	// never automatic, since a client's own headers could otherwise
 	// override the ones the gateway sets for its upstream call.
 	ForwardHeaders []string
+
+	// TrustedProxyCIDRs, from TRUSTED_PROXY_CIDRS (comma-separated), are the
+	// networks whose X-Forwarded-For the gateway believes when it works out
+	// a client's IP (login lockout, live view). Defaults to the loopback,
+	// private and link-local ranges (DefaultTrustedProxyCIDRs).
+	TrustedProxyCIDRs []netip.Prefix
+}
+
+// DefaultTrustedProxyCIDRs is the TRUSTED_PROXY_CIDRS default: every
+// loopback, private (RFC 1918 / ULA) and link-local range.
+var DefaultTrustedProxyCIDRs = []netip.Prefix{
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("::1/128"),
+	netip.MustParsePrefix("fc00::/7"),
+	netip.MustParsePrefix("fe80::/10"),
 }
 
 // Load reads configuration from the environment and validates it.
@@ -107,8 +133,19 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("AUTH_MODE must be \"local\" or \"oidc\", got %q", c.AuthMode)
 	}
 
+	switch os.Getenv("SEED_DEV") {
+	case "", "0":
+	case "1":
+		if c.Env != "dev" || c.AuthMode != "local" {
+			return nil, fmt.Errorf("SEED_DEV=1 requires ENV=dev and AUTH_MODE=local (it creates demo users with a fixed password and a well-known API key)")
+		}
+		c.SeedDev = true
+	default:
+		return nil, fmt.Errorf("SEED_DEV must be \"0\" or \"1\", got %q", os.Getenv("SEED_DEV"))
+	}
+
 	if c.AuthMode == "oidc" {
-		oidcCfg, err := loadOIDC()
+		oidcCfg, err := loadOIDC(c.Env)
 		if err != nil {
 			return nil, err
 		}
@@ -134,6 +171,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if c.ForwardHeaders, err = parseForwardHeaders(env("FORWARD_HEADERS", "")); err != nil {
+		return nil, err
+	}
+	if c.TrustedProxyCIDRs, err = parseTrustedProxyCIDRs(os.Getenv("TRUSTED_PROXY_CIDRS")); err != nil {
 		return nil, err
 	}
 
@@ -284,12 +324,15 @@ func env(key, def string) string {
 }
 
 // loadOIDC reads and validates OIDC relying-party config from the environment.
-func loadOIDC() (OIDCConfig, error) {
+func loadOIDC(envName string) (OIDCConfig, error) {
 	required := []string{"OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "OIDC_REDIRECT_URL", "OIDC_ROLES_CLAIM"}
 	for _, k := range required {
 		if os.Getenv(k) == "" {
 			return OIDCConfig{}, fmt.Errorf("%s is required when AUTH_MODE=oidc", k)
 		}
+	}
+	if err := checkIssuerURL(os.Getenv("OIDC_ISSUER"), envName); err != nil {
+		return OIDCConfig{}, err
 	}
 
 	scopesRaw := env("OIDC_SCOPES", "openid profile email")
@@ -304,6 +347,34 @@ func loadOIDC() (OIDCConfig, error) {
 		RolesClaim:   os.Getenv("OIDC_ROLES_CLAIM"),
 		RoleMap:      parseRoleMap(os.Getenv("OIDC_ROLE_MAP")),
 	}, nil
+}
+
+// checkIssuerURL requires an https OIDC issuer: discovery, the JWKS that
+// verifies id_tokens, and the token exchange (which carries the client
+// secret) all go to it. Plain http is only accepted for a loopback issuer
+// with ENV=dev, for a local test IdP.
+func checkIssuerURL(issuer, envName string) error {
+	u, err := url.Parse(issuer)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("OIDC_ISSUER must be an absolute URL, got %q", issuer)
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		h := u.Hostname()
+		if envName == "dev" && (h == "localhost" || h == "127.0.0.1" || h == "::1") {
+			return nil
+		}
+		// Escape hatch for an existing IdP reachable only over plain http
+		// inside a private network.
+		if os.Getenv("OIDC_ALLOW_HTTP_ISSUER") == "1" {
+			slog.Warn("OIDC_ALLOW_HTTP_ISSUER=1: using a plain-http OIDC issuer; discovery, JWKS and the token exchange (with the client secret) are unencrypted",
+				"issuer", issuer)
+			return nil
+		}
+	}
+	return fmt.Errorf("OIDC_ISSUER must use https (http is only allowed for localhost with ENV=dev, or with OIDC_ALLOW_HTTP_ISSUER=1), got %q", issuer)
 }
 
 // forwardHeaderDenylist are names FORWARD_HEADERS must never contain:
@@ -326,6 +397,27 @@ func isForwardHeaderDenied(name string) bool {
 		}
 	}
 	return false
+}
+
+// parseTrustedProxyCIDRs parses a comma-separated CIDR list; empty means
+// DefaultTrustedProxyCIDRs.
+func parseTrustedProxyCIDRs(s string) ([]netip.Prefix, error) {
+	if strings.TrimSpace(s) == "" {
+		return DefaultTrustedProxyCIDRs, nil
+	}
+	var out []netip.Prefix
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(part)
+		if err != nil {
+			return nil, fmt.Errorf("TRUSTED_PROXY_CIDRS: %q is not a CIDR: %w", part, err)
+		}
+		out = append(out, p.Masked())
+	}
+	return out, nil
 }
 
 // parseForwardHeaders splits a comma-separated FORWARD_HEADERS value into

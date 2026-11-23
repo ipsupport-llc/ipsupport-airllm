@@ -17,7 +17,8 @@ Read by `internal/config` at startup. Invalid values fail fast.
 | `DATABASE_URL` | — | **yes** | Postgres DSN, e.g. `postgres://airllm:airllm@host:5432/airllm?sslmode=disable` |
 | `HTTP_ADDR` | `:8080` | no | Listen address. In compose this stays `:8080` inside the container; the host binding is controlled by `APP_BIND`. |
 | `REDIS_URL` | `redis://localhost:6379/0` | no | Redis URL for rolling usage counters |
-| `ENV` | `dev` | no | `dev` or `prod`. Used as the API-key environment tag (`air_<env>_…`). `dev` seeds mock data and a fixed demo key. |
+| `ENV` | `dev` | no | `dev` or `prod`. Used as the API-key environment tag (`air_<env>_…`). `dev` alone seeds nothing (see `SEED_DEV`). |
+| `SEED_DEV` | `0` | no | `1` seeds the local demo data: `operator`/`dev-auditor`/`dev-admin` users with the fixed password `devpass123`, the mock provider, and the well-known API key `air_dev_demo…`. Only accepted with `ENV=dev` and `AUTH_MODE=local`; startup fails otherwise. Never set it on a reachable deployment. The dev compose stack sets it. |
 | `AUTH_MODE` | `local` | no | `local` (DB-backed username/password) or `oidc` (generic OpenID Connect). `mock` is a **deprecated alias** for `local` — existing configs keep working but a deprecation warning is logged at startup. |
 | `AIRLLM_SESSION_KEY` | — | no | Base64-encoded **32-byte** HMAC session signing key. Optional: if unset, the key is derived deterministically from `AIRLLM_MASTER_KEY` via HKDF-SHA256 (`info="airllm-session-v1"`), so sessions survive restarts and work across replicas with no extra secret to manage. Never logged. |
 | `AIRLLM_ADMIN_USERNAME` | `admin` | no | Username for the bootstrap admin account created on first run. |
@@ -30,6 +31,7 @@ Read by `internal/config` at startup. Invalid values fail fast.
 | `SHUTDOWN_TIMEOUT` | `10s` | no | How long in-flight requests, streams included, may then take to finish before the process exits (Go duration, positive). The Helm chart sets `20s`. |
 | `CAPTURE_BLOB_DIR` | `capture-blobs` | no | Filesystem directory for the capture blob store (relative to the working directory by default). The process runs as a non-root user, so point this at a writable path (compose uses `/tmp/airllm-captures`). Back it with a volume or object store on deploy. |
 | `UPSTREAM_CHAT_TIMEOUT` | `120s` | no | Ceiling on a single non-streaming call to an OpenAI-compatible or Vertex upstream — chat completions and embeddings (Go duration, positive). Independent of a target's own `timeout_ms` (see [Circuit breaker](#circuit-breaker)): that one can be set to `0` for an unbounded wait and is enforced by cancelling the attempt; this one is a hard ceiling the provider applies underneath it, regardless of `timeout_ms`. Raise it for a local upstream with a long time-to-first-token on non-streaming requests. |
+| `TRUSTED_PROXY_CIDRS` | loopback, private and link-local ranges | no | Comma-separated CIDRs whose `X-Forwarded-For` is believed when working out a client's IP (login lockout, live view). Set it to your ingress controller's pod CIDR; see [Operations → Security posture](operations.md#security-posture). |
 | `FORWARD_HEADERS` | — | no | Comma-separated request header names to copy onto the outbound upstream request for `/v1/chat/completions` and `/v1/embeddings` (OpenAI-compatible and Vertex providers; audio and the Google Speech/TTS kinds don't forward headers). Forwarding can never override `Content-Type`, `Authorization`, or (on a streaming call, the only one that sets it) `Accept`. A name matching `Authorization`, `X-Api-Key`, or another header the gateway needs for itself (see the full denylist in `internal/config`) is rejected at startup. Empty by default: no client header reaches an upstream unless named here. |
 
 ### Compose-only
@@ -43,12 +45,13 @@ Read by `internal/config` at startup. Invalid values fail fast.
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `OIDC_ISSUER` | — | **required** | Issuer URL; discovery document fetched from `<issuer>/.well-known/openid-configuration`. Placeholder: `https://idp.example.com`. |
+| `OIDC_ISSUER` | — | **required** | Issuer URL; discovery document fetched from `<issuer>/.well-known/openid-configuration`. Placeholder: `https://idp.example.com`. Must be `https://`; plain `http://` is only accepted for `localhost`/`127.0.0.1` with `ENV=dev`, or with `OIDC_ALLOW_HTTP_ISSUER=1`. |
 | `OIDC_CLIENT_ID` | — | **required** | Relying-party client ID. Placeholder: `CHANGE_ME`. |
 | `OIDC_CLIENT_SECRET` | — | **required** | Relying-party client secret. Placeholder: `CHANGE_ME`. |
 | `OIDC_REDIRECT_URL` | — | **required** | Callback URL registered with the IdP, e.g. `https://airllm.example.com/auth/callback`. |
 | `OIDC_ROLES_CLAIM` | — | **required** | ID-token claim that carries roles. Supports a string array (`["admin","viewer"]`) or an object whose keys are role names (e.g. Zitadel's `urn:zitadel:iam:org:project:roles` map). |
 | `OIDC_SCOPES` | `openid profile email` | no | Space-separated scopes to request. |
+| `OIDC_ALLOW_HTTP_ISSUER` | `0` | no | `1` accepts a plain-http `OIDC_ISSUER` anywhere (an existing IdP reachable only over http inside a private network) and logs a `WARN` at startup. Discovery, the JWKS and the token exchange, which carries the client secret, then travel unencrypted. |
 | `OIDC_ROLE_MAP` | — | no | Optional mapping from IdP role names to AirLLM roles, as a comma-separated list of `idpRole:airllmRole` pairs, e.g. `admins:airllm_admin,devs:airllm_user`. When unset, role names are used as-is and must match `airllm_admin`, `airllm_user`, or `airllm_auditor` exactly. |
 
 Generate a production master key:
@@ -93,7 +96,9 @@ same JSON can be imported into any Grafana instance.
 ## Runtime settings
 
 These live in the `settings` table and are edited via the admin console
-(**Admin → DLP**) or the corresponding admin API endpoints. Each is cached in
+(**Admin → DLP** for the DLP, capture and second-pass policies; **Admin →
+Aliases → Failover defaults** for the failover policy) or the corresponding
+admin API endpoints. Each is cached in
 an atomic pointer and reloaded on save, so changes take effect on the next
 request/job without a restart.
 

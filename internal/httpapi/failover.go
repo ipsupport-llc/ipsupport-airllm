@@ -316,6 +316,8 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 	free := s.freeFunc(reg)
 	session := clientSessionFrom(ctx)
 	res.Session = session
+	live := liveFrom(ctx)
+	live.setAlias(plan.Alias)
 	floor, pinned := s.sessionFloor(ctx, plan, session)
 	lcrRank := s.lcrRank(ctx, plan)
 	var lastErr error
@@ -440,6 +442,7 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 					continue
 				}
 				res.Attempts++
+				live.startAttempt(t.Provider, t.UpstreamModel, res.Attempts)
 				forcedCall = forced >= 0
 				began := time.Now()
 				// A stream that delivers its first chunk has answered: that is
@@ -460,6 +463,7 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 						ok := commit()
 						if ok {
 							recordSuccess()
+							live.streaming()
 						}
 						return ok
 					})

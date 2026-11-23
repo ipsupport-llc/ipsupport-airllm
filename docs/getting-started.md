@@ -47,7 +47,7 @@ Open the console at <http://127.0.0.1:8080> and sign in as `admin` (or the
 name set by `AIRLLM_ADMIN_USERNAME`). (Reach a remote box via an SSH tunnel or
 `kubectl port-forward` — do not publish the port on a public NIC.)
 
-In `dev` mode, sample `operator` (role `airllm_user`) and `auditor` (role
+The dev compose stack sets `SEED_DEV=1`, so sample `operator` (role `airllm_user`) and `dev-auditor` (role
 `airllm_auditor`) accounts are seeded with the fixed dev-only password
 `devpass123` (a non-secret constant, never used outside local development).
 From the console an admin can create additional users under **Admin → Users**.
@@ -74,8 +74,8 @@ form.
 3. Or use the Anthropic shape at `/v1/messages` with `x-api-key: <token>`.
 4. Watch **Usage** update in the console.
 
-A fixed dev key is also seeded for scripting (when `ENV=dev` and
-`AUTH_MODE=local`, including the `mock` alias): `air_dev_demo00000000000000000000000000000z`.
+A fixed dev key is also seeded for scripting (only with `SEED_DEV=1`, which
+requires `ENV=dev` and `AUTH_MODE=local`): `air_dev_demo00000000000000000000000000000z`.
 
 ## Console tour
 
@@ -118,7 +118,7 @@ to `http://dlp-bert:8000`. See [DLP, capture & audit](dlp-capture-audit.md) and
 make build
 DATABASE_URL='postgres://airllm:airllm@127.0.0.1:55432/airllm?sslmode=disable' \
 REDIS_URL='redis://127.0.0.1:56379/0' \
-HTTP_ADDR='127.0.0.1:8099' ENV=dev AUTH_MODE=local \
+HTTP_ADDR='127.0.0.1:8099' ENV=dev AUTH_MODE=local SEED_DEV=1 \
 CAPTURE_BLOB_DIR="$(mktemp -d)" \
 ./bin/ipsupport-airllm
 ```

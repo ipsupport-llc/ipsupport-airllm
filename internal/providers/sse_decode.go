@@ -114,6 +114,10 @@ type streamDecodeOptions struct {
 // when it is off, one in total when it is on, none either way if the upstream
 // reported no usage.
 //
+// An error envelope in the stream (see streamErrorEnvelope) ends it with that
+// error: nothing more is yielded, no finish reason is synthesized, and any
+// coalesced usage is dropped, exactly as for a stream that broke mid-flight.
+//
 // If yield returns an error the stream stops and that error is returned.
 func decodeSSEStream(body io.Reader, opts streamDecodeOptions, yield func(llm.StreamChunk) error) error {
 	sc := bufio.NewScanner(body)
@@ -134,6 +138,9 @@ func decodeSSEStream(body io.Reader, opts streamDecodeOptions, yield func(llm.St
 		}
 		if data == "[DONE]" {
 			break
+		}
+		if err := streamErrorEnvelope(opts.provider, []byte(data)); err != nil {
+			return err
 		}
 		chunk, err := openai.ParseStreamChunk([]byte(data))
 		if err != nil {
