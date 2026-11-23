@@ -26,6 +26,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -41,6 +42,10 @@ var (
 	once   sync.Once
 	dsn    string
 	setErr error
+	// lockConn holds the shared advisory lock for the life of the test
+	// binary. It must stay reachable: an unreferenced connection is closed by
+	// the socket's finalizer on the next GC, which would release the lock.
+	lockConn *pgx.Conn
 )
 
 // Pool returns a pool on this test binary's private database, creating and
@@ -91,8 +96,15 @@ func dbName() (string, error) {
 }
 
 func setup(admin string, migrate MigrateFunc) (string, error) {
-	ctx := context.Background()
+	// A black-holed server fails the run in a minute instead of hanging
+	// until go test's 10m timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
 	name, err := dbName()
+	if err != nil {
+		return "", err
+	}
+	d, err := dsnFor(admin, name)
 	if err != nil {
 		return "", err
 	}
@@ -100,21 +112,32 @@ func setup(admin string, migrate MigrateFunc) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("connect to TEST_DATABASE_URL: %w", err)
 	}
-	defer conn.Close(ctx)
+	// Two `go test` runs of the same package in one checkout share the
+	// database name. Setup holds an exclusive advisory lock; afterwards this
+	// session keeps a shared one until the test binary exits (the connection
+	// is deliberately never closed), so another run's DROP waits for this
+	// run to finish instead of killing it.
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock(hashtext($1))`, name); err != nil {
+		conn.Close(context.Background())
+		return "", fmt.Errorf("lock %s: %w", name, err)
+	}
 	ident := pgx.Identifier{name}.Sanitize()
 	if _, err := conn.Exec(ctx, `DROP DATABASE IF EXISTS `+ident+` WITH (FORCE)`); err != nil {
+		conn.Close(context.Background())
 		return "", fmt.Errorf("drop old %s: %w", name, err)
 	}
 	if _, err := conn.Exec(ctx, `CREATE DATABASE `+ident); err != nil {
+		conn.Close(context.Background())
 		return "", fmt.Errorf("create %s: %w", name, err)
 	}
-
-	u, err := url.Parse(admin)
-	if err != nil {
-		return "", fmt.Errorf("parse TEST_DATABASE_URL: %w", err)
-	}
-	u.Path = "/" + name
-	d := u.String()
+	defer func() {
+		// Downgrade: take the shared lock first, then drop the exclusive one.
+		if _, err := conn.Exec(context.Background(), `SELECT pg_advisory_lock_shared(hashtext($1)), pg_advisory_unlock(hashtext($1))`, name); err != nil {
+			conn.Close(context.Background())
+			return
+		}
+		lockConn = conn
+	}()
 
 	pool, err := pgxpool.New(ctx, d)
 	if err != nil {
@@ -123,6 +146,34 @@ func setup(admin string, migrate MigrateFunc) (string, error) {
 	defer pool.Close()
 	if err := migrate(ctx, pool); err != nil {
 		return "", fmt.Errorf("migrate %s: %w", name, err)
+	}
+	return d, nil
+}
+
+// dsnFor points admin at database name. pgx lets ?dbname= / ?database=
+// override the path, so both are removed: a URL carrying one must not send
+// the migration and the tests to that database.
+func dsnFor(admin, name string) (string, error) {
+	u, err := url.Parse(admin)
+	if err != nil {
+		return "", fmt.Errorf("parse TEST_DATABASE_URL: %w", err)
+	}
+	if u.Scheme != "postgres" && u.Scheme != "postgresql" {
+		return "", fmt.Errorf("TEST_DATABASE_URL must be a postgres:// URL, not a keyword DSN")
+	}
+	u.Path = "/" + name
+	u.RawPath = ""
+	q := u.Query()
+	q.Del("dbname")
+	q.Del("database")
+	u.RawQuery = q.Encode()
+	d := u.String()
+	cfg, err := pgx.ParseConfig(d)
+	if err != nil {
+		return "", fmt.Errorf("parse test DSN: %w", err)
+	}
+	if cfg.Database != name {
+		return "", fmt.Errorf("test DSN resolves to database %q, want %q", cfg.Database, name)
 	}
 	return d, nil
 }

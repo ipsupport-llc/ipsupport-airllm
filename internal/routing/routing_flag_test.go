@@ -48,7 +48,7 @@ func TestDLPModelScanFlag(t *testing.T) {
 
 	// Skip with a clear message if the migration hasn't been applied yet.
 	if _, err := tx.Exec(ctx, `SELECT dlp_model_scan FROM model_aliases LIMIT 0`); err != nil {
-		t.Skipf("dlp_model_scan column not present (migration 0008 not applied?): %v", err)
+		t.Fatalf("dlp_model_scan column not present (migration 0008 not applied?): %v", err)
 	}
 
 	mustExec := func(sql string, args ...any) {
@@ -120,7 +120,7 @@ func TestDisplayLabelFlag(t *testing.T) {
 	defer tx.Rollback(ctx)
 
 	if _, err := tx.Exec(ctx, `SELECT display_label FROM alias_targets LIMIT 0`); err != nil {
-		t.Skipf("display_label column not present (migration 0010 not applied?): %v", err)
+		t.Fatalf("display_label column not present (migration 0010 not applied?): %v", err)
 	}
 
 	mustExec := func(sql string, args ...any) {
@@ -175,7 +175,7 @@ func TestDLPAudioScanFlag(t *testing.T) {
 	defer tx.Rollback(ctx)
 
 	if _, err := tx.Exec(ctx, `SELECT dlp_audio_scan FROM model_aliases LIMIT 0`); err != nil {
-		t.Skipf("dlp_audio_scan column not present (migration 0011 not applied?): %v", err)
+		t.Fatalf("dlp_audio_scan column not present (migration 0011 not applied?): %v", err)
 	}
 
 	mustExec := func(sql string, args ...any) {
