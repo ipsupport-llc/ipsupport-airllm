@@ -31,6 +31,22 @@ automatically on boot**, in lexicographic order, inside `store.Migrate`. To add
 one, drop a new `NNNN_name.sql` file with the next number; do not edit applied
 migrations. A clean re-bootstrap is `make compose-down && make compose-up`.
 
+### Upgrades and long migrations
+
+Pending migrations run **before** the HTTP listener starts (each file in its
+own transaction), so until they finish the pod answers no probe. The Helm
+chart's startup probe allows `app.startupProbe.periodSeconds ×
+app.startupProbe.failureThreshold` (3 s × 20 ≈ 60 s by default) before the
+kubelet restarts the container — and a restart rolls back the migration in
+progress, so a single migration that needs longer never completes. Before an upgrade that rewrites or indexes a large table:
+
+1. Raise the budget for that rollout, e.g.
+   `--set app.startupProbe.failureThreshold=400` (~20 min).
+2. Optionally scale to one replica first, so only one pod runs the migration
+   (the others wait on the migration advisory lock and would also need the
+   larger budget).
+3. Lower the value again once the new version is up.
+
 ## Security posture
 
 - **Bind to loopback.** On a host with a public IP, never publish the gateway on
@@ -71,11 +87,14 @@ migrations. A clean re-bootstrap is `make compose-down && make compose-up`.
   user's subject, the SSO login is refused with `409 Conflict` instead of
   silently taking over that account's email/roles — a local user's subject
   can never be claimed by a federated login.
-- **Disabling a user.** Setting `disabled=true` on a user blocks new logins
-  immediately. However, an existing session cookie remains valid until its 12-hour
-  TTL expires (stateless HMAC; no per-request DB lookup). The user's API keys
-  keep working until individually revoked — disabling does **not** auto-revoke
-  keys. Revoke keys explicitly via **Admin → Keys** or
+- **Disabling or deleting a user.** Every console request re-reads the user's
+  row, so disabling or deleting a user ends their existing sessions on the next
+  request (`401`), and role changes apply immediately. The console session never
+  creates users: they are created only by the OIDC callback (first SSO login),
+  the bootstrap admin, and **Admin → Users**. A session is bound to the user id
+  it was issued for, so a new account that reuses a deleted user's name does not
+  inherit their old cookie. The user's API keys keep working until individually
+  revoked — disabling does **not** auto-revoke keys. Revoke keys explicitly via **Admin → Keys** or
   `POST /api/admin/keys/{id}/revoke`.
 - **Secrets stay out of git.** The repository is written public-grade: no
   secrets, English-only. `deploy/.env` is git-ignored; use
@@ -84,7 +103,14 @@ migrations. A clean re-bootstrap is `make compose-down && make compose-up`.
   action. The raw training window is the only path that stores un-redacted
   secrets, and only encrypted and TTL-bounded — see
   [DLP, capture & audit](dlp-capture-audit.md#the-raw-training-window).
-- **Least privilege.** The container runs as a non-root user (`uid 10001`).
+- **Least privilege.** The gateway and the DLP BERT sidecar containers run as
+  a non-root user (`uid 10001`); the Helm chart mounts no Kubernetes API token
+  into either pod.
+- **Login lockout.** Ten failed password logins for one username from one client
+  IP lock that pair out for 15 minutes (a correct password clears it). The
+  client IP comes from `X-Forwarded-For` only when the TCP peer is a private or
+  loopback address (a reverse proxy), using the rightmost public entry; a
+  directly connected client's header is ignored.
 
 ## Datastores & backups
 
@@ -176,12 +202,29 @@ kubectl -n airllm create secret generic airllm-secrets \
 
 helm install airllm deploy/helm/airllm -n airllm --create-namespace \
   --set existingSecret=airllm-secrets \
-  --set image.repository=ghcr.io/OWNER/ipsupport-airllm
+  --set image.repository=ghcr.io/OWNER/ipsupport-airllm \
+  --set config.env=prod
 ```
+
+`config.env` defaults to `prod` (master key required, no demo data). The demo
+seed (`config.seedDev=true`: users with the fixed password `devpass123` and a
+well-known API key) is only for a throwaway local cluster and is refused unless
+`config.env=dev` and `config.authMode=local`.
 
 Templating **fails fast** if `existingSecret` is empty. After install, `NOTES.txt`
 prints the in-cluster Sidecar URL to paste into **Admin → DLP**:
 `http://<release>-airllm-dlp-bert:8000`.
+
+**`/metrics` and the Ingress.** `app.ingress.enabled=true` routes **every** path
+on the host to the gateway, including the unauthenticated `/metrics`. On a
+public host, block `/metrics` at the ingress controller (or keep the Ingress
+private) and let Prometheus scrape the Service in-cluster. The compose `tls`
+profile's Caddy already answers `/metrics` with 404.
+
+A ConfigMap change (any `config.*` value) rolls the gateway pods via a
+`checksum/config` annotation. With `app.capture.persistence.enabled=true` and a
+`ReadWriteOnce` volume the gateway uses the `Recreate` strategy, since a rolling
+update's new pod could not mount the volume the old pod still holds.
 
 ### Autoscaling
 
@@ -605,6 +648,9 @@ and the pool distributes scans round-robin across endpoints.
 ```sh
 docker compose --profile bert up -d --scale dlp-bert=3
 ```
+
+(The dev stack publishes replicas on host ports `127.0.0.1:8000-8009`, one per
+replica, for debugging from the host; the gateway itself uses the service name.)
 
 Then set **Sidecar URL** (under **Admin → DLP**) to the service name:
 `http://dlp-bert:8000`. The pool resolves the hostname to all three container
