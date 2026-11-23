@@ -56,7 +56,7 @@ func redactForCapture(msgs []llm.Message, msgFindings [][]dlp.Finding, ps dlp.Pa
 		if len(fs) > 0 {
 			out[i].Content = dlp.Redact(out[i].Content, fs)
 		}
-		_, out[i].ToolCalls, _ = scanToolCallArgs(out[i].ToolCalls, ps)
+		_, out[i].ToolCalls, _ = scanToolCallArgs(i, out[i].ToolCalls, ps)
 	}
 	return out
 }

@@ -24,6 +24,32 @@ type Finding struct {
 	Label string `json:"label"`
 	Start int    `json:"start"`
 	End   int    `json:"end"`
+	// ToolCall, when set, places the finding in a tool call's arguments
+	// instead of message content. Start and End are then zero: the finding
+	// sits in one decoded string value of the arguments JSON, so it has no
+	// offset into Content (or into the raw arguments text), and span
+	// consumers must skip it (see ContentFindings).
+	ToolCall *ToolCallRef `json:"tool_call,omitempty"`
+}
+
+// ToolCallRef locates a tool call: Message indexes the request's messages,
+// Index the message's tool calls; ID is the call's id when it has one.
+type ToolCallRef struct {
+	Message int    `json:"message"`
+	Index   int    `json:"index"`
+	ID      string `json:"id,omitempty"`
+}
+
+// ContentFindings returns the findings of fs whose offsets index message
+// content, dropping tool-call-arguments findings. fs is not modified.
+func ContentFindings(fs []Finding) []Finding {
+	var out []Finding
+	for _, f := range fs {
+		if f.ToolCall == nil {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // pattern is a built-in detection rule. category and defaultOn drive the UI

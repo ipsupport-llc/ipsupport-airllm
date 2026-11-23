@@ -324,8 +324,8 @@ func (s *Server) dlpCfg() dlpConfig {
 
 // dlpResult carries the outcome of a DLP scan for use by the capture pipeline.
 type dlpResult struct {
-	Findings        []dlp.Finding   // flat list (per-message offsets; for HadIncident / index)
-	MsgFindings     [][]dlp.Finding // per-message findings, indexed parallel to req.Messages
+	Findings        []dlp.Finding   // flat list (per-message offsets, or a ToolCall ref; for HadIncident / index)
+	MsgFindings     [][]dlp.Finding // per-message content findings, indexed parallel to req.Messages
 	HadIncident     bool
 	AlreadyRedacted bool // true when action="redact" masked req.Messages in place
 	// OriginalMessages preserves the pre-redaction messages so the capture
@@ -405,9 +405,12 @@ func (s *Server) dlpEnforce(ctx context.Context, ak authedKey, ingress string, r
 	for i := range req.Messages {
 		// Tool-call arguments (an OpenAI tool_calls entry, or an Anthropic
 		// tool_use input) carry text upstream just like content does. They
-		// get the deterministic layer only; their findings count toward the
-		// incident but stay out of perMsg, whose offsets index Content.
-		if tf, masked, maskedSample := scanToolCallArgs(req.Messages[i].ToolCalls, ps); len(tf) > 0 {
+		// get the deterministic layer only. Their findings (located by
+		// tool call, no offsets) count toward the incident and are recorded
+		// in the capture's flat Findings, but stay out of perMsg, whose
+		// offsets index Content and redact it.
+		if tf, masked, maskedSample := scanToolCallArgs(i, req.Messages[i].ToolCalls, ps); len(tf) > 0 {
+			allFindings = append(allFindings, tf...)
 			total += len(tf)
 			for _, l := range dlp.Labels(tf) {
 				labelSet[l] = true
@@ -597,13 +600,14 @@ func layer1Patterns(cfg dlpConfig) dlp.PatternSet {
 	}
 }
 
-// scanToolCallArgs scans the arguments of calls with ps. It returns every
-// finding (offsets are into the individual JSON string values, so they are
-// good for labels and counts only), a copy of calls with each finding
-// masked — calls itself is never modified, it may be shared with the
-// pre-redaction snapshot — and the first masked arguments, for an incident
-// sample. No findings: nil, calls, "".
-func scanToolCallArgs(calls []llm.ToolCall, ps dlp.PatternSet) ([]dlp.Finding, []llm.ToolCall, string) {
+// scanToolCallArgs scans the arguments of calls (the tool calls of message
+// msg) with ps. It returns every finding, located by dlp.ToolCallRef with
+// zero offsets (a finding sits in one decoded JSON string value, which no
+// offset into content or the raw arguments can express), a copy of calls
+// with each finding masked — calls itself is never modified, it may be
+// shared with the pre-redaction snapshot — and the first masked arguments,
+// for an incident sample. No findings: nil, calls, "".
+func scanToolCallArgs(msg int, calls []llm.ToolCall, ps dlp.PatternSet) ([]dlp.Finding, []llm.ToolCall, string) {
 	var all []dlp.Finding
 	var masked []llm.ToolCall
 	sample := ""
@@ -617,7 +621,9 @@ func scanToolCallArgs(calls []llm.ToolCall, ps dlp.PatternSet) ([]dlp.Finding, [
 			copy(masked, calls)
 		}
 		masked[j].Function.Arguments = red
-		all = append(all, fs...)
+		for _, f := range fs {
+			all = append(all, dlp.Finding{Label: f.Label, ToolCall: &dlp.ToolCallRef{Message: msg, Index: j, ID: tc.ID}})
+		}
 		if sample == "" {
 			sample = red
 		}

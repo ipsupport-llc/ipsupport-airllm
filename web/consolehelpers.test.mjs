@@ -1,7 +1,7 @@
 // Node-native test (node --test) for small console helpers: the sidebar
 // version label, money formatting, the UTC filter parsing, the review
-// span finder and the status badge. Same extraction technique as
-// web/staleguard.test.mjs.
+// span finder, the tool-call finding note and the status badge. Same
+// extraction technique as web/staleguard.test.mjs.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -13,7 +13,7 @@ const grab = (name) => {
   assert.ok(m, `${name} not found in app.js`);
   return m[0];
 };
-const names = ["shortVersion", "fmtUSD", "utcInputToISO", "findSpan", "statusBadge"];
+const names = ["shortVersion", "fmtUSD", "utcInputToISO", "findSpan", "toolCallFindingNote", "statusBadge"];
 const ctx = { TextEncoder };
 vm.createContext(ctx);
 vm.runInContext(names.map(grab).join("\n") + `\nObject.assign(this, { ${names.join(", ")} });`, ctx);
@@ -44,6 +44,26 @@ test("findSpan returns UTF-8 byte offsets within the first matching message", ()
   // "ключ: " is 4 two-byte letters + ": " = 10 bytes.
   assert.deepEqual({ ...ctx.findSpan(msgs, "sk-abc123") }, { start: 10, end: 19 });
   assert.equal(ctx.findSpan(msgs, "nope"), null);
+});
+
+test("toolCallFindingNote names the call and quotes its arguments", () => {
+  const msgs = [
+    { role: "user", content: "deploy" },
+    { role: "assistant", tool_calls: [
+      { id: "c0", function: { name: "read", arguments: "{}" } },
+      { id: "c1", function: { name: "bash", arguments: '{"cmd":"export KEY=[REDACTED:openai_key]"}' } },
+    ] },
+  ];
+  const n = ctx.toolCallFindingNote({ label: "openai_key", start: 0, end: 0, tool_call: { message: 1, index: 1, id: "c1" } }, msgs);
+  assert.deepEqual({ ...n }, { where: "tool call bash (message 2)", excerpt: '{"cmd":"export KEY=[REDACTED:openai_key]"}' });
+
+  const long = [{ tool_calls: [{ function: { name: "w", arguments: "x".repeat(200) } }] }];
+  const ln = ctx.toolCallFindingNote({ tool_call: { message: 0, index: 0 } }, long);
+  assert.equal(ln.excerpt, "x".repeat(160) + "…");
+
+  // Body unavailable: falls back to the stored id, no excerpt.
+  const gone = ctx.toolCallFindingNote({ tool_call: { message: 3, index: 0, id: "c9" } }, []);
+  assert.deepEqual({ ...gone }, { where: "tool call c9 (message 4)", excerpt: "" });
 });
 
 test("statusBadge: 0 is neutral, 2xx green, errors red", () => {

@@ -194,6 +194,32 @@ func TestDLPEnforceRedactsToolCallArguments(t *testing.T) {
 	}
 }
 
+// TestDLPEnforceRecordsToolCallFindings: a secret in tool-call arguments is
+// recorded in the capture's flat Findings, located by tool call with no
+// offsets, and kept out of the per-message content findings (whose offsets
+// redact Content).
+func TestDLPEnforceRecordsToolCallFindings(t *testing.T) {
+	s := newDLPScanTextTestServer(t, dlpConfig{Enabled: true, Action: "flag"})
+	req := toolCallRequest()
+	_, _, res := s.dlpEnforce(context.Background(), authedKey{}, "openai", &req, false)
+	if len(res.Findings) != 1 {
+		t.Fatalf("want 1 finding, got %+v", res.Findings)
+	}
+	f := res.Findings[0]
+	want := dlp.ToolCallRef{Message: 1, Index: 0, ID: "c1"}
+	if f.ToolCall == nil || *f.ToolCall != want || f.Start != 0 || f.End != 0 || f.Label == "" {
+		t.Errorf("finding = %+v (ref %+v), want label, zero offsets, ref %+v", f, f.ToolCall, want)
+	}
+	for i, fs := range res.MsgFindings {
+		if len(fs) != 0 {
+			t.Errorf("MsgFindings[%d] = %+v, want none (tool-call findings index no content)", i, fs)
+		}
+	}
+	if len(dlp.ContentFindings(res.Findings)) != 0 {
+		t.Error("a tool-call finding must not count as a content finding")
+	}
+}
+
 func TestDLPEnforceBlocksOnToolCallArguments(t *testing.T) {
 	s := newDLPScanTextTestServer(t, dlpConfig{Enabled: true, Action: "block"})
 	req := toolCallRequest()

@@ -236,7 +236,9 @@ func (j *Job) processOne(ctx context.Context, row PendingRow) {
 		return // leave pending for retry
 	}
 
-	status, falsePositives, misses := diff(row.Detected, engineFindings)
+	// Tool-call-arguments findings carry no content offsets, so they can
+	// neither be confirmed nor cleared by span overlap.
+	status, falsePositives, misses := diff(dlp.ContentFindings(row.Detected), engineFindings)
 
 	// Confirm/clear (false_positive -> dlp.alert_cleared) requires aligned text:
 	// when we scanned a redacted body the engine cannot re-find the masked secret,

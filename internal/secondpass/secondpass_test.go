@@ -243,6 +243,27 @@ func TestJob_ConfirmPath(t *testing.T) {
 	}
 }
 
+// TestJob_ToolCallFindingIsNotAFalsePositive: a finding in tool-call
+// arguments has no content offsets, so span overlap can neither confirm nor
+// clear it — it must not turn a confirmed row into false_positive.
+func TestJob_ToolCallFindingIsNotAFalsePositive(t *testing.T) {
+	store := newFakeStore(PendingRow{
+		ID:      "id-tc",
+		BlobKey: "k-tc",
+		Detected: []dlp.Finding{
+			{Label: "key", Start: 0, End: 5},
+			{Label: "openai_key", ToolCall: &dlp.ToolCallRef{Message: 1, Index: 0, ID: "c1"}},
+		},
+	})
+	engine := &fakeEngine{findings: []dlp.Finding{{Label: "key", Start: 0, End: 5}}}
+	job := NewJob(store, fakeReadBody([]byte("hello")), engine, nil, 10, func() bool { return false })
+	job.RunOnce(context.Background())
+
+	if u := store.updates["id-tc"]; u.status != "confirmed" {
+		t.Fatalf("expected confirmed, got %q", u.status)
+	}
+}
+
 func TestJob_FalsePositivePath(t *testing.T) {
 	store := newFakeStore(PendingRow{
 		ID:       "id2",
