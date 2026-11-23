@@ -404,6 +404,30 @@ p95 latency/hour) without requiring Prometheus. They are fed by the
 - `GET /api/usage/series` — current user's data (last 24 h, hourly buckets).
 - `GET /api/admin/usage/series` — gateway-wide data (admin only).
 
+### Live requests
+
+The console's Live page lists the data-plane requests (`/v1/chat/completions`,
+`/v1/messages`, `/v1/embeddings`, `/v1/audio/transcriptions`,
+`/v1/audio/speech`, `/v1/video/speech`) that are running right now, from
+`GET /api/admin/live` (admin only). A request appears once its API key is
+authenticated and disappears when its handler returns.
+
+Each replica keeps its own in-flight requests in memory and publishes them to
+Redis every 2 s as one key, `air:live:pod:<pod name>` (TTL 10 s; the pod name
+is `HOSTNAME`). An idle replica only refreshes the key's TTL, so it is still
+listed under `pods`. The endpoint reads every `air:live:pod:*` key and merges
+them with the answering replica's own fresh list, so the view lags by up to
+2 s and a replica that dies drops out within 10 s. On a clean shutdown the
+replica keeps publishing through the drain and deletes its key at the end. If
+Redis cannot be read, the answer is the answering replica's requests alone
+with `partial: true`.
+
+`output_tokens` is best effort: one per streamed chunk that carries output,
+replaced by the upstream's own count when it reports one; always `0` for
+unary requests. `client_ip` is the first `X-Forwarded-For` hop
+(else `X-Real-IP`, else the TCP peer) and is client-controlled, so it is for
+display only. No prompt or response content and no key secret is ever kept.
+
 ### Reasoning tokens
 
 A model that thinks before it answers spends tokens doing it, and every vendor

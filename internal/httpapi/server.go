@@ -88,7 +88,8 @@ type Server struct {
 	unavail       *unavail.Store   // per-(provider,model) Retry-After-aware skip; nil Check never skips
 	affinity      *affinity.Store  // session pins to a backup tier; nil pins nothing
 	speechCache   *speechcache.Cache
-	lcr           *lcr.Store // per-(provider,model) EWMA availability for the lcr strategy; nil Snapshot returns all-1.0
+	lcr           *lcr.Store    // per-(provider,model) EWMA availability for the lcr strategy; nil Snapshot returns all-1.0
+	live          *liveRegistry // this pod's in-flight data-plane requests; nil tracks nothing
 
 	// Test hooks: non-nil values replace the real implementations in tests.
 	auditHook    func(ctx context.Context, actor, action, target string, detail any)
@@ -122,6 +123,7 @@ func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 		httpc:        &http.Client{},
 		metrics:      metrics.New(),
 		speechCache:  speechcache.New(st.RDB),
+		live:         newLiveRegistry(podName()),
 	}
 	if deps.Providers != nil {
 		s.regPtr.Store(deps.Providers)
@@ -266,13 +268,13 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /metrics", s.metrics.Handler())
 
 	// Data-plane (API-key auth).
-	s.mux.HandleFunc("POST /v1/chat/completions", s.requireAPIKey(s.handleChatCompletions))
+	s.mux.HandleFunc("POST /v1/chat/completions", s.requireAPIKey(s.trackLive("chat", s.handleChatCompletions)))
 	s.mux.HandleFunc("GET /v1/models", s.requireAPIKey(s.handleModels))
-	s.mux.HandleFunc("POST /v1/messages", s.requireAPIKey(s.handleMessages))
-	s.mux.HandleFunc("POST /v1/embeddings", s.requireAPIKey(s.handleEmbeddings))
-	s.mux.HandleFunc("POST /v1/audio/transcriptions", s.requireAPIKey(s.handleAudioTranscriptions))
-	s.mux.HandleFunc("POST /v1/audio/speech", s.requireAPIKey(s.handleAudioSpeech))
-	s.mux.HandleFunc("POST /v1/video/speech", s.requireAPIKey(s.handleVideoSpeech))
+	s.mux.HandleFunc("POST /v1/messages", s.requireAPIKey(s.trackLive("messages", s.handleMessages)))
+	s.mux.HandleFunc("POST /v1/embeddings", s.requireAPIKey(s.trackLive("embeddings", s.handleEmbeddings)))
+	s.mux.HandleFunc("POST /v1/audio/transcriptions", s.requireAPIKey(s.trackLive("audio.transcriptions", s.handleAudioTranscriptions)))
+	s.mux.HandleFunc("POST /v1/audio/speech", s.requireAPIKey(s.trackLive("audio.speech", s.handleAudioSpeech)))
+	s.mux.HandleFunc("POST /v1/video/speech", s.requireAPIKey(s.trackLive("video.speech", s.handleVideoSpeech)))
 	s.mux.HandleFunc("GET /v1/audio/capabilities", s.requireAPIKey(s.handleAudioCapabilities))
 
 	// Control-plane auth endpoints (public — no session required).

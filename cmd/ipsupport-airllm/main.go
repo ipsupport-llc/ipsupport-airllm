@@ -189,6 +189,10 @@ func run() error {
 	apiSrv.Metrics().RegisterWebhookDropped(func() float64 { return float64(webhook.Dropped()) })
 	apiSrv.StartModelPool(ctx)
 	apiSrv.StartConfigRefresh(ctx, cfg.ConfigRefreshInterval)
+	// Stopped only once serving has finished, so requests still running
+	// through the shutdown drain stay in the live view.
+	stopLive := apiSrv.StartLivePublisher()
+	defer stopLive()
 
 	// Build and start the second-pass background job. It uses an atomic
 	// pointer for the config (same pattern as capturePipeline) so model /

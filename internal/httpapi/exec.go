@@ -340,6 +340,8 @@ var errFirstChunkLate = errors.New("first chunk arrived after the time budget")
 // falls through instead of holding the caller silent. Without a budget the
 // first chunk of any kind starts the response, as it always has.
 func (s *Server) runStream(ctx context.Context, plan *routing.Plan, req llm.ChatRequest, sink streamSink) (served execResult, usage llm.Usage, started bool, err error) {
+	live := liveFrom(ctx)
+	live.setStream()
 	served, started, err = s.executePlan(ctx, plan, nil, func(ctx context.Context, p providers.Provider, t routing.Target, commit func() bool) error {
 		attemptStarted := false
 		var attemptUsage llm.Usage
@@ -372,6 +374,7 @@ func (s *Server) runStream(ctx context.Context, plan *routing.Plan, req llm.Chat
 					c.Content += think.flush()
 				}
 			}
+			live.observeChunk(c)
 			if c.Usage != nil {
 				attemptUsage = *c.Usage
 			}

@@ -22,6 +22,10 @@ type authedKey struct {
 	KeyID  string
 	UserID string
 	Policy policy.KeyPolicy
+	// KeyName and Owner (the owner's subject) only label the key in the
+	// admin live view.
+	KeyName string
+	Owner   string
 }
 
 // requireAPIKey authenticates a Bearer API key and stores the resolved key
@@ -61,12 +65,12 @@ func (s *Server) loadKey(ctx context.Context, hash string) (authedKey, error) {
 	// (RebuildKeySnapshotsUser only touches active keys' snapshots — it
 	// was never the mechanism that was supposed to revoke access here).
 	err := s.st.PG.QueryRow(ctx, `
-		SELECT k.id::text, k.user_id::text, k.policy_snapshot
+		SELECT k.id::text, k.user_id::text, k.policy_snapshot, k.name, u.subject
 		FROM api_keys k
 		JOIN users u ON u.id = k.user_id
 		WHERE k.hash = $1 AND k.status = 'active' AND NOT u.disabled`,
 		hash,
-	).Scan(&ak.KeyID, &ak.UserID, &raw)
+	).Scan(&ak.KeyID, &ak.UserID, &raw, &ak.KeyName, &ak.Owner)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return authedKey{}, lookupcache.Miss(err)
 	}
