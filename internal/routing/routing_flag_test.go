@@ -3,31 +3,23 @@ package routing
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/testdb"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 )
 
-// testPool connects to TEST_DATABASE_URL or skips. The DB must have the
-// migrations applied (run the dev compose stack: docker compose -f
-// deploy/docker-compose.yml up --build -d app).
+// testPool connects to this package's private, migrated database under
+// TEST_DATABASE_URL (see internal/testdb) or skips.
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL not set; skipping dlp_model_scan flag test")
-	}
-	pool, err := pgxpool.New(context.Background(), dsn)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return testdb.Pool(t, func(ctx context.Context, p *pgxpool.Pool) error {
+		return (&store.Store{PG: p}).Migrate(ctx)
+	})
 }
 
 // TestDLPModelScanFlag exercises the dlp_model_scan column end to end.
@@ -56,7 +48,7 @@ func TestDLPModelScanFlag(t *testing.T) {
 
 	// Skip with a clear message if the migration hasn't been applied yet.
 	if _, err := tx.Exec(ctx, `SELECT dlp_model_scan FROM model_aliases LIMIT 0`); err != nil {
-		t.Skipf("dlp_model_scan column not present (migration 0008 not applied?): %v", err)
+		t.Fatalf("dlp_model_scan column not present (migration 0008 not applied?): %v", err)
 	}
 
 	mustExec := func(sql string, args ...any) {
@@ -128,7 +120,7 @@ func TestDisplayLabelFlag(t *testing.T) {
 	defer tx.Rollback(ctx)
 
 	if _, err := tx.Exec(ctx, `SELECT display_label FROM alias_targets LIMIT 0`); err != nil {
-		t.Skipf("display_label column not present (migration 0010 not applied?): %v", err)
+		t.Fatalf("display_label column not present (migration 0010 not applied?): %v", err)
 	}
 
 	mustExec := func(sql string, args ...any) {
@@ -183,7 +175,7 @@ func TestDLPAudioScanFlag(t *testing.T) {
 	defer tx.Rollback(ctx)
 
 	if _, err := tx.Exec(ctx, `SELECT dlp_audio_scan FROM model_aliases LIMIT 0`); err != nil {
-		t.Skipf("dlp_audio_scan column not present (migration 0011 not applied?): %v", err)
+		t.Fatalf("dlp_audio_scan column not present (migration 0011 not applied?): %v", err)
 	}
 
 	mustExec := func(sql string, args ...any) {

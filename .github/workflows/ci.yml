@@ -12,6 +12,38 @@ permissions:
 jobs:
   go:
     runs-on: ubuntu-latest
+    # Throwaway Postgres + Redis (Postgres 18 = the major the Kubernetes
+    # deployments run; compose.prod still ships 16) so
+    # the integration tests gated on TEST_DATABASE_URL / TEST_REDIS_URL run
+    # instead of skipping. Each test package gets its own database
+    # (internal/testdb), so packages can run in parallel against this one
+    # server.
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: airllm
+          POSTGRES_PASSWORD: airllm
+          POSTGRES_DB: airllm
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U airllm"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      TEST_DATABASE_URL: postgres://airllm:airllm@localhost:5432/airllm?sslmode=disable
+      TEST_REDIS_URL: redis://localhost:6379/0
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

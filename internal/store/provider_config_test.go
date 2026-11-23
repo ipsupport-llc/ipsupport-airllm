@@ -24,7 +24,7 @@ func TestProviderConfigRoundTrip(t *testing.T) {
 	defer tx.Rollback(ctx)
 
 	if _, err := tx.Exec(ctx, `SELECT config FROM providers LIMIT 0`); err != nil {
-		t.Skipf("config column not present (migration 0012 not applied?): %v", err)
+		t.Fatalf("config column not present (migration 0012 not applied?): %v", err)
 	}
 
 	if _, err := tx.Exec(ctx, `
