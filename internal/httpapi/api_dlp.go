@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"reflect"
+	"strings"
 	"time"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/dlp"
@@ -47,13 +49,22 @@ func (s *Server) handleAdminPutDLP(w http.ResponseWriter, r *http.Request) {
 		writeControlError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
+	// Only a JSON object is a config; `null` would decode to "change nothing"
+	// and answer "saved".
+	if t := bytes.TrimSpace(raw); len(t) == 0 || t[0] != '{' {
+		writeControlError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
 	r.Body = io.NopCloser(bytes.NewReader(raw))
 	var body dlpConfig
 	if err := decodeJSON(r, &body); err != nil {
 		writeControlError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	keepOmittedDLPPatterns(raw, &body, s.dlpCfg())
+	if err := keepOmittedDLPFields(raw, &body, s.dlpCfg()); err != nil {
+		writeControlError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
 	if !validDLPAction(body.Action) {
 		writeControlError(w, http.StatusBadRequest, "action must be off | flag | redact | block")
 		return
@@ -80,22 +91,39 @@ func (s *Server) handleAdminPutDLP(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
 }
 
-// keepOmittedDLPPatterns carries the stored pattern toggles and custom
-// patterns over into a PUT body that does not mention them. The PUT otherwise
-// replaces the whole config, so a client that saved only the policy fields
-// (or whose pattern catalog failed to load) would silently wipe them. A key
-// that is present — even as [] or {} — is an explicit replacement.
-func keepOmittedDLPPatterns(raw []byte, body *dlpConfig, cur dlpConfig) {
+// keepOmittedDLPFields carries every stored field over into a PUT body that
+// does not mention it, so a partial PUT such as {"action":"block"} changes
+// only the action instead of zeroing model_url, model_urls, the scan budget,
+// the pattern toggles and the rest. A key that is present — even as "", 0,
+// false, null, [] or {} — is an explicit replacement. Keys are matched the
+// way encoding/json matched them when decoding body (case-insensitively).
+//
+// It fails when raw is not exactly one JSON object (e.g. trailing data the
+// streaming decoder ignored): merging nothing would save a mostly-zero config.
+func keepOmittedDLPFields(raw []byte, body *dlpConfig, cur dlpConfig) error {
 	var keys map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &keys); err != nil {
-		return
+		return err
 	}
-	if _, ok := keys["patterns"]; !ok {
-		body.Patterns = cur.Patterns
+	present := func(name string) bool {
+		for k := range keys {
+			if strings.EqualFold(k, name) {
+				return true
+			}
+		}
+		return false
 	}
-	if _, ok := keys["custom_patterns"]; !ok {
-		body.CustomPatterns = cur.CustomPatterns
+	bv, cv := reflect.ValueOf(body).Elem(), reflect.ValueOf(cur)
+	for i := 0; i < bv.NumField(); i++ {
+		name, _, _ := strings.Cut(bv.Type().Field(i).Tag.Get("json"), ",")
+		if name == "" || name == "-" { // not serialized (compiledCustom)
+			continue
+		}
+		if !present(name) {
+			bv.Field(i).Set(cv.Field(i))
+		}
 	}
+	return nil
 }
 
 func (s *Server) handleAdminDLPIncidents(w http.ResponseWriter, r *http.Request) {

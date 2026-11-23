@@ -201,7 +201,11 @@ Safety properties:
 
 Auditors label captures in the **Review** queue (`review_status` ∈ `confirmed`,
 `false_positive`, `false_negative`, `unreviewed`) and may attach corrected
-**gold labels**. `POST /api/admin/dataset/export` then emits a JSONL artifact of
+**gold labels**. A detection in a tool call's arguments rather than in message
+content is stored with a `tool_call` reference (`{"message","index","id"}`) and
+zero offsets; the Review page lists it with that call's arguments instead of a
+span, and second-pass and dataset export skip it.
+`POST /api/admin/dataset/export` then emits a JSONL artifact of
 reviewed captures — one line per message with attributed spans,
 `{"text": "...", "spans": [{"label","start","end"}]}` — for offline fine-tuning.
 The artifact is sealed at rest like every other capture blob;

@@ -626,10 +626,17 @@ async function openReviewModal(id) {
     bodyHtml = `<div class="empty">Body unavailable.</div>`;
   }
 
-  // Detected spans summary.
+  // Detected spans summary. A tool-call finding has no span in content:
+  // it is listed with the call it was found in and that call's arguments.
+  const contentSpans = detected.filter((f) => !f.tool_call);
+  const toolNotes = detected.filter((f) => f.tool_call).map((f) => {
+    const n = toolCallFindingNote(f, msgs);
+    return `<div style="margin:.2rem 0"><span class="badge revoked">${esc(f.label)}</span>
+      in ${esc(n.where)}${n.excerpt ? `: <span class="mono" style="font-size:.8rem">${esc(n.excerpt)}</span>` : ""}</div>`;
+  });
   const spansHtml = detected.length
-    ? `<div style="margin-bottom:.5rem">${detected.map((f) =>
-        `<span class="badge revoked" title="start:${f.start} end:${f.end}">${esc(f.label)}</span>`).join(" ")}</div>`
+    ? `<div style="margin-bottom:.5rem">${contentSpans.map((f) =>
+        `<span class="badge revoked" title="start:${f.start} end:${f.end}">${esc(f.label)}</span>`).join(" ")}${toolNotes.join("")}</div>`
     : `<div class="empty" style="margin-bottom:.5rem">No detected spans.</div>`;
 
   modal.innerHTML = `<div class="panel" style="margin-top:1rem">
@@ -731,6 +738,23 @@ function findSpan(messages, snippet) {
     return { start, end: start + enc.encode(snippet).length };
   }
   return null;
+}
+
+// toolCallFindingNote describes a DLP finding located in a tool call's
+// arguments (f.tool_call = {message, index, id}) rather than in message
+// content: such a finding has no offsets, so it names the call and quotes
+// the start of its arguments from the stored transcript (masked when the
+// capture is redacted). where falls back to the call id or index when the
+// transcript lacks the call.
+function toolCallFindingNote(f, messages) {
+  const ref = (f && f.tool_call) || {};
+  const msg = (messages || [])[ref.message];
+  const call = msg && Array.isArray(msg.tool_calls) ? msg.tool_calls[ref.index] : null;
+  const fn = (call && call.function) || {};
+  const name = fn.name || ref.id || `#${(ref.index || 0) + 1}`;
+  let excerpt = typeof fn.arguments === "string" ? fn.arguments : "";
+  if (excerpt.length > 160) excerpt = excerpt.slice(0, 160) + "…";
+  return { where: `tool call ${name} (message ${(ref.message || 0) + 1})`, excerpt };
 }
 
 // ---------- live (admin) ----------
