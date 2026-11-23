@@ -93,7 +93,9 @@ same JSON can be imported into any Grafana instance.
 ## Runtime settings
 
 These live in the `settings` table and are edited via the admin console
-(**Admin → DLP**) or the corresponding admin API endpoints. Each is cached in
+(**Admin → DLP** for the DLP, capture and second-pass policies; **Admin →
+Aliases → Failover defaults** for the failover policy) or the corresponding
+admin API endpoints. Each is cached in
 an atomic pointer and reloaded on save, so changes take effect on the next
 request/job without a restart.
 

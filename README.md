@@ -70,8 +70,8 @@ All ports bind to **127.0.0.1 only** (intentional — never expose an
 unauthenticated service or an auth-less datastore). Then:
 
 ```sh
-# 1. get the generated admin password
-docker compose -f deploy/docker-compose.yml logs app | grep "mock login credential"
+# 1. get the generated admin password (written to a file, never logged)
+docker compose -f deploy/docker-compose.yml exec app cat /tmp/airllm-bootstrap-admin-password
 # 2. open http://127.0.0.1:8080, sign in as admin, create an API key, then:
 curl http://127.0.0.1:8080/v1/chat/completions \
   -H "Authorization: Bearer <your-token>" \
