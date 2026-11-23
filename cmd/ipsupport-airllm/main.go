@@ -72,6 +72,15 @@ func run() error {
 		return fmt.Errorf("ensure dlp defaults: %w", err)
 	}
 
+	// Without SEED_DEV, neutralize demo data an earlier dev seed left behind.
+	// Runs before the bootstrap admin check, so if dev-admin was the only
+	// admin, a fresh bootstrap admin is created below.
+	if !cfg.SeedDev {
+		if err := seed.CleanupDev(ctx, st); err != nil {
+			return fmt.Errorf("clean up dev demo data: %w", err)
+		}
+	}
+
 	// Wire the auth mode. AUTH_MODE=mock is a deprecated alias for local.
 	var authImpl auth.Authenticator
 	var loginImpl auth.LoginProvider
