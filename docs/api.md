@@ -147,7 +147,7 @@ to it — adding the two double-counts. Operators see the same split as
 | `GET`/`PUT` | `/api/admin/capture` | Capture policy |
 | `GET`/`PUT` | `/api/admin/secondpass` | Second-pass (flywheel) policy |
 | `GET`/`PUT` | `/api/admin/failover` | Gateway-wide failover defaults (`timeout_ms`, `fallback_on_auth`, `breaker`) — see [Failover policy](configuration.md#failover-policy-getput-apiadminfailover) |
-| `GET` | `/api/admin/webhooks` · `POST` · `DELETE /{id}` | Alert webhook endpoints (HMAC-signed delivery) |
+| `GET` | `/api/admin/webhooks` · `POST` · `PUT /{id}` · `DELETE /{id}` | Alert webhook endpoints (HMAC-signed delivery); a `PUT` with an empty `secret` keeps the stored one |
 | `POST` | `/api/admin/dataset/export` | Export reviewed captures as a labeled JSONL training artifact (sealed at rest) |
 | `GET` | `/api/admin/dataset/download?key=` | Decrypt and download a `datasets/` export artifact |
 | `GET` | `/api/admin/audit` | Admin audit log |

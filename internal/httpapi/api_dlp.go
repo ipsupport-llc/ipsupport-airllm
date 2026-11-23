@@ -208,6 +208,63 @@ func (s *Server) handleAdminCreateWebhook(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id, "status": "created"})
 }
 
+// handleAdminUpdateWebhook replaces a webhook's name, URL, events and
+// enabled flag, with the same validation as create. The secret cannot be
+// read back, so an empty secret keeps the stored one; a non-empty one is
+// sealed and replaces it.
+func (s *Server) handleAdminUpdateWebhook(w http.ResponseWriter, r *http.Request) {
+	sess, _ := sessionFrom(r.Context())
+	id := r.PathValue("id")
+	var body struct {
+		Name    string   `json:"name"`
+		URL     string   `json:"url"`
+		Secret  string   `json:"secret"`
+		Events  []string `json:"events"`
+		Enabled bool     `json:"enabled"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeControlError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if body.URL == "" {
+		writeControlError(w, http.StatusBadRequest, "url is required")
+		return
+	}
+	if err := webhook.ValidateURL(r.Context(), body.URL); err != nil {
+		writeControlError(w, http.StatusBadRequest, "invalid webhook url: "+err.Error())
+		return
+	}
+	if len(body.Events) == 0 {
+		body.Events = []string{"dlp.incident"}
+	}
+	var secretEnc []byte // nil keeps the stored secret (COALESCE below)
+	if body.Secret != "" {
+		sealed, err := s.sealer.Seal([]byte(body.Secret))
+		if err != nil {
+			writeControlError(w, http.StatusInternalServerError, "failed to seal webhook secret")
+			return
+		}
+		secretEnc = sealed
+	}
+	tag, err := s.st.PG.Exec(r.Context(), `
+		UPDATE webhooks SET name = $2, url = $3, events = $4, enabled = $5,
+			secret_enc = COALESCE($6, secret_enc)
+		WHERE id = $1`,
+		id, body.Name, body.URL, body.Events, body.Enabled, secretEnc)
+	if err != nil {
+		writeControlError(w, http.StatusInternalServerError, "failed to update webhook")
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		writeControlError(w, http.StatusNotFound, "webhook not found")
+		return
+	}
+	s.audit(r.Context(), sess.principal.Subject, "webhook.update", id, map[string]any{
+		"name": body.Name, "url": body.URL, "events": body.Events, "enabled": body.Enabled, "secret_changed": body.Secret != "",
+	})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
 func (s *Server) handleAdminDeleteWebhook(w http.ResponseWriter, r *http.Request) {
 	sess, _ := sessionFrom(r.Context())
 	id := r.PathValue("id")

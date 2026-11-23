@@ -1822,7 +1822,8 @@ async function adminDLP(c) {
         <td class="mono">${(h.events || []).map(esc).join(", ")}</td>
         <td>${h.has_secret ? `<span class="badge active">set</span>` : `<span class="badge neutral">none</span>`}</td>
         <td>${h.enabled ? "yes" : "no"}</td>
-        <td class="actions"><button class="btn danger sm" data-delhook="${esc(h.id)}" data-name="${esc(h.name || h.url)}">Delete</button></td></tr>`));
+        <td class="actions"><button class="btn ghost sm" data-edithook='${esc(JSON.stringify(h))}'>Edit</button>
+          <button class="btn danger sm" data-delhook="${esc(h.id)}" data-name="${esc(h.name || h.url)}">Delete</button></td></tr>`));
   const incidents = (incR.data && incR.data.incidents) || [];
   const incidentsPanel = !incR.ok ? failBox("Recent incidents", [incR]) :
     panelTable("Recent incidents", ["Time", "User", "Ingress", "Model", "Action", "Labels", "Matches", "Sample"],
@@ -1900,6 +1901,8 @@ async function adminDLP(c) {
   }
   if (whR.ok) {
     $("#new-hook").addEventListener("click", () => editWebhook(c));
+    document.querySelectorAll("[data-edithook]").forEach((b) =>
+      b.addEventListener("click", () => editWebhook(c, JSON.parse(b.getAttribute("data-edithook")))));
     document.querySelectorAll("[data-delhook]").forEach((b) => b.addEventListener("click", async () => {
       if (!confirm(`Delete webhook "${b.getAttribute("data-name")}"?`)) return;
       const x = await api("DELETE", `/api/admin/webhooks/${encodeURIComponent(b.getAttribute("data-delhook"))}`);
@@ -1908,21 +1911,43 @@ async function adminDLP(c) {
   }
 }
 
-function editWebhook(c) {
-  modalForm("New alert webhook", [
-    { name: "name", label: "Name", value: "" },
-    { name: "url", label: "URL", value: "" },
-    { name: "secret", label: "Signing secret (HMAC, optional)", type: "password", value: "" },
-    { name: "events", label: "Events", type: "checkgroup",
-      options: ["dlp.incident", "dlp.false_negative", "dlp.alert_cleared"], value: ["dlp.incident"] },
-    { name: "enabled", label: "Enabled", type: "checkbox", value: true },
-  ], async (v) => {
+// webhookForm describes the alert-webhook form: a new webhook when h has no
+// id, otherwise an edit of h prefilled from the list row. The secret cannot
+// be read back, so on edit it starts blank and a blank secret keeps the
+// stored one (the PUT leaves it untouched). Top-level so
+// web/webhookform.test.mjs can extract it.
+function webhookForm(h) {
+  const edit = !!(h && h.id);
+  const known = ["dlp.incident", "dlp.false_negative", "dlp.alert_cleared"];
+  const events = edit ? (h.events || []) : ["dlp.incident"];
+  let secretLabel = "Signing secret (HMAC, optional)";
+  if (edit) secretLabel = h.has_secret ? "Signing secret (set — leave empty to keep)" : "Signing secret (none — leave empty to keep none)";
+  return {
+    title: edit ? `Edit webhook ${h.name || h.url}` : "New alert webhook",
+    method: edit ? "PUT" : "POST",
+    path: edit ? `/api/admin/webhooks/${encodeURIComponent(h.id)}` : "/api/admin/webhooks",
+    fields: [
+      { name: "name", label: "Name", value: edit ? h.name || "" : "" },
+      { name: "url", label: "URL", value: edit ? h.url || "" : "" },
+      { name: "secret", label: secretLabel, type: "password", value: "",
+        placeholder: edit && h.has_secret ? "•••••• stored" : "" },
+      // An event the console does not know yet stays listed so an edit
+      // cannot drop it silently.
+      { name: "events", label: "Events", type: "checkgroup", options: [...new Set([...known, ...events])], value: events },
+      { name: "enabled", label: "Enabled", type: "checkbox", value: edit ? !!h.enabled : true },
+    ],
+  };
+}
+
+function editWebhook(c, h) {
+  const f = webhookForm(h);
+  modalForm(f.title, f.fields, async (v) => {
     if (!v.url) { toast("URL is required", "err"); return false; }
     if (!v.events.length) { toast("Pick at least one event", "err"); return false; }
-    const x = await api("POST", "/api/admin/webhooks", {
+    const x = await api(f.method, f.path, {
       name: v.name, url: v.url, secret: v.secret, enabled: v.enabled, events: v.events,
     });
-    if (x.ok) { toast("Webhook created"); adminDLP(c); return true; }
+    if (x.ok) { toast(f.method === "PUT" ? "Webhook saved" : "Webhook created"); adminDLP(c); return true; }
     toast((x.data && x.data.error) || "Failed", "err"); return false;
   });
 }

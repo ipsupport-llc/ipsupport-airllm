@@ -66,6 +66,7 @@ func (s *Server) adminRoutes() {
 	s.mux.HandleFunc("GET /api/admin/dlp/incidents", a(s.handleAdminDLPIncidents))
 	s.mux.HandleFunc("GET /api/admin/webhooks", a(s.handleAdminWebhooks))
 	s.mux.HandleFunc("POST /api/admin/webhooks", a(s.handleAdminCreateWebhook))
+	s.mux.HandleFunc("PUT /api/admin/webhooks/{id}", a(s.handleAdminUpdateWebhook))
 	s.mux.HandleFunc("DELETE /api/admin/webhooks/{id}", a(s.handleAdminDeleteWebhook))
 
 	// Failover: gateway-wide defaults for per-target failover options.
