@@ -853,20 +853,18 @@ function renderLive(root, d) {
   const pods = d.pods || [];
   const stale = stalePods(pods, d.generated_at, 10000);
   const phaseBadge = { routing: "neutral", upstream: "admin", streaming: "active" };
-  const shortId = (s) => (s.length > 12 ? s.slice(0, 8) + "…" : s);
   const row = (r, inGroup) => `<tr class="${inGroup ? "in-group" : ""}${r.attempt > 1 ? " failover" : ""}">
     <td class="mono num" data-elapsed="${Number(r.elapsed_ms) || 0}">${fmtElapsed(r.elapsed_ms)}</td>
     <td>${esc(r.user) || `<span class="muted">—</span>`}<div class="sub mono">${esc(r.key_name || r.key_id)}</div></td>
-    <td class="mono" title="${esc(r.session_id)}">${r.session_id ? esc(shortId(r.session_id)) : `<span class="muted">—</span>`}</td>
     <td class="mono">${esc(r.endpoint)}${r.stream ? ` <span class="badge neutral">stream</span>` : ""}</td>
     <td class="mono wrap">${esc(r.alias)}<div class="sub">${r.provider ? `→ ${esc(r.provider)}/${esc(r.upstream_model)}` : `<span class="muted">not routed yet</span>`}</div></td>
     <td><span class="badge ${phaseBadge[r.phase] || "neutral"}">${esc(r.phase)}</span></td>
     <td>${r.attempt > 1 ? `<span class="badge warn" title="failed over to attempt ${Number(r.attempt)}">#${Number(r.attempt)} failover</span>` : Number(r.attempt) || 1}</td>
     <td class="mono num">${fmtNum(r.output_tokens)} tok<div class="sub">${fmtBytes(r.bytes_out)}</div></td>
-    <td class="mono">${esc(r.pod)}</td>
+    <td class="mono" title="${esc(r.pod)}">${esc(String(r.pod || "").split("-").pop())}</td>
     <td class="mono">${esc(r.client_ip)}</td></tr>`;
   const body = groupLive(reqs).map((g) => g.session_id
-    ? `<tr class="session-head"><td colspan="10"><span class="badge neutral">session</span>
+    ? `<tr class="session-head"><td colspan="9"><span class="badge neutral">session</span>
         <span class="mono" title="${esc(g.session_id)}">${esc(g.session_id)}</span>
         <span class="muted">· ${g.requests.length} requests in flight · ${esc(g.requests[0].user || g.requests[0].key_name || "")}</span></td></tr>`
       + g.requests.map((r) => row(r, true)).join("")
@@ -878,7 +876,7 @@ function renderLive(root, d) {
   root.innerHTML = notes.join("") + `<div class="panel">
     <div class="panel-head"><h2>${reqs.length} in flight</h2><div class="pod-chips">${podChips}</div></div>
     ${reqs.length === 0 ? `<div class="empty">No requests in flight</div>` : `<div class="table-scroll"><table class="live-table">
-      <thead><tr>${["Elapsed", "User / key", "Session", "Endpoint", "Alias → upstream", "Phase", "Attempt", "Output", "Pod", "Client IP"].map((c) => `<th>${c}</th>`).join("")}</tr></thead>
+      <thead><tr>${["Elapsed", "User / key", "Endpoint", "Alias → upstream", "Phase", "Attempt", "Output", "Pod", "Client IP"].map((c) => `<th>${c}</th>`).join("")}</tr></thead>
       <tbody>${body}</tbody></table></div>`}
   </div>`;
 }
