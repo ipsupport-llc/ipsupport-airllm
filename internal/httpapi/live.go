@@ -5,11 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -215,26 +213,6 @@ func podName() string {
 		return h
 	}
 	return "unknown"
-}
-
-// clientIP is the address the request came from: the first X-Forwarded-For
-// hop when a proxy set one, else X-Real-IP, else the TCP peer. The header is
-// whatever the client and the proxies in front of it sent, so this is for
-// display only and must never be used to make a decision.
-func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		first, _, _ := strings.Cut(xff, ",")
-		if ip := strings.TrimSpace(first); ip != "" {
-			return ip
-		}
-	}
-	if ip := strings.TrimSpace(r.Header.Get("X-Real-IP")); ip != "" {
-		return ip
-	}
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		return host
-	}
-	return r.RemoteAddr
 }
 
 // trackLive registers a data-plane request in the live view for as long as

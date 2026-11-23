@@ -467,9 +467,9 @@ with `partial: true`.
 
 `output_tokens` is best effort: one per streamed chunk that carries output,
 replaced by the upstream's own count when it reports one; always `0` for
-unary requests. `client_ip` is the first `X-Forwarded-For` hop
-(else `X-Real-IP`, else the TCP peer) and is client-controlled, so it is for
-display only. No prompt or response content and no key secret is ever kept.
+unary requests. `client_ip` is resolved the same way as for the
+login lockout: the TCP peer, or — when the peer is a private/loopback proxy —
+the rightmost public `X-Forwarded-For` entry. No prompt or response content and no key secret is ever kept.
 
 ### Reasoning tokens
 

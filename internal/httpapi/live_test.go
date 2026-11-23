@@ -264,6 +264,7 @@ func TestLiveShowsAStreamWhileItRuns(t *testing.T) {
 		_, _, _, _ = s.runStream(r.Context(), plan, llm.ChatRequest{Model: "sonnet", Stream: true}, sink)
 	})
 	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	r.RemoteAddr = "10.0.0.2:41000" // behind the in-cluster proxy, so X-Forwarded-For is trusted
 	r.Header.Set("X-Forwarded-For", "203.0.113.9, 10.0.0.1")
 	r.Header.Set("X-Session-Id", "call-1")
 	r = r.WithContext(context.WithValue(withClientSession(r.Context(), r), keyCtxKey, authedKey{KeyID: "k1", KeyName: "laptop", Owner: "alice"}))
