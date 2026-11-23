@@ -13,12 +13,16 @@ from pydantic import BaseModel
 from transformers import pipeline
 
 MODEL = os.environ.get("DLP_MODEL", "dslim/bert-base-NER")
+# The model commit baked into the image. With HF_HUB_OFFLINE=1 the cache only
+# resolves the revision that was downloaded, so load exactly that one.
+REVISION = os.environ.get("DLP_MODEL_REVISION") or None
 MAX_CHARS = int(os.environ.get("DLP_MAX_CHARS", "65536"))
 STRIDE = int(os.environ.get("DLP_STRIDE", "128"))
 
 ner = pipeline(
     "token-classification",
     model=MODEL,
+    revision=REVISION,
     aggregation_strategy="simple",
     stride=STRIDE,
 )

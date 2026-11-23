@@ -36,6 +36,15 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- include "airllm.fullname" . -}}
 {{- end -}}
 
+{{/* Gateway container port: the port part of config.httpAddr (e.g. ":8080"). */}}
+{{- define "airllm.httpPort" -}}
+{{- $port := regexFind ":[0-9]+$" .Values.config.httpAddr | trimPrefix ":" -}}
+{{- if not $port -}}
+{{- fail (printf "config.httpAddr must end in :<port>, got %q" .Values.config.httpAddr) -}}
+{{- end -}}
+{{- $port -}}
+{{- end -}}
+
 {{/* In-cluster DLP sidecar Service name (used by the app's DLP model_url). */}}
 {{- define "airllm.dlpBertServiceName" -}}
 {{- printf "%s-dlp-bert" (include "airllm.fullname" .) | trunc 63 | trimSuffix "-" -}}

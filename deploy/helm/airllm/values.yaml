@@ -18,8 +18,12 @@ imagePullSecrets: []                            # e.g. [{ name: regcred }]
 existingSecret: ""                              # REQUIRED — templating fails if empty
 
 config:                                         # non-secret env (rendered into a ConfigMap)
-  env: dev                                      # ENV: dev | prod
-  httpAddr: ":8080"
+  env: prod                                     # ENV: dev | prod (dev uses an insecure derived master key if master-key is unset)
+  # SEED_DEV: seed demo users with the fixed password devpass123 and a
+  # well-known, active API key. Local development only — anyone who can reach
+  # the gateway could use them. Requires env: dev and authMode: local.
+  seedDev: false
+  httpAddr: ":8080"                             # the container port follows the port given here
   authMode: local                               # local | oidc
   adminUsername: admin
   captureBlobDir: /var/lib/airllm/captures
@@ -71,6 +75,11 @@ app:
   service:
     type: ClusterIP
     port: 8080
+  # The Ingress routes every path on the host to the gateway, /metrics
+  # included, and /metrics has no auth (it is meant for in-cluster Prometheus
+  # scraping). On a public host, block /metrics at the ingress controller —
+  # e.g. an nginx `server-snippet` returning 404 for it, or a Traefik
+  # IngressRoute that excludes the path — or keep the Ingress private.
   ingress:
     enabled: false
     className: ""
@@ -80,6 +89,13 @@ app:
       enabled: false
       secretName: ""
   terminationGracePeriodSeconds: 30             # > config.shutdownDrain + config.shutdownTimeout
+  # Schema migrations run before the HTTP listener starts, so the startup probe
+  # must cover the longest migration: budget = periodSeconds x failureThreshold
+  # (default ~60s). Raise failureThreshold for an upgrade with a big migration
+  # (see docs/operations.md#upgrades-and-long-migrations).
+  startupProbe:
+    periodSeconds: 3
+    failureThreshold: 20
   podDisruptionBudget:                          # caps voluntary disruptions (node drains, upgrades)
     enabled: true
     maxUnavailable: 1
@@ -108,6 +124,9 @@ app:
       # ReadWriteOnce works for a single writer only. If you enable persistence,
       # EITHER set app.autoscaling.enabled=false (and replicaCount: 1) OR use a
       # ReadWriteMany storage class here — otherwise replicas 2+ fail to mount.
+      # With ReadWriteOnce the Deployment uses the Recreate strategy (a rolling
+      # update's new pod could not mount the volume the old pod still holds),
+      # so an upgrade has a short outage.
       accessMode: ReadWriteOnce
   nodeSelector: {}
   tolerations: []
@@ -133,7 +152,7 @@ dlpBert:
     # old Service is deleted (kubectl delete svc <release>-dlp-bert, then
     # upgrade). Fresh installs can set it from the start.
     headless: false
-    port: 8000
+    port: 8000                                  # also the sidecar's listen port (PORT env)
   replicaCount: 1                               # used only when autoscaling.kind=none
   modelMaxConcurrency: 4                        # seeded into the DB-backed DLP config on first boot (see internal/seed.EnsureDLPDefaults); an operator save in the console always wins afterward
   autoscaling:
@@ -169,6 +188,17 @@ dlpBert:
       activationThreshold: "0"                  # query must exceed this to scale 0->1 (keep 0 so any demand wakes it)
       pollingInterval: 30
       cooldownPeriod: 300
+  # Needs a dlp-bert image built from this chart's version or later: older
+  # images run as root and keep the model under /root, unreadable as 10001.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001                            # matches the image user
+    runAsGroup: 10001
+    seccompProfile: { type: RuntimeDefault }
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities: { drop: ["ALL"] }
+    readOnlyRootFilesystem: true                # /tmp gets an emptyDir
   resources:
     requests: { cpu: 500m, memory: 1Gi }        # placeholder (torch + model weights)
     limits: { cpu: "2", memory: 4Gi }

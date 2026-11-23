@@ -73,8 +73,10 @@ services:
     build:
       context: ./dlp-bert
     profiles: ["bert"]
+    # A host port range, so `--scale dlp-bert=N` (N <= 10) gives each replica
+    # its own loopback port instead of colliding on 8000.
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:8000-8009:8000"
 
   # Observability stack. Opt-in: `--profile metrics`.
   # Prometheus scrapes the app's /metrics endpoint; Grafana serves the

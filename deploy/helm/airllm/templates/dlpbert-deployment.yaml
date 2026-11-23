@@ -20,14 +20,28 @@ spec:
         {{- include "airllm.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: dlp-bert
     spec:
+      # The sidecar never calls the Kubernetes API.
+      automountServiceAccountToken: false
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      securityContext:
+        {{- toYaml .Values.dlpBert.podSecurityContext | nindent 8 }}
       containers:
         - name: dlp-bert
           image: {{ include "airllm.image" (dict "image" .Values.dlpBert.image "root" .) }}
           imagePullPolicy: {{ .Values.dlpBert.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.dlpBert.securityContext | nindent 12 }}
+          env:
+            # uvicorn listens here. It must equal the Service port: with a
+            # headless Service the gateway dials pod IPs on that port directly.
+            - name: PORT
+              value: {{ .Values.dlpBert.service.port | quote }}
+            # Serve only the model baked into the image; never reach the Hub.
+            - name: HF_HUB_OFFLINE
+              value: "1"
           ports:
             - name: http
               containerPort: {{ .Values.dlpBert.service.port }}
@@ -35,21 +49,36 @@ spec:
           startupProbe:
             # The model can take a while to load (torch + weights, first image pull).
             # Allow up to ~5min before liveness/readiness kick in, so a slow load
-            # never CrashLoops the pod.
-            tcpSocket:
+            # never CrashLoops the pod. /healthz answers only once the model is loaded.
+            httpGet:
+              path: /healthz
               port: http
             periodSeconds: 10
             failureThreshold: 30
           readinessProbe:
-            tcpSocket:
+            httpGet:
+              path: /healthz
               port: http
             periodSeconds: 10
           livenessProbe:
-            tcpSocket:
+            httpGet:
+              path: /healthz
               port: http
             periodSeconds: 20
+            timeoutSeconds: 5
           resources:
             {{- toYaml .Values.dlpBert.resources | nindent 12 }}
+          {{- if .Values.dlpBert.securityContext.readOnlyRootFilesystem }}
+          volumeMounts:
+            # Python's tempfile needs a writable directory even to load the model.
+            - name: tmp
+              mountPath: /tmp
+          {{- end }}
+      {{- if .Values.dlpBert.securityContext.readOnlyRootFilesystem }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- end }}
       {{- with .Values.dlpBert.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

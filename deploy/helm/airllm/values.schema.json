@@ -20,8 +20,9 @@
     "config": {
       "type": "object",
       "properties": {
-        "env": { "type": "string" },
-        "httpAddr": { "type": "string" },
+        "env": { "type": "string", "enum": ["dev", "prod"] },
+        "seedDev": { "type": "boolean" },
+        "httpAddr": { "type": "string", "pattern": ":[0-9]+$" },
         "authMode": { "type": "string", "enum": ["local", "oidc"] },
         "adminUsername": { "type": "string" },
         "captureBlobDir": { "type": "string" },
@@ -48,6 +49,13 @@
       "properties": {
         "replicaCount": { "type": "integer", "minimum": 0 },
         "terminationGracePeriodSeconds": { "type": "integer", "minimum": 1 },
+        "startupProbe": {
+          "type": "object",
+          "properties": {
+            "periodSeconds": { "type": "integer", "minimum": 1 },
+            "failureThreshold": { "type": "integer", "minimum": 1 }
+          }
+        },
         "podDisruptionBudget": {
           "type": "object",
           "properties": {
@@ -77,9 +85,11 @@
         "enabled": { "type": "boolean" },
         "replicaCount": { "type": "integer", "minimum": 0 },
         "modelMaxConcurrency": { "type": "integer", "minimum": 0 },
+        "podSecurityContext": { "type": "object" },
+        "securityContext": { "type": "object" },
         "service": {
           "type": "object",
-          "properties": { "headless": { "type": "boolean" }, "port": { "type": "integer" } }
+          "properties": { "headless": { "type": "boolean" }, "port": { "type": "integer", "minimum": 1, "maximum": 65535 } }
         },
         "autoscaling": {
           "type": "object",

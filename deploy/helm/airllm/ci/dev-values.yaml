@@ -1,0 +1,22 @@
+# Local dev shape: demo seed, non-default ports, a ReadWriteOnce capture PVC
+# (renders the Recreate strategy), and a raised startup probe budget.
+existingSecret: airllm-secrets
+config:
+  env: dev
+  seedDev: true
+  httpAddr: ":9090"
+app:
+  autoscaling:
+    enabled: false
+  replicaCount: 1
+  startupProbe:
+    failureThreshold: 200
+  capture:
+    persistence:
+      enabled: true
+dlpBert:
+  autoscaling:
+    kind: none
+  service:
+    headless: true
+    port: 9000
