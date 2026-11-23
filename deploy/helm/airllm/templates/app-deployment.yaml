@@ -24,8 +24,12 @@ spec:
   # A ReadWriteOnce capture volume can't be mounted by the surge pod of a
   # rolling update while the old pod still holds it (on another node), so the
   # rollout would hang. Stop the old pod first instead.
+  # rollingUpdate: null — an existing release carries the API-defaulted
+  # rollingUpdate block, which Kubernetes rejects next to type: Recreate;
+  # the explicit null makes Helm's three-way merge remove it.
   strategy:
     type: Recreate
+    rollingUpdate: null
   {{- end }}
   selector:
     matchLabels:
