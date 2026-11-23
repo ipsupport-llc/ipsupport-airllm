@@ -83,6 +83,19 @@ func TestHandleAdminPutDLPValidatesMergedConfig(t *testing.T) {
 	}
 }
 
+func TestHandleAdminPutDLPRejectsNonObjectBody(t *testing.T) {
+	for _, b := range []string{`null`, `[]`, `"x"`, ``} {
+		s := &Server{}
+		s.dlpPtr.Store(&dlpConfig{Enabled: true, Action: "redact"})
+		req := httptest.NewRequest(http.MethodPut, "/api/admin/dlp", strings.NewReader(b))
+		rec := httptest.NewRecorder()
+		s.handleAdminPutDLP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("body %q: got %d, want 400", b, rec.Code)
+		}
+	}
+}
+
 // TestHandleAdminPutDLPKeepsOmittedFields: a policy-only PUT must not wipe
 // the stored custom patterns or model settings.
 func TestHandleAdminPutDLPKeepsOmittedFields(t *testing.T) {

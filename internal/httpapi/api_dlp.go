@@ -49,6 +49,12 @@ func (s *Server) handleAdminPutDLP(w http.ResponseWriter, r *http.Request) {
 		writeControlError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
+	// Only a JSON object is a config; `null` would decode to "change nothing"
+	// and answer "saved".
+	if t := bytes.TrimSpace(raw); len(t) == 0 || t[0] != '{' {
+		writeControlError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
 	r.Body = io.NopCloser(bytes.NewReader(raw))
 	var body dlpConfig
 	if err := decodeJSON(r, &body); err != nil {
