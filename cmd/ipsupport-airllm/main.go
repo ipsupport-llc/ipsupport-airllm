@@ -114,8 +114,9 @@ func run() error {
 		oidcImpl = oa
 	}
 
-	// Local-mode convenience: seed demo data + a fixed dev API key.
-	if cfg.Env == "dev" && cfg.AuthMode == "local" {
+	// Local-dev convenience, opt-in via SEED_DEV=1 (config enforces ENV=dev +
+	// AUTH_MODE=local): seed demo data + a fixed dev API key.
+	if cfg.SeedDev {
 		token, err := seed.Dev(ctx, st)
 		if err != nil {
 			return err
