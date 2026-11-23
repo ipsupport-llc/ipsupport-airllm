@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +19,19 @@ import (
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 )
+
+func TestPodNameAppendsPIDOutsideKubernetes(t *testing.T) {
+	t.Setenv("HOSTNAME", "devbox")
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	if got, want := podName(), fmt.Sprintf("devbox-%d", os.Getpid()); got != want {
+		t.Errorf("outside Kubernetes: podName() = %q, want %q", got, want)
+	}
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.43.0.1")
+	t.Setenv("HOSTNAME", "airllm-7c9f-abcde")
+	if got := podName(); got != "airllm-7c9f-abcde" {
+		t.Errorf("in Kubernetes: podName() = %q, want the pod hostname unchanged", got)
+	}
+}
 
 func TestLiveRegistryTracksARequestThroughItsLife(t *testing.T) {
 	g := newLiveRegistry("pod-a")
