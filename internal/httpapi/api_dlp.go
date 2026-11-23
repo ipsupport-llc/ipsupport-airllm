@@ -61,7 +61,10 @@ func (s *Server) handleAdminPutDLP(w http.ResponseWriter, r *http.Request) {
 		writeControlError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	keepOmittedDLPFields(raw, &body, s.dlpCfg())
+	if err := keepOmittedDLPFields(raw, &body, s.dlpCfg()); err != nil {
+		writeControlError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
 	if !validDLPAction(body.Action) {
 		writeControlError(w, http.StatusBadRequest, "action must be off | flag | redact | block")
 		return
@@ -94,10 +97,13 @@ func (s *Server) handleAdminPutDLP(w http.ResponseWriter, r *http.Request) {
 // the pattern toggles and the rest. A key that is present — even as "", 0,
 // false, null, [] or {} — is an explicit replacement. Keys are matched the
 // way encoding/json matched them when decoding body (case-insensitively).
-func keepOmittedDLPFields(raw []byte, body *dlpConfig, cur dlpConfig) {
+//
+// It fails when raw is not exactly one JSON object (e.g. trailing data the
+// streaming decoder ignored): merging nothing would save a mostly-zero config.
+func keepOmittedDLPFields(raw []byte, body *dlpConfig, cur dlpConfig) error {
 	var keys map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &keys); err != nil {
-		return
+		return err
 	}
 	present := func(name string) bool {
 		for k := range keys {
@@ -117,6 +123,7 @@ func keepOmittedDLPFields(raw []byte, body *dlpConfig, cur dlpConfig) {
 			bv.Field(i).Set(cv.Field(i))
 		}
 	}
+	return nil
 }
 
 func (s *Server) handleAdminDLPIncidents(w http.ResponseWriter, r *http.Request) {

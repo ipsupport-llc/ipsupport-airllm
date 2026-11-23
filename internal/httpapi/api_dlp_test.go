@@ -34,7 +34,9 @@ func TestKeepOmittedDLPFields(t *testing.T) {
 		if err := json.Unmarshal([]byte(raw), &body); err != nil {
 			t.Fatalf("%s: %v", raw, err)
 		}
-		keepOmittedDLPFields([]byte(raw), &body, cur)
+		if err := keepOmittedDLPFields([]byte(raw), &body, cur); err != nil {
+			t.Fatalf("merge %s: %v", raw, err)
+		}
 		return body
 	}
 
@@ -84,7 +86,7 @@ func TestHandleAdminPutDLPValidatesMergedConfig(t *testing.T) {
 }
 
 func TestHandleAdminPutDLPRejectsNonObjectBody(t *testing.T) {
-	for _, b := range []string{`null`, `[]`, `"x"`, ``} {
+	for _, b := range []string{`null`, `[]`, `"x"`, ``, `{"action":"block"} {"enabled":false}`} {
 		s := &Server{}
 		s.dlpPtr.Store(&dlpConfig{Enabled: true, Action: "redact"})
 		req := httptest.NewRequest(http.MethodPut, "/api/admin/dlp", strings.NewReader(b))
