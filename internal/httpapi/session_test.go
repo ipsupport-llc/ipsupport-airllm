@@ -43,7 +43,7 @@ func TestRequireSessionRejectsStaleCookie(t *testing.T) {
 	// rest of the test, so any change in behavior below comes from the
 	// server re-checking the DB, not from a fresh login.
 	rec := httptest.NewRecorder()
-	sess.SetSession(rec, httptest.NewRequest(http.MethodGet, "/", nil), auth.Principal{Subject: subject, Roles: []string{auth.AdminRole}})
+	sess.SetSession(rec, httptest.NewRequest(http.MethodGet, "/", nil), auth.Principal{Subject: subject, Roles: []string{auth.AdminRole}, UserID: userID})
 	var cookie *http.Cookie
 	for _, c := range rec.Result().Cookies() {
 		if c.Name == "air_session" {
@@ -157,8 +157,34 @@ func TestRequireSessionDeletedUserNotRevived(t *testing.T) {
 	}
 
 	// A new account with the same subject is a different user id.
-	insert()
+	newID := insert()
 	if code := do(); code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 for an old cookie against a recreated subject, got %d", code)
+	}
+
+	// A pre-upgrade cookie carries no user id at all: refused, so the user
+	// logs in once instead of riding a subject-only match.
+	rec = httptest.NewRecorder()
+	sess.SetSession(rec, httptest.NewRequest(http.MethodGet, "/", nil),
+		auth.Principal{Subject: subject, Roles: []string{auth.AdminRole}})
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "air_session" {
+			cookie = c
+		}
+	}
+	if code := do(); code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for a cookie without a user id, got %d", code)
+	}
+	// ...while a fresh login for the recreated user works.
+	rec = httptest.NewRecorder()
+	sess.SetSession(rec, httptest.NewRequest(http.MethodGet, "/", nil),
+		auth.Principal{Subject: subject, Roles: []string{auth.AdminRole}, UserID: newID})
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "air_session" {
+			cookie = c
+		}
+	}
+	if code := do(); code != http.StatusOK {
+		t.Fatalf("expected OK for a fresh cookie of the recreated user, got %d", code)
 	}
 }

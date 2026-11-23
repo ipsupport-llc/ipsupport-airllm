@@ -116,9 +116,10 @@ func (s *Server) ensureUser(ctx context.Context, p auth.Principal) (ensuredUser,
 	if err != nil {
 		return ensuredUser{}, err
 	}
-	// Cookies issued before the session carried the user id have no uid;
-	// they are matched by subject alone until they expire (12h).
-	if p.UserID != "" && p.UserID != u.id {
+	// The cookie must name this exact user. Cookies issued before sessions
+	// carried the user id have none and are refused, so everyone logs in
+	// once after the upgrade.
+	if p.UserID == "" || p.UserID != u.id {
 		return ensuredUser{}, errSessionUserGone
 	}
 	return u, nil
