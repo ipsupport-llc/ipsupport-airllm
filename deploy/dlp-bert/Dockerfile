@@ -16,7 +16,10 @@ RUN pip install --no-cache-dir torch==2.13.0 --index-url https://download.pytorc
 # a branch name like "main" also works). Override it together with DLP_MODEL.
 ARG DLP_MODEL=dslim/bert-base-NER
 ARG DLP_MODEL_REVISION=d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc
+# DLP_BAKED_MODEL records which model the pinned revision belongs to; app.py
+# applies the revision only when DLP_MODEL still names that model.
 ENV DLP_MODEL=${DLP_MODEL} \
+    DLP_BAKED_MODEL=${DLP_MODEL} \
     DLP_MODEL_REVISION=${DLP_MODEL_REVISION} \
     HF_HOME=/opt/hf
 

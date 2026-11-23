@@ -13,9 +13,13 @@ from pydantic import BaseModel
 from transformers import pipeline
 
 MODEL = os.environ.get("DLP_MODEL", "dslim/bert-base-NER")
-# The model commit baked into the image. With HF_HUB_OFFLINE=1 the cache only
-# resolves the revision that was downloaded, so load exactly that one.
-REVISION = os.environ.get("DLP_MODEL_REVISION") or None
+# DLP_MODEL_REVISION is the commit of the model baked into the image
+# (DLP_BAKED_MODEL). With HF_HUB_OFFLINE=1 the cache only resolves the
+# revision that was downloaded, so load exactly that one — but only for that
+# model: a runtime DLP_MODEL override is a different repo, loaded at its
+# default revision (it needs network access or its own cache).
+BAKED_MODEL = os.environ.get("DLP_BAKED_MODEL", "")
+REVISION = (os.environ.get("DLP_MODEL_REVISION") or None) if MODEL == BAKED_MODEL else None
 MAX_CHARS = int(os.environ.get("DLP_MAX_CHARS", "65536"))
 STRIDE = int(os.environ.get("DLP_STRIDE", "128"))
 
