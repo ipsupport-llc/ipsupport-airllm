@@ -231,7 +231,7 @@ func (s *Server) trackLive(endpoint string, next http.HandlerFunc) http.HandlerF
 			KeyName:   ak.KeyName,
 			User:      ak.Owner,
 			SessionID: clientSessionFrom(r.Context()),
-			ClientIP:  clientIP(r),
+			ClientIP:  s.clientIP(r),
 		}, time.Now())
 		defer s.live.deregister(rec)
 		next(&liveWriter{ResponseWriter: w, rec: rec}, r.WithContext(withLive(r.Context(), rec)))

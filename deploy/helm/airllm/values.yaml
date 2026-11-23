@@ -45,6 +45,11 @@ config:                                         # non-secret env (rendered into 
   # request, alongside the gateway's own Content-Type/Authorization/Accept
   # (which this can never override). Empty by default — opt in per name.
   forwardHeaders: ""
+  # TRUSTED_PROXY_CIDRS: comma-separated networks whose X-Forwarded-For is
+  # believed when working out a client's IP (login lockout, live view). Empty
+  # = every loopback/private/link-local range. Set it to your ingress
+  # controller's pod CIDR so another in-cluster caller can't claim any IP.
+  trustedProxyCIDRs: ""
   oidc:                                         # used only when authMode: oidc (non-secret parts)
     issuer: ""
     clientId: ""
@@ -52,6 +57,10 @@ config:                                         # non-secret env (rendered into 
     scopes: "openid profile email"           # SPACE-delimited (the app parses with strings.Fields)
     rolesClaim: ""
     roleMap: ""
+    # OIDC_ALLOW_HTTP_ISSUER: accept a plain-http issuer (e.g. an IdP Service
+    # inside the cluster). Discovery, JWKS and the token exchange (with the
+    # client secret) then travel unencrypted — prefer https.
+    allowHttpIssuer: false
 
 # Google Cloud Workload Identity Federation. OFF by default — enabling it is the ONLY
 # thing that changes the rendered release, so an upgrade that leaves it off is a no-op.

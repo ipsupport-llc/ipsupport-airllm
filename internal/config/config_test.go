@@ -23,6 +23,8 @@ func setBase(t *testing.T) {
 	t.Setenv("ENV", "")
 	t.Setenv("AUTH_MODE", "")
 	t.Setenv("SEED_DEV", "")
+	t.Setenv("TRUSTED_PROXY_CIDRS", "")
+	t.Setenv("OIDC_ALLOW_HTTP_ISSUER", "")
 	t.Setenv("AIRLLM_MASTER_KEY", "")
 	t.Setenv("AIRLLM_SESSION_KEY", "")
 	// Clear OIDC vars so they don't bleed into non-OIDC tests.
@@ -562,5 +564,58 @@ func TestOIDCIssuerRequiresHTTPS(t *testing.T) {
 		if (err == nil) != tc.ok {
 			t.Errorf("ENV=%s OIDC_ISSUER=%q: err=%v, want ok=%v", tc.env, tc.issuer, err, tc.ok)
 		}
+	}
+}
+
+func TestTrustedProxyCIDRs(t *testing.T) {
+	setBase(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(c.TrustedProxyCIDRs) != len(DefaultTrustedProxyCIDRs) {
+		t.Fatalf("default = %v", c.TrustedProxyCIDRs)
+	}
+
+	t.Setenv("TRUSTED_PROXY_CIDRS", " 10.42.0.0/16, fd00::/8 ,")
+	if c, err = Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(c.TrustedProxyCIDRs) != 2 || c.TrustedProxyCIDRs[0].String() != "10.42.0.0/16" {
+		t.Fatalf("parsed = %v", c.TrustedProxyCIDRs)
+	}
+
+	t.Setenv("TRUSTED_PROXY_CIDRS", "10.42.0.1")
+	if _, err := Load(); err == nil {
+		t.Fatal("a bare address must be rejected")
+	}
+}
+
+// TestOIDCAllowHTTPIssuerEscapeHatch proves OIDC_ALLOW_HTTP_ISSUER=1 admits
+// an existing internal http issuer in prod, and logs a warning for it.
+func TestOIDCAllowHTTPIssuerEscapeHatch(t *testing.T) {
+	setBase(t)
+	t.Setenv("ENV", "prod")
+	t.Setenv("AIRLLM_MASTER_KEY", base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("AUTH_MODE", "oidc")
+	t.Setenv("OIDC_ISSUER", "http://dex.idp.svc:5556/dex")
+	t.Setenv("OIDC_CLIENT_ID", "client-id")
+	t.Setenv("OIDC_CLIENT_SECRET", "client-secret")
+	t.Setenv("OIDC_REDIRECT_URL", "https://app.example.com/auth/callback")
+	t.Setenv("OIDC_ROLES_CLAIM", "roles")
+	if _, err := Load(); err == nil {
+		t.Fatal("http issuer must be refused without the escape hatch")
+	}
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	t.Setenv("OIDC_ALLOW_HTTP_ISSUER", "1")
+	if _, err := Load(); err != nil {
+		t.Fatalf("OIDC_ALLOW_HTTP_ISSUER=1 must admit the http issuer: %v", err)
+	}
+	if !strings.Contains(buf.String(), "OIDC_ALLOW_HTTP_ISSUER") || !strings.Contains(buf.String(), "level=WARN") {
+		t.Fatalf("expected a WARN log, got %q", buf.String())
 	}
 }

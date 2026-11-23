@@ -30,7 +30,12 @@
         "shutdownDrain": { "type": "string", "pattern": "^([0-9]+(\\.[0-9]+)?(ms|s|m|h))+$" },
         "shutdownTimeout": { "type": "string", "pattern": "^([0-9]+(\\.[0-9]+)?(ms|s|m|h))+$" },
         "upstreamChatTimeout": { "type": "string", "pattern": "^([0-9]+(\\.[0-9]+)?(ms|s|m|h))+$" },
-        "forwardHeaders": { "type": "string" }
+        "forwardHeaders": { "type": "string" },
+        "trustedProxyCIDRs": { "type": "string" },
+        "oidc": {
+          "type": "object",
+          "properties": { "allowHttpIssuer": { "type": "boolean" } }
+        }
       }
     },
     "googleWorkloadIdentity": {

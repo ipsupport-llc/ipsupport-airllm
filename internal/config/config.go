@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/netip"
 	"net/url"
 	"os"
 	"strings"
@@ -86,6 +87,25 @@ type Config struct {
 	// never automatic, since a client's own headers could otherwise
 	// override the ones the gateway sets for its upstream call.
 	ForwardHeaders []string
+
+	// TrustedProxyCIDRs, from TRUSTED_PROXY_CIDRS (comma-separated), are the
+	// networks whose X-Forwarded-For the gateway believes when it works out
+	// a client's IP (login lockout, live view). Defaults to the loopback,
+	// private and link-local ranges (DefaultTrustedProxyCIDRs).
+	TrustedProxyCIDRs []netip.Prefix
+}
+
+// DefaultTrustedProxyCIDRs is the TRUSTED_PROXY_CIDRS default: every
+// loopback, private (RFC 1918 / ULA) and link-local range.
+var DefaultTrustedProxyCIDRs = []netip.Prefix{
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("::1/128"),
+	netip.MustParsePrefix("fc00::/7"),
+	netip.MustParsePrefix("fe80::/10"),
 }
 
 // Load reads configuration from the environment and validates it.
@@ -151,6 +171,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if c.ForwardHeaders, err = parseForwardHeaders(env("FORWARD_HEADERS", "")); err != nil {
+		return nil, err
+	}
+	if c.TrustedProxyCIDRs, err = parseTrustedProxyCIDRs(os.Getenv("TRUSTED_PROXY_CIDRS")); err != nil {
 		return nil, err
 	}
 
@@ -343,8 +366,15 @@ func checkIssuerURL(issuer, envName string) error {
 		if envName == "dev" && (h == "localhost" || h == "127.0.0.1" || h == "::1") {
 			return nil
 		}
+		// Escape hatch for an existing IdP reachable only over plain http
+		// inside a private network.
+		if os.Getenv("OIDC_ALLOW_HTTP_ISSUER") == "1" {
+			slog.Warn("OIDC_ALLOW_HTTP_ISSUER=1: using a plain-http OIDC issuer; discovery, JWKS and the token exchange (with the client secret) are unencrypted",
+				"issuer", issuer)
+			return nil
+		}
 	}
-	return fmt.Errorf("OIDC_ISSUER must use https (http is only allowed for localhost with ENV=dev), got %q", issuer)
+	return fmt.Errorf("OIDC_ISSUER must use https (http is only allowed for localhost with ENV=dev, or with OIDC_ALLOW_HTTP_ISSUER=1), got %q", issuer)
 }
 
 // forwardHeaderDenylist are names FORWARD_HEADERS must never contain:
@@ -367,6 +397,27 @@ func isForwardHeaderDenied(name string) bool {
 		}
 	}
 	return false
+}
+
+// parseTrustedProxyCIDRs parses a comma-separated CIDR list; empty means
+// DefaultTrustedProxyCIDRs.
+func parseTrustedProxyCIDRs(s string) ([]netip.Prefix, error) {
+	if strings.TrimSpace(s) == "" {
+		return DefaultTrustedProxyCIDRs, nil
+	}
+	var out []netip.Prefix
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(part)
+		if err != nil {
+			return nil, fmt.Errorf("TRUSTED_PROXY_CIDRS: %q is not a CIDR: %w", part, err)
+		}
+		out = append(out, p.Masked())
+	}
+	return out, nil
 }
 
 // parseForwardHeaders splits a comma-separated FORWARD_HEADERS value into

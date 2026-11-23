@@ -12,7 +12,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeControlError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	ip := clientIP(r)
+	ip := s.clientIP(r)
 	if s.loginLimiter.Locked(r.Context(), body.Username, ip) {
 		writeControlError(w, http.StatusTooManyRequests, "too many failed login attempts; try again later")
 		return

@@ -31,6 +31,7 @@ Read by `internal/config` at startup. Invalid values fail fast.
 | `SHUTDOWN_TIMEOUT` | `10s` | no | How long in-flight requests, streams included, may then take to finish before the process exits (Go duration, positive). The Helm chart sets `20s`. |
 | `CAPTURE_BLOB_DIR` | `capture-blobs` | no | Filesystem directory for the capture blob store (relative to the working directory by default). The process runs as a non-root user, so point this at a writable path (compose uses `/tmp/airllm-captures`). Back it with a volume or object store on deploy. |
 | `UPSTREAM_CHAT_TIMEOUT` | `120s` | no | Ceiling on a single non-streaming call to an OpenAI-compatible or Vertex upstream — chat completions and embeddings (Go duration, positive). Independent of a target's own `timeout_ms` (see [Circuit breaker](#circuit-breaker)): that one can be set to `0` for an unbounded wait and is enforced by cancelling the attempt; this one is a hard ceiling the provider applies underneath it, regardless of `timeout_ms`. Raise it for a local upstream with a long time-to-first-token on non-streaming requests. |
+| `TRUSTED_PROXY_CIDRS` | loopback, private and link-local ranges | no | Comma-separated CIDRs whose `X-Forwarded-For` is believed when working out a client's IP (login lockout, live view). Set it to your ingress controller's pod CIDR; see [Operations → Security posture](operations.md#security-posture). |
 | `FORWARD_HEADERS` | — | no | Comma-separated request header names to copy onto the outbound upstream request for `/v1/chat/completions` and `/v1/embeddings` (OpenAI-compatible and Vertex providers; audio and the Google Speech/TTS kinds don't forward headers). Forwarding can never override `Content-Type`, `Authorization`, or (on a streaming call, the only one that sets it) `Accept`. A name matching `Authorization`, `X-Api-Key`, or another header the gateway needs for itself (see the full denylist in `internal/config`) is rejected at startup. Empty by default: no client header reaches an upstream unless named here. |
 
 ### Compose-only
@@ -44,12 +45,13 @@ Read by `internal/config` at startup. Invalid values fail fast.
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `OIDC_ISSUER` | — | **required** | Issuer URL; discovery document fetched from `<issuer>/.well-known/openid-configuration`. Placeholder: `https://idp.example.com`. Must be `https://`; plain `http://` is only accepted for `localhost`/`127.0.0.1` with `ENV=dev`. |
+| `OIDC_ISSUER` | — | **required** | Issuer URL; discovery document fetched from `<issuer>/.well-known/openid-configuration`. Placeholder: `https://idp.example.com`. Must be `https://`; plain `http://` is only accepted for `localhost`/`127.0.0.1` with `ENV=dev`, or with `OIDC_ALLOW_HTTP_ISSUER=1`. |
 | `OIDC_CLIENT_ID` | — | **required** | Relying-party client ID. Placeholder: `CHANGE_ME`. |
 | `OIDC_CLIENT_SECRET` | — | **required** | Relying-party client secret. Placeholder: `CHANGE_ME`. |
 | `OIDC_REDIRECT_URL` | — | **required** | Callback URL registered with the IdP, e.g. `https://airllm.example.com/auth/callback`. |
 | `OIDC_ROLES_CLAIM` | — | **required** | ID-token claim that carries roles. Supports a string array (`["admin","viewer"]`) or an object whose keys are role names (e.g. Zitadel's `urn:zitadel:iam:org:project:roles` map). |
 | `OIDC_SCOPES` | `openid profile email` | no | Space-separated scopes to request. |
+| `OIDC_ALLOW_HTTP_ISSUER` | `0` | no | `1` accepts a plain-http `OIDC_ISSUER` anywhere (an existing IdP reachable only over http inside a private network) and logs a `WARN` at startup. Discovery, the JWKS and the token exchange, which carries the client secret, then travel unencrypted. |
 | `OIDC_ROLE_MAP` | — | no | Optional mapping from IdP role names to AirLLM roles, as a comma-separated list of `idpRole:airllmRole` pairs, e.g. `admins:airllm_admin,devs:airllm_user`. When unset, role names are used as-is and must match `airllm_admin`, `airllm_user`, or `airllm_auditor` exactly. |
 
 Generate a production master key:
