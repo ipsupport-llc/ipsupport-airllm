@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -204,15 +205,21 @@ func sortLive(rs []liveRequest) {
 	})
 }
 
-// podName names this replica: the pod's hostname under Kubernetes.
+// podName names this replica: the pod's hostname under Kubernetes, where it
+// is unique per pod. Elsewhere (compose, bare processes) several gateways can
+// share one host, so the process id is appended to keep their
+// air:live:pod:<name> keys apart.
 func podName() string {
+	name := "unknown"
 	if h := os.Getenv("HOSTNAME"); h != "" {
-		return h
+		name = h
+	} else if h, err := os.Hostname(); err == nil && h != "" {
+		name = h
 	}
-	if h, err := os.Hostname(); err == nil && h != "" {
-		return h
+	if os.Getenv("KUBERNETES_SERVICE_HOST") == "" {
+		name = fmt.Sprintf("%s-%d", name, os.Getpid())
 	}
-	return "unknown"
+	return name
 }
 
 // trackLive registers a data-plane request in the live view for as long as
