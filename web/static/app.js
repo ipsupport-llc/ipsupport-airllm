@@ -1487,7 +1487,7 @@ function renderGroupSpend(el, d) {
         <td class="num opt">${fmtNum(users.length)}</td><td class="num opt">${fmtNum(g.requests)}</td>
         <td class="num">${tok(g.tokens)}</td><td class="num">${fmtUSD(g.cost_usd)}</td></tr>` +
       (open ? users.map((u) => `<tr class="member-row">
-        <td><span class="member">${esc(u.subject)}</span></td><td class="opt"></td><td class="num opt">${fmtNum(u.requests)}</td>
+        <td><span class="member">${u.subject ? esc(u.subject) : `<span class="muted">deleted users</span>`}</span></td><td class="opt"></td><td class="num opt">${fmtNum(u.requests)}</td>
         <td class="num">${tok(u.tokens)}</td><td class="num">${fmtUSD(u.cost_usd)}</td></tr>`).join("") : "");
   }).join("");
   el.innerHTML = `<div class="panel">
