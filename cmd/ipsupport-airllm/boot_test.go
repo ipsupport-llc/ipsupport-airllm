@@ -24,6 +24,12 @@ func TestBootHandlerPhases(t *testing.T) {
 		{"GET", "/readyz", http.StatusServiceUnavailable, `{"status":"starting"}`},
 		{"POST", "/v1/chat/completions", http.StatusServiceUnavailable, `{"status":"starting"}`},
 	}
+	grace := []want{
+		// Live but not ready: the rest of setup keeps a ~60s budget.
+		{"GET", "/healthz", http.StatusOK, `{"status":"starting"}`},
+		{"GET", "/readyz", http.StatusServiceUnavailable, `{"status":"starting"}`},
+		{"POST", "/healthz", http.StatusServiceUnavailable, `{"status":"starting"}`},
+	}
 	migrating := []want{
 		{"GET", "/healthz", http.StatusOK, `{"status":"migrating"}`},
 		{"HEAD", "/healthz", http.StatusOK, ""},
@@ -50,12 +56,24 @@ func TestBootHandlerPhases(t *testing.T) {
 		}
 	}
 
-	b := &bootHandler{}
-	check("before migrations", b, starting)
-	b.SetMigrating(true)
+	now := time.Unix(1_800_000_000, 0)
+	b := &bootHandler{now: func() time.Time { return now }}
+	check("before the migration lock", b, starting)
+	b.MigrationStarted()
 	check("migrating", b, migrating)
-	b.SetMigrating(false)
-	check("after migrations", b, starting)
+	now = now.Add(10 * time.Minute) // a long migration: no time limit
+	check("still migrating", b, migrating)
+	b.MigrationFinished()
+	check("right after migrations", b, grace)
+	now = now.Add(postMigrationGrace - time.Second)
+	check("end of the grace period", b, grace)
+	now = now.Add(time.Second)
+	check("after the grace period", b, starting)
+
+	// A Migrate that fails before taking the lock never went live.
+	failed := &bootHandler{now: func() time.Time { return now }}
+	failed.MigrationFinished()
+	check("migration never started", failed, starting)
 }
 
 // TestSwapHandlerServesTheRealHandlerAfterTheSwap runs one http.Server the
@@ -67,7 +85,7 @@ func TestSwapHandlerServesTheRealHandlerAfterTheSwap(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	boot := &bootHandler{}
-	boot.SetMigrating(true)
+	boot.MigrationStarted()
 	handler := newSwapHandler(boot)
 	srv := &http.Server{Handler: handler}
 	sv := startServing(srv, ln)

@@ -34,13 +34,15 @@ migrations. A clean re-bootstrap is `make compose-down && make compose-up`.
 Each file runs in its own transaction, unless its first line is exactly
 `-- airllm:no-transaction`. Such a file runs outside a transaction (still under
 the migration advisory lock), one statement at a time, and is recorded only
-after its last statement succeeds. Use it for statements Postgres refuses
-inside a transaction, chiefly `CREATE INDEX CONCURRENTLY`, which indexes a big
-table without blocking writes. A failure leaves the statements that already ran
-in place and the whole file reruns on the next boot, so every statement must be
-idempotent (`IF NOT EXISTS` / `IF EXISTS`). A failed or interrupted
-`CONCURRENTLY` build also leaves an `INVALID` index that `IF NOT EXISTS` would
-skip, so drop it first:
+after its last statement succeeds. It exists for `CREATE INDEX CONCURRENTLY`,
+which Postgres refuses inside a transaction and which indexes a big table
+without blocking writes. A failure leaves the statements that already ran
+in place and the whole file reruns on the next boot, and a failed or
+interrupted `CONCURRENTLY` build leaves an `INVALID` index that `IF NOT EXISTS`
+would skip. So a no-transaction file has exactly this shape and nothing else:
+one index, dropped first, then created `IF NOT EXISTS` under the same name.
+`UNIQUE` is allowed; any other statement is not, because one that committed
+before a crash and isn't idempotent would fail every rerun.
 
 ```sql
 -- airllm:no-transaction
@@ -49,10 +51,8 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_usage_ledger_alias_ts
     ON usage_ledger (alias, ts);
 ```
 
-One index per file, dropped first as above: `TestNoTxMigrationsDropIndexFirst`
-(in `internal/store`) fails the build for a no-transaction file with a
-`CREATE INDEX CONCURRENTLY` not preceded by `DROP INDEX CONCURRENTLY IF EXISTS`
-of the same name, or with more than one.
+`TestNoTxMigrationsDropIndexFirst` (in `internal/store`) fails the build for a
+no-transaction file of any other shape. Comments are allowed anywhere.
 
 ### Upgrading to this release
 
@@ -86,34 +86,43 @@ of the same name, or with more than one.
 ### Upgrades and long migrations
 
 The gateway opens its HTTP listener first, then connects to the datastores,
-runs pending migrations and finishes setup. Until setup is done, every route
-answers `503`, `/readyz` included, with `{"status":"starting"}`, or
-`{"status":"migrating"}` while migrations run. The one exception is `/healthz`,
-which answers `200 {"status":"migrating"}` for as long as migrations run,
-waiting for another replica's migration lock included.
+runs pending migrations and finishes setup. Until setup is done every route,
+`/readyz` included, answers `503` with `{"status":"starting"}`, or
+`{"status":"migrating"}` while this pod holds the migration lock and applies
+migrations. The one exception is `/healthz`: it answers `200` while this pod
+migrates and for 60 s after the migrations return.
 
 So the Helm chart's startup probe (`app.startupProbe`, ~60 s by default)
-covers all of boot except the migrations themselves: a long migration passes
-it, while a hang elsewhere (a datastore that never answers, OIDC discovery)
-still restarts the pod. Once a migration has passed the startup probe, the
-rest of setup falls under the liveness probe (3 × 10 s). Readiness keeps the
-pod out of the Service until setup has finished, and a long migration needs no
-larger probe budget. Under a rolling update the old pods keep serving until a
-new one is ready; with the `Recreate` strategy (a ReadWriteOnce capture
-volume) the gateway is down until the migration finishes. A
-`helm upgrade --wait` (or `--atomic`) timeout must still cover the migration,
-or Helm gives up on the rollout.
+covers boot up to the migrations, waiting for the migration lock included; a
+long migration passes it, and a hang before it (a datastore that never
+answers) still restarts the pod. The rest of setup (OIDC discovery, loading
+providers) has the 60 s after the migrations, then the liveness probe's
+~30 s. A long migration needs no larger probe budget, and readiness keeps the
+pod out of the Service until setup has finished. Under a rolling update the
+old pods keep serving until a new one is ready; with the `Recreate` strategy
+(a ReadWriteOnce capture volume) the gateway is down until the migration
+finishes. A `helm upgrade --wait` (or `--atomic`) timeout must still cover the
+migration, or Helm gives up on the rollout.
 
-Several new pods migrate one at a time (the migration advisory lock); the
-others wait, alive and not ready. A pod stopped mid-migration (a rollback, a
-node drain) rolls back the transaction of a regular migration file, and the
-next pod starts that file again from scratch. A
-[no-transaction file](#migrations) keeps the statements that already
-completed, and an interrupted `CREATE INDEX CONCURRENTLY` leaves an `INVALID`
-index; the next pod reruns the whole file, which is why those files are
-idempotent and drop the index first. For an index on a big table, use such a
-file with `CREATE INDEX CONCURRENTLY`, so writes are not blocked for the whole
-build.
+Several new pods migrate one at a time (the migration advisory lock). A pod
+waiting for the lock is not live, so while another replica runs a migration
+longer than the startup budget, the waiting pods restart (and back off) until
+it finishes; to avoid that churn, scale to one replica for such an upgrade.
+
+A migration statement that hangs forever after the lock is held — a lock wait
+on a busy table, a stuck index build — keeps the pod live and unready
+indefinitely, by design: a long index build cannot be told from a hang. Watch
+for a new pod that stays unready during a rollout (`kubectl rollout status`,
+the Deployment's readiness) and look at `pg_stat_activity` for the migration's
+query.
+
+A pod stopped mid-migration (a rollback, a node drain) rolls back the
+transaction of a regular migration file, and the next pod starts that file
+again from scratch. A [no-transaction file](#migrations) keeps the statements
+that already completed, and an interrupted `CREATE INDEX CONCURRENTLY` leaves
+an `INVALID` index; the next pod reruns the whole file, which is why those
+files drop the index first. For an index on a big table, use such a file with
+`CREATE INDEX CONCURRENTLY`, so writes are not blocked for the whole build.
 
 ## Security posture
 

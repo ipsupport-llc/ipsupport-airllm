@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"sync/atomic"
+	"time"
 )
 
 // swapHandler serves through whichever handler was stored last. The listener
@@ -25,29 +26,54 @@ func (s *swapHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	(*s.h.Load()).ServeHTTP(w, r)
 }
 
+// postMigrationGrace keeps /healthz passing for a while after migrations
+// finish. A long migration satisfies the startup probe, after which only
+// the liveness probe (~30s) would watch the rest of setup; the grace gives
+// that the same ~60s the startup probe allows.
+const postMigrationGrace = 60 * time.Second
+
 // bootHandler answers while the gateway is still setting up. It never
-// reports ready. /healthz passes only while migrations run (waiting for
-// another replica's migration lock included), so the startup probe stops
-// counting for as long as a migration takes; in every other boot phase it
-// fails, and a hang there (a datastore that never answers, OIDC discovery)
-// still runs out the startup probe's budget and restarts the pod.
+// reports ready. /healthz passes only while migrations run — from the moment
+// the migration lock is held, so a lock holder wedged elsewhere still runs
+// out this pod's startup probe — and for postMigrationGrace after. In every
+// other boot phase it fails, so a hang there (a datastore that never
+// answers, OIDC discovery) restarts the pod as before.
 type bootHandler struct {
+	now       func() time.Time // the clock; nil means time.Now
 	migrating atomic.Bool
+	doneAt    atomic.Int64 // unix nanos migrations finished; 0 = not yet
 }
 
-// SetMigrating marks the start (true) and end (false) of migrations.
-func (b *bootHandler) SetMigrating(on bool) { b.migrating.Store(on) }
+// MigrationStarted marks the migration lock as held.
+func (b *bootHandler) MigrationStarted() { b.migrating.Store(true) }
+
+// MigrationFinished ends the migrating phase and starts the grace period,
+// if MigrationStarted was called.
+func (b *bootHandler) MigrationFinished() {
+	if b.migrating.Swap(false) {
+		b.doneAt.Store(b.clock().UnixNano())
+	}
+}
+
+func (b *bootHandler) clock() time.Time {
+	if b.now != nil {
+		return b.now()
+	}
+	return time.Now()
+}
 
 func (b *bootHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !b.migrating.Load() {
-		writeBootJSON(w, http.StatusServiceUnavailable, "starting")
-		return
+	status, live := "starting", false
+	if b.migrating.Load() {
+		status, live = "migrating", true
+	} else if at := b.doneAt.Load(); at != 0 && b.clock().Sub(time.Unix(0, at)) < postMigrationGrace {
+		live = true
 	}
 	code := http.StatusServiceUnavailable
-	if r.URL.Path == "/healthz" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+	if live && r.URL.Path == "/healthz" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
 		code = http.StatusOK
 	}
-	writeBootJSON(w, code, "migrating")
+	writeBootJSON(w, code, status)
 }
 
 func writeBootJSON(w http.ResponseWriter, code int, status string) {

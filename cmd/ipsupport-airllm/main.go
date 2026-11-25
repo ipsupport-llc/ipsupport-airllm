@@ -84,9 +84,8 @@ func run() error {
 	}
 	defer st.Close()
 
-	boot.SetMigrating(true)
-	err = st.Migrate(ctx)
-	boot.SetMigrating(false)
+	err = st.MigrateNotify(ctx, boot.MigrationStarted)
+	boot.MigrationFinished()
 	if err != nil {
 		return err
 	}
