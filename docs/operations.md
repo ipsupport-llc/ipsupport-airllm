@@ -82,19 +82,24 @@ Keep to one index per file.
 
 ### Upgrades and long migrations
 
-Pending migrations run **before** the HTTP listener starts (each file in its
-own transaction), so until they finish the pod answers no probe. The Helm
-chart's startup probe allows `app.startupProbe.periodSeconds ×
-app.startupProbe.failureThreshold` (3 s × 20 ≈ 60 s by default) before the
-kubelet restarts the container — and a restart rolls back the migration in
-progress, so a single migration that needs longer never completes. Before an upgrade that rewrites or indexes a large table:
+The gateway opens its HTTP listener first, then connects to the datastores,
+runs pending migrations and finishes setup. Until that is done, `/healthz`
+answers `200 {"status":"starting"}` and `/readyz`, like every other route,
+`503 {"status":"migrating"}`. So the Helm chart's startup probe
+(`app.startupProbe`, ~60 s by default) only covers the process starting up,
+and readiness keeps the pod out of the Service until its migrations have
+finished — a long migration needs no larger probe budget. Under a rolling
+update the old pods keep serving until a new one is ready; with the `Recreate`
+strategy (a ReadWriteOnce capture volume) the gateway is down until the
+migration finishes. A `helm upgrade --wait` (or `--atomic`) timeout must still
+cover the migration, or Helm gives up on the rollout.
 
-1. Raise the budget for that rollout, e.g.
-   `--set app.startupProbe.failureThreshold=400` (~20 min).
-2. Optionally scale to one replica first, so only one pod runs the migration
-   (the others wait on the migration advisory lock and would also need the
-   larger budget).
-3. Lower the value again once the new version is up.
+Several new pods migrate one at a time (the migration advisory lock); the
+others wait, alive and not ready. A pod stopped mid-migration (a rollback, a
+node drain) rolls back that file's transaction, and the next pod starts it
+again from scratch. For an index on a big table, use a
+[no-transaction migration](#migrations) with `CREATE INDEX CONCURRENTLY`, so
+writes are not blocked for the whole build.
 
 ## Security posture
 

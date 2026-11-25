@@ -1,5 +1,6 @@
 // Command ipsupport-airllm is the gateway service entrypoint: it loads
-// config, opens the stores, applies migrations, and serves HTTP.
+// config, starts listening, opens the stores, applies migrations, and then
+// serves the API.
 package main
 
 import (
@@ -48,6 +49,28 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Listen before connecting and migrating: a long migration must not look
+	// like a hung process to the startup probe. Until the swap at the end of
+	// setup only bootHandler is reachable (alive, not ready), so nothing
+	// below races with a request.
+	handler := newSwapHandler(bootHandler())
+	srv := &http.Server{
+		Addr:              cfg.HTTPAddr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		// Close idle keep-alive connections instead of holding them open
+		// forever; a client reconnects transparently.
+		IdleTimeout: 120 * time.Second,
+	}
+	ln, err := net.Listen("tcp", cfg.HTTPAddr)
+	if err != nil {
+		return err
+	}
+	serveErr := startServing(srv, ln)
+	// Closes the listener when setup fails; a no-op after serve's shutdown.
+	defer func() { _ = srv.Close() }()
+	slog.Info("listening", "addr", cfg.HTTPAddr)
 
 	st, err := store.Open(ctx, cfg)
 	if err != nil {
@@ -271,37 +294,31 @@ func run() error {
 	spJob.Start(ctx, spInterval)
 	defer spJob.Stop()
 
-	srv := &http.Server{
-		Addr:              cfg.HTTPAddr,
-		Handler:           apiSrv,
-		ReadHeaderTimeout: 10 * time.Second,
-		// Close idle keep-alive connections instead of holding them open
-		// forever; a client reconnects transparently.
-		IdleTimeout: 120 * time.Second,
-	}
-
-	ln, err := net.Listen("tcp", cfg.HTTPAddr)
-	if err != nil {
-		return err
-	}
-	slog.Info("listening", "addr", cfg.HTTPAddr)
-	return serve(ctx, srv, ln, cfg.ShutdownDrain, cfg.ShutdownTimeout, apiSrv.SetDraining)
+	handler.Store(apiSrv)
+	slog.Info("setup complete; serving the API", "addr", cfg.HTTPAddr)
+	return serve(ctx, srv, serveErr, cfg.ShutdownDrain, cfg.ShutdownTimeout, apiSrv.SetDraining)
 }
 
-// serve runs srv on ln until ctx is cancelled, then shuts down in two steps.
-// For drain it keeps accepting requests — a load balancer takes a moment to
-// stop routing to a pod that is going away, and a connection refused in that
-// window fails a request a healthy replica would have served. draining is
-// called as the drain starts (readiness reports it). Then it stops accepting
-// and gives in-flight requests, streams included, up to timeout to finish.
-func serve(ctx context.Context, srv *http.Server, ln net.Listener, drain, timeout time.Duration, draining func()) error {
+// startServing runs srv on ln in the background. The channel receives the
+// error Serve stops with, unless that is Shutdown or Close.
+func startServing(srv *http.Server, ln net.Listener) <-chan error {
 	errCh := make(chan error, 1)
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()
+	return errCh
+}
 
+// serve lets srv (started by startServing, which returned errCh) run until
+// ctx is cancelled, then shuts down in two steps. For drain it keeps
+// accepting requests — a load balancer takes a moment to stop routing to a
+// pod that is going away, and a connection refused in that window fails a
+// request a healthy replica would have served. draining is
+// called as the drain starts (readiness reports it). Then it stops accepting
+// and gives in-flight requests, streams included, up to timeout to finish.
+func serve(ctx context.Context, srv *http.Server, errCh <-chan error, drain, timeout time.Duration, draining func()) error {
 	select {
 	case err := <-errCh:
 		return err

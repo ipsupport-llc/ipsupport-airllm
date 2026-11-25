@@ -44,7 +44,8 @@ func startServe(t *testing.T, drain, timeout time.Duration) *serveFixture {
 	ctx, cancel := context.WithCancel(context.Background())
 	f.cancel = cancel
 	go func() {
-		f.done <- serve(ctx, &http.Server{Handler: mux}, ln, drain, timeout, func() { close(f.draining) })
+		srv := &http.Server{Handler: mux}
+		f.done <- serve(ctx, srv, startServing(srv, ln), drain, timeout, func() { close(f.draining) })
 	}()
 	t.Cleanup(func() {
 		cancel()
