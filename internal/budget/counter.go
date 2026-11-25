@@ -2,9 +2,12 @@ package budget
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -52,16 +55,38 @@ func (u unit) code() string {
 	return "cost"
 }
 
-// counterTTLMargin keeps a counter a while past its period's end, so a
-// replica whose clock runs a little behind still finds it. The TTL is
-// relative to the counter's own clock, not an absolute expiry, so a test
-// clock set in the past does not create counters that vanish at once.
-const counterTTLMargin = 24 * time.Hour
+const (
+	// CounterTTL is how long a counter lives once rebuilt from the ledger.
+	// Counters are a short-lived cache of the ledger: a request settled
+	// while its counter was being rebuilt, a failed increment or a dropped
+	// ledger row can make one drift, and expiring it re-derives it from the
+	// ledger, so any drift lasts at most this long.
+	CounterTTL = 10 * time.Minute
+	// counterGrace keeps a counter a little past its period's end, for a
+	// replica whose clock runs slightly behind.
+	counterGrace = time.Minute
+	// rebuildLockTTL bounds how long one replica may hold the right to
+	// rebuild a user's counters for a period.
+	rebuildLockTTL = 5 * time.Second
+)
+
+// counterTTL is the TTL of a counter rebuilt at now for a period ending at
+// end. It is relative to the counter's own clock, not an absolute expiry, so
+// a test clock set in the past does not create counters that vanish at once.
+func counterTTL(now, end time.Time) time.Duration {
+	return min(CounterTTL, end.Sub(now)+counterGrace)
+}
 
 // counterKey is the Redis key of one counter. It stays inside air:*, which
 // is all the gateway's Redis ACL allows.
 func counterKey(userID string, u unit, p Period, start time.Time) string {
 	return "air:ub:" + userID + ":" + u.code() + ":" + p.code() + ":" + ID(p, start)
+}
+
+// lockKey is the key that lets one replica at a time rebuild a user's
+// counters for one period (both units: one ledger read fills both).
+func lockKey(userID string, p Period, start time.Time) string {
+	return "air:ub:" + userID + ":lock:" + ID(p, start)
 }
 
 // Denial describes the cap a request ran into.
@@ -74,110 +99,201 @@ type Denial struct {
 }
 
 // Message is the client-facing text of a denial, e.g. "monthly cost budget
-// $50.00 reached; resets 2026-12-01 00:00 UTC".
+// $50.00 reached; resets 2026-12-01 00:00 UTC" or "daily token budget
+// 30,000 reached; resets …".
 func (d Denial) Message() string {
 	reset := d.ResetsAt.Format("2006-01-02 15:04") + " " + d.ResetsAt.Location().String()
 	if d.Cost {
-		return fmt.Sprintf("%s cost budget $%.2f reached; resets %s", d.Period.adjective(), float64(d.Limit)/1e6, reset)
+		cents := (d.Limit + 5_000) / 10_000
+		return fmt.Sprintf("%s cost budget $%s.%02d reached; resets %s", d.Period.adjective(), groupDigits(cents/100), cents%100, reset)
 	}
-	return fmt.Sprintf("%s token budget %d reached; resets %s", d.Period.adjective(), d.Limit, reset)
+	return fmt.Sprintf("%s token budget %s reached; resets %s", d.Period.adjective(), groupDigits(d.Limit), reset)
 }
 
-// check is one counter a Check compares against a cap.
-type check struct {
-	unit  unit
-	p     Period
-	limit int64
-	start time.Time
-	end   time.Time
-	key   string
+// groupDigits writes n with comma thousands separators: 30000 -> "30,000".
+func groupDigits(n int64) string {
+	s := strconv.FormatInt(n, 10)
+	neg := strings.HasPrefix(s, "-")
+	if neg {
+		s = s[1:]
+	}
+	var b strings.Builder
+	for i, r := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(r)
+	}
+	if neg {
+		return "-" + b.String()
+	}
+	return b.String()
+}
+
+// Usage is one period's counted usage.
+type Usage struct {
+	Tokens    int64
+	CostMicro int64
+}
+
+// errBusy marks a period another replica is rebuilding right now.
+var errBusy = errors.New("budget: counters being rebuilt elsewhere")
+
+// read returns the counters of the periods ps at now, rebuilding missing
+// ones from the ledger. A period another replica is rebuilding at this
+// moment, or whose read failed, is absent from the result; the first
+// error other than that contention is returned alongside.
+func (c *Counter) read(ctx context.Context, userID string, now time.Time, ps []Period) (map[Period]Usage, error) {
+	pipe := c.rdb.Pipeline()
+	type pair struct{ tok, cost *redis.StringCmd }
+	gets := make([]pair, len(ps))
+	for i, p := range ps {
+		start, _ := Bounds(p, now, c.loc)
+		gets[i] = pair{pipe.Get(ctx, counterKey(userID, unitTokens, p, start)), pipe.Get(ctx, counterKey(userID, unitCost, p, start))}
+	}
+	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+		return nil, err
+	}
+	out := make(map[Period]Usage, len(ps))
+	var firstErr error
+	for i, p := range ps {
+		tok, terr := gets[i].tok.Int64()
+		cost, cerr := gets[i].cost.Int64()
+		if terr == nil && cerr == nil {
+			out[p] = Usage{tok, cost}
+			continue
+		}
+		if (terr != nil && !errors.Is(terr, redis.Nil)) || (cerr != nil && !errors.Is(cerr, redis.Nil)) {
+			if firstErr == nil {
+				firstErr = errors.Join(terr, cerr)
+			}
+			continue
+		}
+		u, err := c.rebuild(ctx, userID, now, p, terr == nil, tok, cerr == nil, cost)
+		if err != nil {
+			if !errors.Is(err, errBusy) && firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		out[p] = u
+	}
+	return out, firstErr
+}
+
+// unlockScript deletes the lock only if it still holds this caller's token.
+var unlockScript = redis.NewScript(`
+if redis.call("get", KEYS[1]) == ARGV[1] then
+	return redis.call("del", KEYS[1])
+end
+return 0
+`)
+
+// rebuild recreates a period's missing counters from the ledger. Only the
+// replica that takes the period's rebuild lock reads the ledger; the others
+// get errBusy, so a burst of requests at the start of a period (or when the
+// counters expire) costs one ledger read. A counter that still exists keeps
+// its value (haveTok/haveCost).
+func (c *Counter) rebuild(ctx context.Context, userID string, now time.Time, p Period, haveTok bool, tok int64, haveCost bool, cost int64) (Usage, error) {
+	start, end := Bounds(p, now, c.loc)
+	lock, token := lockKey(userID, p, start), randToken()
+	ok, err := c.rdb.SetNX(ctx, lock, token, rebuildLockTTL).Result()
+	if err != nil {
+		return Usage{}, err
+	}
+	if !ok {
+		return Usage{}, errBusy
+	}
+	defer func() { _ = unlockScript.Run(context.WithoutCancel(ctx), c.rdb, []string{lock}, token).Err() }()
+
+	ltok, lcost, err := c.ledger(ctx, userID, start, end)
+	if err != nil {
+		return Usage{}, fmt.Errorf("budget: rebuild from ledger: %w", err)
+	}
+	ttl := counterTTL(now, end)
+	pipe := c.rdb.Pipeline()
+	if !haveTok {
+		tok = ltok
+		pipe.SetNX(ctx, counterKey(userID, unitTokens, p, start), tok, ttl)
+	}
+	if !haveCost {
+		cost = lcost
+		pipe.SetNX(ctx, counterKey(userID, unitCost, p, start), cost, ttl)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return Usage{}, err
+	}
+	return Usage{tok, cost}, nil
+}
+
+func randToken() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 // Check reports whether userID has reached any cap in b. Longer periods are
 // checked first, so a denial names the cap that keeps the user blocked the
-// longest. A counter missing from Redis is rebuilt from the ledger. On a
-// Redis or ledger error it allows the request and returns the error for the
-// caller to log.
+// longest. A counter missing from Redis is rebuilt from the ledger. A period
+// whose counters another replica is rebuilding at this instant is not
+// enforced for this request (fail open, for the moment the rebuild takes).
+// On a Redis or ledger error it allows the request and returns the error for
+// the caller to log.
 func (c *Counter) Check(ctx context.Context, userID string, b Budgets) (Denial, bool, error) {
 	if userID == "" || !b.Any() {
 		return Denial{}, false, nil
 	}
 	now := c.now()
-	var checks []check
+	var ps []Period
 	for i := len(Periods) - 1; i >= 0; i-- {
-		p := Periods[i]
-		start, end := Bounds(p, now, c.loc)
-		if lim := b.TokenCap(p); lim > 0 {
-			checks = append(checks, check{unitTokens, p, lim, start, end, counterKey(userID, unitTokens, p, start)})
-		}
-		if lim := b.CostCapMicro(p); lim > 0 {
-			checks = append(checks, check{unitCost, p, lim, start, end, counterKey(userID, unitCost, p, start)})
+		if p := Periods[i]; b.TokenCap(p) > 0 || b.CostCapMicro(p) > 0 {
+			ps = append(ps, p)
 		}
 	}
-
-	pipe := c.rdb.Pipeline()
-	gets := make([]*redis.StringCmd, len(checks))
-	for i, ch := range checks {
-		gets[i] = pipe.Get(ctx, ch.key)
-	}
-	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
-		return Denial{}, false, err
-	}
-	used := make([]int64, len(checks))
-	var firstErr error
-	rebuilt := map[Period][2]int64{} // one ledger read per period, both units
-	for i, ch := range checks {
-		v, err := gets[i].Int64()
-		if err == nil {
-			used[i] = v
-			continue
-		}
-		if !errors.Is(err, redis.Nil) {
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		sums, ok := rebuilt[ch.p]
+	used, err := c.read(ctx, userID, now, ps)
+	for _, p := range ps {
+		u, ok := used[p]
 		if !ok {
-			tok, cost, err := c.ledger(ctx, userID, ch.start, ch.end)
-			if err != nil {
-				if firstErr == nil {
-					firstErr = fmt.Errorf("budget: rebuild from ledger: %w", err)
-				}
-				continue
-			}
-			sums = [2]int64{tok, cost}
-			rebuilt[ch.p] = sums
+			continue
 		}
-		val := sums[ch.unit]
-		// SET NX: a replica that rebuilt the same counter first wins, and
-		// whatever it holds now is the value to compare against.
-		_, err = c.rdb.SetArgs(ctx, ch.key, val, redis.SetArgs{Mode: "NX", TTL: ch.end.Sub(now) + counterTTLMargin}).Result()
-		switch {
-		case err == nil: // we created it
-		case errors.Is(err, redis.Nil):
-			if n, gerr := c.rdb.Get(ctx, ch.key).Int64(); gerr == nil {
-				val = n
-			}
-		default:
-			if firstErr == nil {
-				firstErr = err
-			}
+		_, end := Bounds(p, now, c.loc)
+		if lim := b.TokenCap(p); lim > 0 && u.Tokens >= lim {
+			return Denial{Period: p, Limit: lim, Used: u.Tokens, ResetsAt: end}, true, err
 		}
-		used[i] = val
-	}
-	for i, ch := range checks {
-		if used[i] >= ch.limit {
-			return Denial{Period: ch.p, Cost: ch.unit == unitCost, Limit: ch.limit, Used: used[i], ResetsAt: ch.end}, true, firstErr
+		if lim := b.CostCapMicro(p); lim > 0 && u.CostMicro >= lim {
+			return Denial{Period: p, Cost: true, Limit: lim, Used: u.CostMicro, ResetsAt: end}, true, err
 		}
 	}
-	return Denial{}, false, firstErr
+	return Denial{}, false, err
+}
+
+// Usage returns the user's usage in the current day, week and month from the
+// counters (rebuilding missing ones). A period another replica is
+// rebuilding at this instant is read from the ledger directly instead.
+func (c *Counter) Usage(ctx context.Context, userID string) (map[Period]Usage, error) {
+	now := c.now()
+	used, err := c.read(ctx, userID, now, Periods)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range Periods {
+		if _, ok := used[p]; ok {
+			continue
+		}
+		start, end := Bounds(p, now, c.loc)
+		tok, cost, err := c.ledger(ctx, userID, start, end)
+		if err != nil {
+			return nil, err
+		}
+		used[p] = Usage{tok, cost}
+	}
+	return used, nil
 }
 
 // addScript increments each counter that already exists and leaves missing
 // ones alone: a missing counter is rebuilt from the ledger, in full, by the
-// next Check, and creating it here would make it hold only this request.
+// next read, and creating it here would make it hold only this request.
+// INCRBY keeps a key's TTL, so the counter still expires on schedule.
 // ARGV[1] is the token delta, ARGV[2] the cost delta; KEYS alternate token
 // and cost counters.
 var addScript = redis.NewScript(`
@@ -190,16 +306,16 @@ end
 return 0
 `)
 
-// Add records a settled request's usage against every period's counters
-// that exist.
-func (c *Counter) Add(ctx context.Context, userID string, tokens, costMicro int64) error {
+// Add records a settled request's usage against the counters of the periods
+// containing at — the same instant its ledger row is stamped with, so the
+// counter and the ledger agree on which day, week and month it belongs to.
+func (c *Counter) Add(ctx context.Context, userID string, at time.Time, tokens, costMicro int64) error {
 	if userID == "" || (tokens == 0 && costMicro == 0) {
 		return nil
 	}
-	now := c.now()
 	keys := make([]string, 0, 2*len(Periods))
 	for _, p := range Periods {
-		start, _ := Bounds(p, now, c.loc)
+		start, _ := Bounds(p, at, c.loc)
 		keys = append(keys, counterKey(userID, unitTokens, p, start), counterKey(userID, unitCost, p, start))
 	}
 	return addScript.Run(ctx, c.rdb, keys, strconv.FormatInt(tokens, 10), strconv.FormatInt(costMicro, 10)).Err()

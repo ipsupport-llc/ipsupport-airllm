@@ -116,13 +116,14 @@ func (s *Server) budgetDenied(ctx context.Context, userID string) (string, bool)
 }
 
 // addBudgetUsage counts a settled request against its owner's budget
-// counters: the same tokens and cost its ledger row records, so a counter
-// rebuilt from the ledger and one kept up to date here agree.
-func (s *Server) addBudgetUsage(ctx context.Context, userID string, tokens, costMicro int64) {
+// counters: the same tokens and cost its ledger row records, in the periods
+// of the same instant (at) the row is stamped with, so a counter rebuilt
+// from the ledger and one kept up to date here agree.
+func (s *Server) addBudgetUsage(ctx context.Context, userID string, at time.Time, tokens, costMicro int64) {
 	if s.budgets == nil {
 		return
 	}
-	if err := s.budgets.Add(ctx, userID, tokens, costMicro); err != nil {
+	if err := s.budgets.Add(ctx, userID, at, tokens, costMicro); err != nil {
 		slog.Error("budget add failed", "err", err, "user_id", userID)
 	}
 }
@@ -153,9 +154,11 @@ func (s *Server) currentPeriods() map[budget.Period]periodWindow {
 	return out
 }
 
-// spendByUser sums the ledger per user over the current day, week and month
-// in one query; userID "" means every user.
-func (s *Server) spendByUser(ctx context.Context, periods map[budget.Period]periodWindow, userID string) (map[string]map[budget.Period]periodSpend, error) {
+// spendByUser sums every user's ledger rows over the current day, week and
+// month. It reads the ledger per user through the (user_id, ts) index — a
+// LATERAL sum per users row — so its cost follows the rows in the periods,
+// not the size of the whole ledger. Users without usage are left out.
+func (s *Server) spendByUser(ctx context.Context, periods map[budget.Period]periodWindow) (map[string]map[budget.Period]periodSpend, error) {
 	d, w, m := periods[budget.Day], periods[budget.Week], periods[budget.Month]
 	from, to := d.Start, d.End
 	for _, pw := range []periodWindow{w, m} {
@@ -166,23 +169,21 @@ func (s *Server) spendByUser(ctx context.Context, periods map[budget.Period]peri
 			to = pw.End
 		}
 	}
-	args := []any{d.Start, d.End, w.Start, w.End, m.Start, m.End, from, to}
-	where := ""
-	if userID != "" {
-		where = ` AND user_id = $9`
-		args = append(args, userID)
-	}
 	rows, err := s.st.PG.Query(ctx, `
-		SELECT user_id::text,
-		       COALESCE(SUM(prompt_tokens + completion_tokens) FILTER (WHERE ts >= $1 AND ts < $2), 0)::bigint,
-		       COALESCE(round(SUM(cost_usd) FILTER (WHERE ts >= $1 AND ts < $2) * 1000000), 0)::bigint,
-		       COALESCE(SUM(prompt_tokens + completion_tokens) FILTER (WHERE ts >= $3 AND ts < $4), 0)::bigint,
-		       COALESCE(round(SUM(cost_usd) FILTER (WHERE ts >= $3 AND ts < $4) * 1000000), 0)::bigint,
-		       COALESCE(SUM(prompt_tokens + completion_tokens) FILTER (WHERE ts >= $5 AND ts < $6), 0)::bigint,
-		       COALESCE(round(SUM(cost_usd) FILTER (WHERE ts >= $5 AND ts < $6) * 1000000), 0)::bigint
-		FROM usage_ledger
-		WHERE user_id IS NOT NULL AND ts >= $7 AND ts < $8`+where+`
-		GROUP BY user_id`, args...)
+		SELECT u.id::text, s.*
+		FROM users u CROSS JOIN LATERAL (
+			SELECT COALESCE(SUM(l.prompt_tokens + l.completion_tokens) FILTER (WHERE l.ts >= $1 AND l.ts < $2), 0)::bigint,
+			       COALESCE(round(SUM(l.cost_usd) FILTER (WHERE l.ts >= $1 AND l.ts < $2) * 1000000), 0)::bigint,
+			       COALESCE(SUM(l.prompt_tokens + l.completion_tokens) FILTER (WHERE l.ts >= $3 AND l.ts < $4), 0)::bigint,
+			       COALESCE(round(SUM(l.cost_usd) FILTER (WHERE l.ts >= $3 AND l.ts < $4) * 1000000), 0)::bigint,
+			       COALESCE(SUM(l.prompt_tokens + l.completion_tokens) FILTER (WHERE l.ts >= $5 AND l.ts < $6), 0)::bigint,
+			       COALESCE(round(SUM(l.cost_usd) FILTER (WHERE l.ts >= $5 AND l.ts < $6) * 1000000), 0)::bigint,
+			       count(*) AS n
+			FROM usage_ledger l
+			WHERE l.user_id = u.id AND l.ts >= $7 AND l.ts < $8
+		) s
+		WHERE s.n > 0`,
+		d.Start, d.End, w.Start, w.End, m.Start, m.End, from, to)
 	if err != nil {
 		return nil, err
 	}
@@ -190,8 +191,9 @@ func (s *Server) spendByUser(ctx context.Context, periods map[budget.Period]peri
 	out := map[string]map[budget.Period]periodSpend{}
 	for rows.Next() {
 		var id string
+		var n int64
 		var ds, ws, ms periodSpend
-		if err := rows.Scan(&id, &ds.Tokens, &ds.CostMicro, &ws.Tokens, &ws.CostMicro, &ms.Tokens, &ms.CostMicro); err != nil {
+		if err := rows.Scan(&id, &ds.Tokens, &ds.CostMicro, &ws.Tokens, &ws.CostMicro, &ms.Tokens, &ms.CostMicro, &n); err != nil {
 			return nil, err
 		}
 		out[id] = map[budget.Period]periodSpend{budget.Day: ds, budget.Week: ws, budget.Month: ms}

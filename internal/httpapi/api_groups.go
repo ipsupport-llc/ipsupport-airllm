@@ -266,14 +266,27 @@ func (s *Server) groupReport(ctx context.Context, period budget.Period, win peri
 		return nil, err
 	}
 
+	// Per user through the (user_id, ts) index, so the cost follows the
+	// period's rows rather than the whole ledger; rows of deleted users
+	// (user_id NULL) are summed through the same index.
 	rows, err := s.st.PG.Query(ctx, `
-		SELECT l.user_id::text, COALESCE(u.subject, ''), u.group_id::text,
-		       COALESCE(SUM(l.prompt_tokens + l.completion_tokens), 0)::bigint,
-		       COALESCE(round(SUM(l.cost_usd) * 1000000), 0)::bigint,
+		SELECT u.id::text, u.subject, u.group_id::text, s.tokens, s.cost, s.n
+		FROM users u CROSS JOIN LATERAL (
+			SELECT COALESCE(SUM(l.prompt_tokens + l.completion_tokens), 0)::bigint AS tokens,
+			       COALESCE(round(SUM(l.cost_usd) * 1000000), 0)::bigint AS cost,
+			       count(*) AS n
+			FROM usage_ledger l
+			WHERE l.user_id = u.id AND l.ts >= $1 AND l.ts < $2
+		) s
+		WHERE s.n > 0
+		UNION ALL
+		SELECT NULL, '', NULL,
+		       COALESCE(SUM(prompt_tokens + completion_tokens), 0)::bigint,
+		       COALESCE(round(SUM(cost_usd) * 1000000), 0)::bigint,
 		       count(*)
-		FROM usage_ledger l LEFT JOIN users u ON u.id = l.user_id
-		WHERE l.ts >= $1 AND l.ts < $2
-		GROUP BY l.user_id, u.subject, u.group_id`, win.Start, win.End)
+		FROM usage_ledger
+		WHERE user_id IS NULL AND ts >= $1 AND ts < $2
+		HAVING count(*) > 0`, win.Start, win.End)
 	if err != nil {
 		return nil, err
 	}

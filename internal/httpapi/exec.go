@@ -193,6 +193,7 @@ func (s *Server) releaseReservation(ctx context.Context, keyID string, rsv *limi
 // knowing what one is; the reasoning count rides along for the ledger, the
 // metrics and the log line, where an operator can see the split.
 func (s *Server) finalizeUsage(ctx context.Context, entry ledger.Entry, keyID, upstreamModel string, u llm.Usage, rsv *limits.Decision) ledger.Entry {
+	entry.TS = s.clock()
 	entry.PromptTokens = u.PromptTokens
 	entry.CompletionTokens = u.CompletionTokens
 	entry.ReasoningTokens = u.ReasoningTokens
@@ -239,7 +240,7 @@ func (s *Server) finalizeUsage(ctx context.Context, entry ledger.Entry, keyID, u
 	}
 	// Budgets count what the ledger row records, whatever the status: a
 	// stream that broke after it started still spent its tokens.
-	s.addBudgetUsage(sctx, entry.UserID, u.BilledTokens(), costMicro)
+	s.addBudgetUsage(sctx, entry.UserID, entry.TS, u.BilledTokens(), costMicro)
 	return entry
 }
 
@@ -261,6 +262,7 @@ func (s *Server) finalizeUsage(ctx context.Context, entry ledger.Entry, keyID, u
 // alias that has the cache, logged as "cache"; empty for every other
 // request, whose log line keeps its shape.
 func (s *Server) finalizeAudioUsage(ctx context.Context, entry ledger.Entry, keyID string, costMicro, audioSeconds, ttsChars int64, cache cacheOutcome) {
+	entry.TS = s.clock()
 	entry.CostUSD = float64(costMicro) / 1e6
 	s.ledger.Record(ctx, entry)
 	s.metrics.RecordUsage(entry.IngressProtocol, llm.Usage{}, entry.CostUSD)
@@ -286,7 +288,7 @@ func (s *Server) finalizeAudioUsage(ctx context.Context, entry ledger.Entry, key
 		if err := s.limiter.Add(sctx, keyID, 0, costMicro, audioSeconds, ttsChars, 0, 0); err != nil {
 			slog.Error("limiter add failed", "err", err)
 		}
-		s.addBudgetUsage(sctx, entry.UserID, 0, costMicro)
+		s.addBudgetUsage(sctx, entry.UserID, entry.TS, 0, costMicro)
 	}
 }
 

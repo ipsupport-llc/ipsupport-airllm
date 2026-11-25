@@ -652,3 +652,127 @@ func TestLiveEntryCarriesGroup(t *testing.T) {
 		t.Errorf("old snapshot: %+v %v", old, err)
 	}
 }
+
+// waitLedgerRows polls until userID has n ledger rows (the ledger writes
+// asynchronously) and returns their timestamps.
+func waitLedgerRows(t *testing.T, f *budgetFixture, userID string, n int) []time.Time {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		rows, err := f.pool.Query(context.Background(), `SELECT ts FROM usage_ledger WHERE user_id = $1 ORDER BY ts`, userID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []time.Time
+		for rows.Next() {
+			var ts time.Time
+			if err := rows.Scan(&ts); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, ts)
+		}
+		rows.Close()
+		if len(out) >= n {
+			return out
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d ledger rows for %s, want %d", len(out), userID, n)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestLedgerRowAndCounterShareOneTimestamp: a request settled one second
+// before midnight is stamped with that instant in its ledger row (not the
+// insert's own now()), and counted in that day's budget counter.
+func TestLedgerRowAndCounterShareOneTimestamp(t *testing.T) {
+	f := newBudgetFixture(t)
+	s := f.server(t)
+	uid := f.user(t, "stamp")
+	token, _ := f.key(t, uid, "")
+	setBudgets(t, f, s, uid, `{"tokens":{"day":1000000}}`)
+	f.clock.Advance(time.Date(2026, 10, 3, 23, 59, 59, 0, time.UTC).Sub(f.clock.Now()))
+	wantStatus(t, f.chat(t, s, token), http.StatusOK, "chat")
+	ts := waitLedgerRows(t, f, uid, 1)
+	if !ts[0].Equal(f.clock.Now()) {
+		t.Errorf("ledger row stamped %v, want the settle instant %v", ts[0], f.clock.Now())
+	}
+	v, err := f.rdb.Get(context.Background(), "air:ub:"+uid+":tok:d:2026-10-03").Int64()
+	if err != nil || v == 0 {
+		t.Errorf("3 Oct token counter = %d (%v), want the request counted there", v, err)
+	}
+}
+
+// TestMeReadsCountersOnlyForCappedUsers: a user without caps gets no usage
+// read at all; a capped user's numbers come from the budget counters.
+func TestMeReadsCountersOnlyForCappedUsers(t *testing.T) {
+	f := newBudgetFixture(t)
+	s := f.server(t)
+	uid := f.user(t, "me-counters")
+	f.ledgerRow(t, uid, time.Date(2026, 10, 3, 1, 0, 0, 0, time.UTC), 300, "1")
+	as(s, "me-counters-"+f.suffix, uid)
+	monthUsed := func() int64 {
+		t.Helper()
+		rec := call(t, s, http.MethodGet, "/api/me", "")
+		wantStatus(t, rec, http.StatusOK, "me")
+		var me struct {
+			Budget struct {
+				Periods map[string]struct {
+					TokensUsed int64 `json:"tokens_used"`
+				} `json:"periods"`
+			} `json:"budget"`
+		}
+		decodeBody(t, rec, &me)
+		return me.Budget.Periods["month"].TokensUsed
+	}
+	if got := monthUsed(); got != 0 {
+		t.Errorf("uncapped user's month usage = %d, want 0 (not read)", got)
+	}
+	if n, _ := f.rdb.Exists(context.Background(), "air:ub:"+uid+":tok:m:2026-10").Result(); n != 0 {
+		t.Error("an uncapped user's /api/me created budget counters")
+	}
+
+	setBudgets(t, f, s, uid, `{"cost_usd":{"month":50}}`)
+	if got := monthUsed(); got != 300 {
+		t.Fatalf("capped user's month usage = %d, want 300", got)
+	}
+	// A row the counters have not seen: the dashboard shows the counter the
+	// data plane enforces, until it is re-derived from the ledger.
+	f.ledgerRow(t, uid, time.Date(2026, 10, 3, 2, 0, 0, 0, time.UTC), 50, "0")
+	if got := monthUsed(); got != 300 {
+		t.Errorf("month usage = %d, want the counter's 300", got)
+	}
+}
+
+// TestUsersListAnswersWithoutSpend: when the spend aggregate cannot be read
+// the list is still served, with null spend.
+func TestUsersListAnswersWithoutSpend(t *testing.T) {
+	f := newBudgetFixture(t)
+	s := f.server(t)
+	asAdmin(s)
+	uid := f.user(t, "nospend")
+	// Hide the ledger from the aggregate (no test in this package runs in
+	// parallel).
+	f.exec(t, `ALTER TABLE usage_ledger RENAME TO usage_ledger_hidden`)
+	t.Cleanup(func() {
+		_, _ = f.pool.Exec(context.Background(), `ALTER TABLE usage_ledger_hidden RENAME TO usage_ledger`)
+	})
+	rec := call(t, s, http.MethodGet, "/api/admin/users", "")
+	wantStatus(t, rec, http.StatusOK, "users list without the ledger")
+	var out struct {
+		Users []map[string]json.RawMessage `json:"users"`
+	}
+	decodeBody(t, rec, &out)
+	found := false
+	for _, u := range out.Users {
+		if string(u["id"]) == `"`+uid+`"` {
+			found = true
+			if string(u["spend"]) != "null" {
+				t.Errorf("spend = %s, want null", u["spend"])
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("user %s not listed", uid)
+	}
+}

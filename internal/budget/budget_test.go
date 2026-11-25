@@ -123,8 +123,20 @@ func TestDenialMessage(t *testing.T) {
 		t.Errorf("message %q, want %q", got, want)
 	}
 	berlin := mustLoad(t, "Europe/Berlin")
-	d = Denial{Period: Day, Limit: 1000, ResetsAt: time.Date(2026, 11, 25, 0, 0, 0, 0, berlin)}
-	if got := d.Message(); !strings.HasPrefix(got, "daily token budget 1000 reached; resets 2026-11-25 00:00 Europe/Berlin") {
+	d = Denial{Period: Day, Limit: 30000, ResetsAt: time.Date(2026, 11, 25, 0, 0, 0, 0, berlin)}
+	if got := d.Message(); !strings.HasPrefix(got, "daily token budget 30,000 reached; resets 2026-11-25 00:00 Europe/Berlin") {
 		t.Errorf("message %q", got)
+	}
+	d = Denial{Period: Week, Cost: true, Limit: 1_234_567_890, ResetsAt: time.Date(2026, 11, 30, 0, 0, 0, 0, time.UTC)}
+	if got := d.Message(); !strings.HasPrefix(got, "weekly cost budget $1,234.57 reached") {
+		t.Errorf("message %q", got)
+	}
+}
+
+func TestGroupDigits(t *testing.T) {
+	for n, want := range map[int64]string{0: "0", 999: "999", 1000: "1,000", 30000: "30,000", 2000000: "2,000,000", -1234: "-1,234"} {
+		if got := groupDigits(n); got != want {
+			t.Errorf("groupDigits(%d) = %q, want %q", n, got, want)
+		}
 	}
 }
