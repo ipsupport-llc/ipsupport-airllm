@@ -56,25 +56,39 @@ func (u unit) code() string {
 }
 
 const (
-	// CounterTTL is how long a counter lives once rebuilt from the ledger.
-	// Counters are a short-lived cache of the ledger: a request settled
-	// while its counter was being rebuilt, a failed increment or a dropped
-	// ledger row can make one drift, and expiring it re-derives it from the
-	// ledger, so any drift lasts at most this long.
-	CounterTTL = 10 * time.Minute
-	// counterGrace keeps a counter a little past its period's end, for a
-	// replica whose clock runs slightly behind.
-	counterGrace = time.Minute
+	// FreshFor is how long counters rebuilt from the ledger are trusted. A
+	// request settled while its counters were being rebuilt, a failed
+	// increment or a dropped ledger row can make a counter drift; after
+	// FreshFor the next check re-derives it from the ledger (a soft
+	// refresh: the old values keep being enforced until the new ones are
+	// written), so any drift lasts about this long at most.
+	FreshFor = 10 * time.Minute
+	// counterGrace keeps counters a while past their period's end, for a
+	// replica whose clock runs behind.
+	counterGrace = 24 * time.Hour
 	// rebuildLockTTL bounds how long one replica may hold the right to
-	// rebuild a user's counters for a period.
-	rebuildLockTTL = 5 * time.Second
+	// rebuild a user's counters for a period; ledgerTimeout stays well
+	// under it, so the lock never lapses during a rebuild.
+	rebuildLockTTL = 30 * time.Second
 )
 
-// counterTTL is the TTL of a counter rebuilt at now for a period ending at
+// Variables so tests can shorten them.
+var (
+	ledgerTimeout = 15 * time.Second
+	// waitMax and waitStep bound how long a check with no counters at all
+	// waits for the replica rebuilding them before it lets the request
+	// through.
+	waitMax  = time.Second
+	waitStep = 100 * time.Millisecond
+	// unlockTimeout bounds releasing a rebuild lock.
+	unlockTimeout = 2 * time.Second
+)
+
+// counterTTL is the TTL of counters written at now for a period ending at
 // end. It is relative to the counter's own clock, not an absolute expiry, so
 // a test clock set in the past does not create counters that vanish at once.
 func counterTTL(now, end time.Time) time.Duration {
-	return min(CounterTTL, end.Sub(now)+counterGrace)
+	return end.Sub(now) + counterGrace
 }
 
 // counterKey is the Redis key of one counter. It stays inside air:*, which
@@ -87,6 +101,12 @@ func counterKey(userID string, u unit, p Period, start time.Time) string {
 // counters for one period (both units: one ledger read fills both).
 func lockKey(userID string, p Period, start time.Time) string {
 	return "air:ub:" + userID + ":lock:" + ID(p, start)
+}
+
+// freshKey marks a period's counters as recently derived from the ledger;
+// it expires after FreshFor.
+func freshKey(userID string, p Period, start time.Time) string {
+	return "air:ub:" + userID + ":fresh:" + ID(p, start)
 }
 
 // Denial describes the cap a request ran into.
@@ -139,44 +159,115 @@ type Usage struct {
 // errBusy marks a period another replica is rebuilding right now.
 var errBusy = errors.New("budget: counters being rebuilt elsewhere")
 
-// read returns the counters of the periods ps at now, rebuilding missing
-// ones from the ledger. A period another replica is rebuilding at this
-// moment, or whose read failed, is absent from the result; the first
-// error other than that contention is returned alongside.
-func (c *Counter) read(ctx context.Context, userID string, now time.Time, ps []Period) (map[Period]Usage, error) {
+// state is what Redis holds for one period.
+type state struct {
+	Usage
+	have  bool // both counters exist
+	fresh bool // the freshness marker exists
+}
+
+// load reads the counters and freshness markers of the periods ps at now.
+func (c *Counter) load(ctx context.Context, userID string, now time.Time, ps []Period) (map[Period]state, error) {
+	type cmds struct {
+		tok, cost *redis.StringCmd
+		fresh     *redis.IntCmd
+	}
 	pipe := c.rdb.Pipeline()
-	type pair struct{ tok, cost *redis.StringCmd }
-	gets := make([]pair, len(ps))
+	all := make([]cmds, len(ps))
 	for i, p := range ps {
 		start, _ := Bounds(p, now, c.loc)
-		gets[i] = pair{pipe.Get(ctx, counterKey(userID, unitTokens, p, start)), pipe.Get(ctx, counterKey(userID, unitCost, p, start))}
+		all[i] = cmds{
+			pipe.Get(ctx, counterKey(userID, unitTokens, p, start)),
+			pipe.Get(ctx, counterKey(userID, unitCost, p, start)),
+			pipe.Exists(ctx, freshKey(userID, p, start)),
+		}
 	}
 	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
 		return nil, err
 	}
+	out := make(map[Period]state, len(ps))
+	for i, p := range ps {
+		tok, terr := all[i].tok.Int64()
+		cost, cerr := all[i].cost.Int64()
+		for _, err := range []error{terr, cerr} {
+			if err != nil && !errors.Is(err, redis.Nil) {
+				return nil, err
+			}
+		}
+		out[p] = state{Usage: Usage{tok, cost}, have: terr == nil && cerr == nil, fresh: all[i].fresh.Val() == 1}
+	}
+	return out, nil
+}
+
+// read returns the usage of the periods ps at now.
+//
+// Existing counters are always what is enforced. When their freshness
+// marker has expired, the replica that takes the period's rebuild lock
+// re-derives them from the ledger first; the others keep using them as they
+// are, so a refresh never opens a window without a check. Only when there
+// are no counters at all (first use, or Redis lost them) does a check that
+// did not get the lock wait, up to waitMax, for the replica rebuilding them;
+// a period still without counters after that is absent from the result,
+// and the caller lets the request through. The first error is returned
+// alongside whatever could be read.
+func (c *Counter) read(ctx context.Context, userID string, now time.Time, ps []Period) (map[Period]Usage, error) {
+	states, err := c.load(ctx, userID, now, ps)
+	if err != nil {
+		return nil, err
+	}
 	out := make(map[Period]Usage, len(ps))
 	var firstErr error
-	for i, p := range ps {
-		tok, terr := gets[i].tok.Int64()
-		cost, cerr := gets[i].cost.Int64()
-		if terr == nil && cerr == nil {
-			out[p] = Usage{tok, cost}
-			continue
+	keep := func(err error) {
+		if err != nil && !errors.Is(err, errBusy) && firstErr == nil {
+			firstErr = err
 		}
-		if (terr != nil && !errors.Is(terr, redis.Nil)) || (cerr != nil && !errors.Is(cerr, redis.Nil)) {
-			if firstErr == nil {
-				firstErr = errors.Join(terr, cerr)
+	}
+	var waiting []Period
+	for _, p := range ps {
+		st := states[p]
+		if st.have {
+			out[p] = st.Usage
+			if !st.fresh {
+				u, err := c.rebuild(ctx, userID, p, now)
+				if err == nil {
+					out[p] = u
+				}
+				keep(err)
 			}
 			continue
 		}
-		u, err := c.rebuild(ctx, userID, now, p, terr == nil, tok, cerr == nil, cost)
+		u, err := c.rebuild(ctx, userID, p, now)
+		switch {
+		case err == nil:
+			out[p] = u
+		case errors.Is(err, errBusy):
+			waiting = append(waiting, p)
+		default:
+			keep(err)
+		}
+	}
+	deadline := time.Now().Add(waitMax)
+	for len(waiting) > 0 && time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			keep(ctx.Err())
+			return out, firstErr
+		case <-time.After(waitStep):
+		}
+		states, err := c.load(ctx, userID, now, waiting)
 		if err != nil {
-			if !errors.Is(err, errBusy) && firstErr == nil {
-				firstErr = err
-			}
-			continue
+			keep(err)
+			break
 		}
-		out[p] = u
+		still := waiting[:0]
+		for _, p := range waiting {
+			if st := states[p]; st.have {
+				out[p] = st.Usage
+			} else {
+				still = append(still, p)
+			}
+		}
+		waiting = still
 	}
 	return out, firstErr
 }
@@ -189,12 +280,14 @@ end
 return 0
 `)
 
-// rebuild recreates a period's missing counters from the ledger. Only the
-// replica that takes the period's rebuild lock reads the ledger; the others
-// get errBusy, so a burst of requests at the start of a period (or when the
-// counters expire) costs one ledger read. A counter that still exists keeps
-// its value (haveTok/haveCost).
-func (c *Counter) rebuild(ctx context.Context, userID string, now time.Time, p Period, haveTok bool, tok int64, haveCost bool, cost int64) (Usage, error) {
+// rebuild re-derives a period's counters from the ledger, overwriting them,
+// and marks them fresh. Only the replica holding the period's rebuild lock
+// does it; the others get errBusy, so a burst of requests costs one ledger
+// read. It returns what the counters hold afterwards — a request settled
+// since the write has been added — and if another replica finished a
+// rebuild just before the lock was taken, those values without reading the
+// ledger.
+func (c *Counter) rebuild(ctx context.Context, userID string, p Period, now time.Time) (Usage, error) {
 	start, end := Bounds(p, now, c.loc)
 	lock, token := lockKey(userID, p, start), randToken()
 	ok, err := c.rdb.SetNX(ctx, lock, token, rebuildLockTTL).Result()
@@ -204,24 +297,34 @@ func (c *Counter) rebuild(ctx context.Context, userID string, now time.Time, p P
 	if !ok {
 		return Usage{}, errBusy
 	}
-	defer func() { _ = unlockScript.Run(context.WithoutCancel(ctx), c.rdb, []string{lock}, token).Err() }()
+	defer func() {
+		uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), unlockTimeout)
+		defer cancel()
+		_ = unlockScript.Run(uctx, c.rdb, []string{lock}, token).Err()
+	}()
 
-	ltok, lcost, err := c.ledger(ctx, userID, start, end)
+	if st, err := c.load(ctx, userID, now, []Period{p}); err != nil {
+		return Usage{}, err
+	} else if st[p].have && st[p].fresh {
+		return st[p].Usage, nil
+	}
+
+	lctx, cancel := context.WithTimeout(ctx, ledgerTimeout)
+	tok, cost, err := c.ledger(lctx, userID, start, end)
+	cancel()
 	if err != nil {
 		return Usage{}, fmt.Errorf("budget: rebuild from ledger: %w", err)
 	}
-	ttl := counterTTL(now, end)
+	ttl := counterTTL(c.now(), end)
 	pipe := c.rdb.Pipeline()
-	if !haveTok {
-		tok = ltok
-		pipe.SetNX(ctx, counterKey(userID, unitTokens, p, start), tok, ttl)
-	}
-	if !haveCost {
-		cost = lcost
-		pipe.SetNX(ctx, counterKey(userID, unitCost, p, start), cost, ttl)
-	}
+	pipe.Set(ctx, counterKey(userID, unitTokens, p, start), tok, ttl)
+	pipe.Set(ctx, counterKey(userID, unitCost, p, start), cost, ttl)
+	pipe.Set(ctx, freshKey(userID, p, start), 1, FreshFor)
 	if _, err := pipe.Exec(ctx); err != nil {
 		return Usage{}, err
+	}
+	if st, err := c.load(ctx, userID, now, []Period{p}); err == nil && st[p].have {
+		return st[p].Usage, nil
 	}
 	return Usage{tok, cost}, nil
 }
@@ -234,11 +337,10 @@ func randToken() string {
 
 // Check reports whether userID has reached any cap in b. Longer periods are
 // checked first, so a denial names the cap that keeps the user blocked the
-// longest. A counter missing from Redis is rebuilt from the ledger. A period
-// whose counters another replica is rebuilding at this instant is not
-// enforced for this request (fail open, for the moment the rebuild takes).
-// On a Redis or ledger error it allows the request and returns the error for
-// the caller to log.
+// longest. Counters missing from Redis are rebuilt from the ledger (see
+// read). A period whose counters could not be read is not enforced for this
+// request; on a Redis or ledger error the error is returned for the caller
+// to log.
 func (c *Counter) Check(ctx context.Context, userID string, b Budgets) (Denial, bool, error) {
 	if userID == "" || !b.Any() {
 		return Denial{}, false, nil
@@ -267,25 +369,15 @@ func (c *Counter) Check(ctx context.Context, userID string, b Budgets) (Denial, 
 	return Denial{}, false, err
 }
 
-// Usage returns the user's usage in the current day, week and month from the
-// counters (rebuilding missing ones). A period another replica is
-// rebuilding at this instant is read from the ledger directly instead.
-func (c *Counter) Usage(ctx context.Context, userID string) (map[Period]Usage, error) {
-	now := c.now()
-	used, err := c.read(ctx, userID, now, Periods)
+// Usage returns the user's usage in the day, week and month containing at,
+// from the same counters Check enforces.
+func (c *Counter) Usage(ctx context.Context, userID string, at time.Time) (map[Period]Usage, error) {
+	used, err := c.read(ctx, userID, at, Periods)
 	if err != nil {
 		return nil, err
 	}
-	for _, p := range Periods {
-		if _, ok := used[p]; ok {
-			continue
-		}
-		start, end := Bounds(p, now, c.loc)
-		tok, cost, err := c.ledger(ctx, userID, start, end)
-		if err != nil {
-			return nil, err
-		}
-		used[p] = Usage{tok, cost}
+	if len(used) < len(Periods) {
+		return nil, errBusy
 	}
 	return used, nil
 }

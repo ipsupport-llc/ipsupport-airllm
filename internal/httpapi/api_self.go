@@ -40,10 +40,13 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		"is_auditor": sess.principal.IsAuditor(),
 		"version":    version.Version,
 	}
-	if group, b, err := s.selfBudget(r.Context(), sess.userID); err != nil {
+	group, b, err := s.selfBudget(r.Context(), sess.userID)
+	if group != nil {
+		out["group_name"] = *group
+	}
+	if err != nil {
 		slog.Warn("budget for /api/me not read", "err", err)
 	} else {
-		out["group_name"] = group
 		out["budget"] = b
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -67,11 +70,13 @@ type budgetView struct {
 
 // selfBudget reads a user's group name, budgets and, when the user has any
 // cap, the usage per period from the budget counters (the same ones the
-// data plane checks, rebuilt from the ledger when missing). A user without
-// caps gets no usage read at all: every used value is 0.
-func (s *Server) selfBudget(ctx context.Context, userID string) (string, budgetView, error) {
+// data plane enforces, rebuilt from the ledger when missing). A user without
+// caps gets no usage read at all: every used value is 0. The group name is
+// returned (non-nil) once the user row is read, even if the usage read then
+// fails. One instant picks both the counters and the period bounds shown.
+func (s *Server) selfBudget(ctx context.Context, userID string) (*string, budgetView, error) {
 	if s.st == nil || s.st.PG == nil {
-		return "", budgetView{}, errors.New("no database")
+		return nil, budgetView{}, errors.New("no database")
 	}
 	var group string
 	var raw []byte
@@ -79,20 +84,21 @@ func (s *Server) selfBudget(ctx context.Context, userID string) (string, budgetV
 		SELECT COALESCE(g.name, ''), u.budgets
 		FROM users u LEFT JOIN user_groups g ON g.id = u.group_id
 		WHERE u.id = $1`, userID).Scan(&group, &raw); err != nil {
-		return "", budgetView{}, err
+		return nil, budgetView{}, err
 	}
+	now := s.clock()
 	b := budget.Parse(raw)
 	var used map[budget.Period]budget.Usage
 	if b.Any() {
 		if s.budgets == nil {
-			return "", budgetView{}, errors.New("no budget counters")
+			return &group, budgetView{}, errors.New("no budget counters")
 		}
 		var err error
-		if used, err = s.budgets.Usage(ctx, userID); err != nil {
-			return "", budgetView{}, err
+		if used, err = s.budgets.Usage(ctx, userID, now); err != nil {
+			return &group, budgetView{}, err
 		}
 	}
-	periods := s.currentPeriods()
+	periods := s.periodsAt(now)
 	view := budgetView{TZ: s.limitsLoc().String(), Periods: map[string]budgetPeriodView{}}
 	for _, p := range budget.Periods {
 		u := used[p]
@@ -105,7 +111,7 @@ func (s *Server) selfBudget(ctx context.Context, userID string) (string, budgetV
 			CostUSDLimit: b.CostCap(p),
 		}
 	}
-	return group, view, nil
+	return &group, view, nil
 }
 
 type keyView struct {

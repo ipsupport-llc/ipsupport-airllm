@@ -16,6 +16,7 @@ import (
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/apikey"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/auth"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/budget"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/config"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/limits"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/pricing"
@@ -774,5 +775,34 @@ func TestUsersListAnswersWithoutSpend(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("user %s not listed", uid)
+	}
+}
+
+// TestMeKeepsGroupWhenUsageFails: with the budget counters unreachable,
+// /api/me still names the group and leaves out only the budget block.
+func TestMeKeepsGroupWhenUsageFails(t *testing.T) {
+	f := newBudgetFixture(t)
+	s := f.server(t)
+	dead := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", MaxRetries: -1})
+	t.Cleanup(func() { _ = dead.Close() })
+	s.budgets = budget.NewCounter(dead, time.UTC, f.clock.Now, s.ledgerUsage)
+	uid := f.user(t, "me-nousage")
+	var gid string
+	if err := f.pool.QueryRow(context.Background(), `INSERT INTO user_groups (name) VALUES ($1) RETURNING id::text`, "me-nousage-"+f.suffix).Scan(&gid); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = f.pool.Exec(context.Background(), `DELETE FROM user_groups WHERE id = $1`, gid) })
+	f.exec(t, `UPDATE users SET group_id = $2, budgets = '{"tokens":{"day":10}}' WHERE id = $1`, uid, gid)
+	as(s, "me-nousage-"+f.suffix, uid)
+
+	rec := call(t, s, http.MethodGet, "/api/me", "")
+	wantStatus(t, rec, http.StatusOK, "me")
+	var me map[string]json.RawMessage
+	decodeBody(t, rec, &me)
+	if string(me["group_name"]) != `"me-nousage-`+f.suffix+`"` {
+		t.Errorf("group_name = %s", me["group_name"])
+	}
+	if _, ok := me["budget"]; ok {
+		t.Errorf("budget = %s, want it left out", me["budget"])
 	}
 }

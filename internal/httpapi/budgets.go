@@ -141,11 +141,11 @@ type periodWindow struct {
 
 // currentPeriods returns the current day, week and month in LIMITS_TZ.
 func (s *Server) currentPeriods() map[budget.Period]periodWindow {
-	now := time.Now
-	if s.now != nil {
-		now = s.now
-	}
-	t := now()
+	return s.periodsAt(s.clock())
+}
+
+// periodsAt returns the day, week and month containing t in LIMITS_TZ.
+func (s *Server) periodsAt(t time.Time) map[budget.Period]periodWindow {
 	out := make(map[budget.Period]periodWindow, len(budget.Periods))
 	for _, p := range budget.Periods {
 		start, end := budget.Bounds(p, t, s.limitsLoc())

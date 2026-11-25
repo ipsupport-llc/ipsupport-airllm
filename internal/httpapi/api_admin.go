@@ -126,6 +126,10 @@ func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, u)
 	}
+	if err := rows.Err(); err != nil {
+		writeControlError(w, http.StatusInternalServerError, "failed to read users")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"users": out})
 }
 

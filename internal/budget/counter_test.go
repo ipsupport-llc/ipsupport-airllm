@@ -53,6 +53,7 @@ type fakeLedger struct {
 	asked [][2]time.Time
 	err   error
 	delay time.Duration // how long each sum takes
+	block bool          // each sum waits for its context to end
 }
 
 type ledgerRow struct {
@@ -61,8 +62,12 @@ type ledgerRow struct {
 	costMicros int64
 }
 
-func (f *fakeLedger) sum(_ context.Context, _ string, start, end time.Time) (int64, int64, error) {
+func (f *fakeLedger) sum(ctx context.Context, _ string, start, end time.Time) (int64, int64, error) {
 	time.Sleep(f.delay)
+	if f.block {
+		<-ctx.Done()
+		return 0, 0, ctx.Err()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.asked = append(f.asked, [2]time.Time{start, end})
@@ -262,68 +267,118 @@ func (f *fakeLedger) asks() int {
 	return len(f.asked)
 }
 
-// TestCountersAreShortLivedCaches: a rebuilt counter expires within
-// CounterTTL (sooner near the period's end), so usage it missed — here a row
-// the ledger got without a settle — is picked up when it is re-derived.
-func TestCountersAreShortLivedCaches(t *testing.T) {
+var nov24 = time.Date(2026, 11, 24, 0, 0, 0, 0, time.UTC)
+
+// TestStaleCountersAreRefreshedFromTheLedger: counters live until their
+// period ends; their freshness marker expires after FreshFor, and the next
+// check then re-derives them from the ledger, overwriting what drifted —
+// here a row the ledger got without a settle.
+func TestStaleCountersAreRefreshedFromTheLedger(t *testing.T) {
 	at := time.Date(2026, 11, 24, 15, 0, 0, 0, time.UTC)
-	c, clk, led, user := newTestCounter(t, time.UTC, at)
+	c, _, led, user := newTestCounter(t, time.UTC, at)
+	ctx := context.Background()
 	b := Budgets{Tokens: TokenCaps{Day: 100}}
 	mustCheck(t, c, user, b, false, "empty ledger")
-	dayKey := counterKey(user, unitTokens, Day, time.Date(2026, 11, 24, 0, 0, 0, 0, time.UTC))
-	ttl, err := c.rdb.PTTL(context.Background(), dayKey).Result()
-	if err != nil || ttl <= 0 || ttl > CounterTTL {
-		t.Fatalf("day counter TTL = %v (%v), want at most %v", ttl, err, CounterTTL)
+	dayKey, fresh := counterKey(user, unitTokens, Day, nov24), freshKey(user, Day, nov24)
+	if ttl, err := c.rdb.PTTL(ctx, dayKey).Result(); err != nil || ttl < 9*time.Hour {
+		t.Errorf("day counter TTL = %v (%v), want until the day ends + grace", ttl, err)
+	}
+	if ttl, err := c.rdb.PTTL(ctx, fresh).Result(); err != nil || ttl <= 0 || ttl > FreshFor {
+		t.Errorf("fresh marker TTL = %v (%v), want at most %v", ttl, err, FreshFor)
 	}
 
 	led.rows = append(led.rows, ledgerRow{ts: at, tokens: 100}) // never settled
-	mustCheck(t, c, user, b, false, "drifted counter, before it expires")
-	_ = c.rdb.Del(context.Background(), dayKey).Err() // what its TTL does
-	mustCheck(t, c, user, b, true, "re-derived from the ledger")
-
-	// Near the end of the day the TTL is capped at the period's end + grace.
-	clk.set(time.Date(2026, 11, 24, 23, 58, 0, 0, time.UTC))
-	led.rows = nil
-	user2 := user + "-late"
-	t.Cleanup(func() {
-		_ = c.rdb.Del(context.Background(), counterKey(user2, unitTokens, Day, time.Date(2026, 11, 24, 0, 0, 0, 0, time.UTC))).Err()
-	})
-	mustCheck(t, c, user2, b, false, "late in the day")
-	ttl, _ = c.rdb.PTTL(context.Background(), counterKey(user2, unitTokens, Day, time.Date(2026, 11, 24, 0, 0, 0, 0, time.UTC))).Result()
-	if ttl <= 0 || ttl > 2*time.Minute+counterGrace {
-		t.Errorf("late day counter TTL = %v, want about 2m + grace", ttl)
+	mustCheck(t, c, user, b, false, "drifted counter, still fresh")
+	asked := led.asks()
+	_ = c.rdb.Del(ctx, fresh).Err() // what its TTL does
+	mustCheck(t, c, user, b, true, "refreshed from the ledger")
+	if led.asks() != asked+1 {
+		t.Errorf("refresh read the ledger %d times, want once", led.asks()-asked)
+	}
+	if v, _ := c.rdb.Get(ctx, dayKey).Int64(); v != 100 {
+		t.Errorf("day counter = %d after the refresh, want the ledger's 100", v)
 	}
 }
 
-// TestRebuildIsSingleFlight: while one replica holds a period's rebuild
-// lock, others read no ledger and let the request through; a burst of
-// concurrent checks costs one ledger read.
-func TestRebuildIsSingleFlight(t *testing.T) {
+// TestStaleCountersStayEnforcedDuringARefresh: an over-cap user whose
+// counters are due for a refresh another replica is doing right now is still
+// refused — the refresh never opens a window without a check.
+func TestStaleCountersStayEnforcedDuringARefresh(t *testing.T) {
 	at := time.Date(2026, 11, 24, 15, 0, 0, 0, time.UTC)
 	c, _, led, user := newTestCounter(t, time.UTC, at)
+	ctx := context.Background()
 	led.rows = []ledgerRow{{ts: at, tokens: 500}}
 	b := Budgets{Tokens: TokenCaps{Day: 100}}
-	ctx := context.Background()
+	mustCheck(t, c, user, b, true, "over the cap")
+	_ = c.rdb.Del(ctx, freshKey(user, Day, nov24)).Err()
+	if err := c.rdb.Set(ctx, lockKey(user, Day, nov24), "someone-else", time.Minute).Err(); err != nil {
+		t.Fatal(err)
+	}
+	asked := led.asks()
+	start := time.Now()
+	mustCheck(t, c, user, b, true, "stale counters, refresh running elsewhere")
+	if led.asks() != asked {
+		t.Error("read the ledger without holding the lock")
+	}
+	if time.Since(start) > waitMax/2 {
+		t.Errorf("check waited %v although counters exist", time.Since(start))
+	}
+}
 
-	lock := lockKey(user, Day, time.Date(2026, 11, 24, 0, 0, 0, 0, time.UTC))
+// TestMissingCountersWaitForTheRebuildingReplica: with no counters at all,
+// a check that does not get the lock waits for the replica rebuilding them
+// and enforces what it wrote; if nothing appears in time it lets the
+// request through.
+func TestMissingCountersWaitForTheRebuildingReplica(t *testing.T) {
+	at := time.Date(2026, 11, 24, 15, 0, 0, 0, time.UTC)
+	c, _, led, user := newTestCounter(t, time.UTC, at)
+	ctx := context.Background()
+	led.rows = []ledgerRow{{ts: at, tokens: 500}}
+	b := Budgets{Tokens: TokenCaps{Day: 100}}
+	lock := lockKey(user, Day, nov24)
 	if lock != "air:ub:"+user+":lock:2026-11-24" {
 		t.Errorf("lock key %q", lock)
 	}
 	if err := c.rdb.Set(ctx, lock, "someone-else", time.Minute).Err(); err != nil {
 		t.Fatal(err)
 	}
-	mustCheck(t, c, user, b, false, "another replica is rebuilding: fail open")
-	if n := led.asks(); n != 0 {
-		t.Errorf("ledger read %d times while the lock was held elsewhere", n)
+	go func() {
+		time.Sleep(250 * time.Millisecond)
+		_ = c.rdb.Set(ctx, counterKey(user, unitTokens, Day, nov24), 500, time.Hour).Err()
+		_ = c.rdb.Set(ctx, counterKey(user, unitCost, Day, nov24), 0, time.Hour).Err()
+	}()
+	mustCheck(t, c, user, b, true, "the other replica's counters appear while waiting")
+	if led.asks() != 0 {
+		t.Error("read the ledger without holding the lock")
 	}
-	// The dashboard's read falls back to the ledger instead.
-	if u, err := c.Usage(ctx, user); err != nil || u[Day].Tokens != 500 {
-		t.Errorf("usage while locked = %+v (%v), want 500 tokens today", u, err)
+	// Dashboard reads use the same wait instead of reading the ledger.
+	if u, err := c.Usage(ctx, user, at); err != nil || u[Day].Tokens != 500 {
+		t.Errorf("usage = %+v (%v), want the counters' 500", u, err)
 	}
-	_ = c.rdb.Del(ctx, lock).Err()
-	asked := led.asks()
 
-	led.delay = 50 * time.Millisecond
+	user2 := user + "-2"
+	if err := c.rdb.Set(ctx, lockKey(user2, Day, nov24), "someone-else", time.Minute).Err(); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	mustCheck(t, c, user2, b, false, "nothing appears: fail open")
+	if el := time.Since(start); el < waitMax-waitStep || el > waitMax+time.Second {
+		t.Errorf("waited %v, want about %v", el, waitMax)
+	}
+	if _, err := c.Usage(ctx, user2, at); err == nil {
+		t.Error("usage without counters answered without an error")
+	}
+}
+
+// TestRebuildIsSingleFlight: a burst of concurrent checks with no counters
+// costs one ledger read, and every one of them is enforced.
+func TestRebuildIsSingleFlight(t *testing.T) {
+	at := time.Date(2026, 11, 24, 15, 0, 0, 0, time.UTC)
+	c, _, led, user := newTestCounter(t, time.UTC, at)
+	ctx := context.Background()
+	led.rows = []ledgerRow{{ts: at, tokens: 500}}
+	led.delay = 100 * time.Millisecond
+	b := Budgets{Tokens: TokenCaps{Day: 100}}
 	var wg sync.WaitGroup
 	denied := make(chan bool, 20)
 	for i := 0; i < 20; i++ {
@@ -336,13 +391,55 @@ func TestRebuildIsSingleFlight(t *testing.T) {
 	}
 	wg.Wait()
 	close(denied)
-	if n := led.asks() - asked; n != 1 {
+	if n := led.asks(); n != 1 {
 		t.Errorf("a burst of 20 checks read the ledger %d times, want 1", n)
 	}
-	if exists, _ := c.rdb.Exists(ctx, lock).Result(); exists != 0 {
+	for d := range denied {
+		if !d {
+			t.Error("a check in the burst let an over-cap request through")
+		}
+	}
+	if exists, _ := c.rdb.Exists(ctx, lockKey(user, Day, nov24)).Result(); exists != 0 {
 		t.Error("rebuild lock left behind")
 	}
-	mustCheck(t, c, user, b, true, "after the rebuild")
+}
+
+// TestRebuildUsesWhatAnotherReplicaJustWrote: a rebuild that gets the lock
+// after another replica finished one returns the stored counters without
+// reading the ledger.
+func TestRebuildUsesWhatAnotherReplicaJustWrote(t *testing.T) {
+	at := time.Date(2026, 11, 24, 15, 0, 0, 0, time.UTC)
+	c, _, led, user := newTestCounter(t, time.UTC, at)
+	ctx := context.Background()
+	led.rows = []ledgerRow{{ts: at, tokens: 999}}
+	_ = c.rdb.Set(ctx, counterKey(user, unitTokens, Day, nov24), 42, time.Hour).Err()
+	_ = c.rdb.Set(ctx, counterKey(user, unitCost, Day, nov24), 7, time.Hour).Err()
+	_ = c.rdb.Set(ctx, freshKey(user, Day, nov24), 1, time.Minute).Err()
+	u, err := c.rebuild(ctx, user, Day, at)
+	if err != nil || u != (Usage{42, 7}) || led.asks() != 0 {
+		t.Errorf("rebuild = %+v, %v after %d ledger reads, want the stored 42/7 and none", u, err, led.asks())
+	}
+}
+
+// TestRebuildBoundsTheLedgerRead: a ledger read that hangs is given up
+// after ledgerTimeout, the request is let through, and the lock released.
+func TestRebuildBoundsTheLedgerRead(t *testing.T) {
+	at := time.Date(2026, 11, 24, 15, 0, 0, 0, time.UTC)
+	c, _, led, user := newTestCounter(t, time.UTC, at)
+	defer func(d time.Duration) { ledgerTimeout = d }(ledgerTimeout)
+	ledgerTimeout = 100 * time.Millisecond
+	led.block = true
+	start := time.Now()
+	_, denied, err := c.Check(context.Background(), user, Budgets{Tokens: TokenCaps{Day: 1}})
+	if denied || !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("denied=%v err=%v, want allowed with a deadline error", denied, err)
+	}
+	if el := time.Since(start); el > time.Second {
+		t.Errorf("check took %v", el)
+	}
+	if n, _ := c.rdb.Exists(context.Background(), lockKey(user, Day, nov24)).Result(); n != 0 {
+		t.Error("lock left behind")
+	}
 }
 
 // TestUsageReadsTheCounters: the dashboard's numbers come from the counters
@@ -351,7 +448,7 @@ func TestUsageReadsTheCounters(t *testing.T) {
 	at := time.Date(2026, 11, 24, 15, 0, 0, 0, time.UTC)
 	c, _, led, user := newTestCounter(t, time.UTC, at)
 	led.rows = []ledgerRow{{ts: at, tokens: 10, costMicros: 1000}, {ts: time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC), tokens: 5}}
-	u, err := c.Usage(context.Background(), user)
+	u, err := c.Usage(context.Background(), user, at)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +457,7 @@ func TestUsageReadsTheCounters(t *testing.T) {
 	}
 	mustAdd(t, c, user, 1, 1)
 	asked := led.asks()
-	u, _ = c.Usage(context.Background(), user)
+	u, _ = c.Usage(context.Background(), user, at)
 	if u[Day] != (Usage{11, 1001}) || led.asks() != asked {
 		t.Errorf("usage %+v after %d more ledger reads, want 11/1001 from the counters alone", u, led.asks()-asked)
 	}

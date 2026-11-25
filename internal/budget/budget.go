@@ -3,15 +3,14 @@
 // API keys.
 //
 // Usage is counted in Redis, one counter per user, unit and period. The
-// counters are a cache of the usage ledger: a counter that is missing when a
-// request is checked is rebuilt from the ledger and created with SET NX, and
-// settling a request only increments counters that already exist, so a
-// counter is never created holding just the latest request. Counters expire
-// CounterTTL after a rebuild, which bounds how long any drift from the
-// ledger can last. Enforcement is
-// check-before only, with no reservation: cost is known only once a response
-// has finished, so one request may overshoot a cap and the next one is
-// refused. Redis or ledger trouble fails open.
+// counters are a cache of the usage ledger: missing counters are rebuilt
+// from the ledger, and settling a request only increments counters that
+// already exist, so a counter is never created holding just the latest
+// request. Counters are re-derived from the ledger every FreshFor while they
+// keep being enforced, which bounds how long any drift from the ledger can
+// last. Enforcement is check-before only, with no reservation: cost is known
+// only once a response has finished, so one request may overshoot a cap and
+// the next one is refused. Redis or ledger trouble fails open.
 package budget
 
 import (
