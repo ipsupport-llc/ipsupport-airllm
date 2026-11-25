@@ -403,6 +403,67 @@ details.hint[open] summary { margin-bottom: 0.4rem; }
 .live-table tr.session-head td { background: rgba(240, 166, 58, 0.05); border-left: 2px solid var(--accent); padding-top: 0.45rem; padding-bottom: 0.45rem; font-size: 0.84rem; }
 .live-table tr.in-group td:first-child { border-left: 2px solid rgba(240, 166, 58, 0.45); }
 .live-table tr.failover td { background: rgba(251, 191, 36, 0.04); }
+/* Who is active now, above the request table; side by side when wide. */
+.live-summary { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 0 1.25rem; }
+@media (max-width: 1280px) { .live-summary { grid-template-columns: minmax(0, 1fr); } }
+
+/* Budgets and groups. */
+.summary-table .num, .group-table .num { text-align: right; }
+.spend.warn { color: var(--warn); }
+.spend.over { color: var(--err); font-weight: 650; }
+.budget-card .value { font-size: 1.4rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.budget-card .value .of { font-size: 0.82rem; font-weight: 500; color: var(--muted); letter-spacing: 0; }
+.budget-card.warn::before { background: linear-gradient(180deg, var(--warn), transparent 85%); }
+.budget-card.over::before { background: linear-gradient(180deg, var(--err), transparent 85%); opacity: 1; }
+.budget-card.over { border-color: rgba(248, 113, 113, 0.35); }
+.meter { height: 6px; border-radius: 3px; background: var(--rule-soft); overflow: hidden; margin: 0.65rem 0 0.45rem; }
+.meter > span { display: block; height: 100%; border-radius: 3px; background: linear-gradient(90deg, var(--accent), var(--accent-hi)); }
+.budget-card.warn .meter > span { background: var(--warn); }
+.budget-card.over .meter > span { background: var(--err); }
+.panel-head.wrap { flex-wrap: wrap; gap: 0.5rem 1rem; }
+.panel-sub { padding: 0.5rem 1.1rem; border-bottom: 1px solid var(--rule-soft); color: var(--muted); font-family: var(--font-mono); font-size: 0.76rem; }
+.seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; }
+.seg button {
+  background: none; border: none; color: var(--muted); cursor: pointer;
+  font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em;
+  padding: 0.3rem 0.75rem;
+}
+.seg button + button { border-left: 1px solid var(--rule); }
+.seg button:hover { color: var(--fg); }
+.seg button.active { background: rgba(240, 166, 58, 0.12); color: var(--accent-hi); }
+.group-table .expander {
+  background: none; border: none; padding: 0; cursor: pointer; color: var(--fg); font: inherit;
+  display: inline-flex; align-items: center; gap: 0.5rem; text-align: left;
+}
+.group-table .expander:disabled { cursor: default; }
+.group-table .caret { display: inline-block; width: 0.8em; color: var(--accent); transition: transform 0.12s; }
+.group-table tr.open .caret { transform: rotate(90deg); }
+.group-table tr.member-row td { background: rgba(0, 0, 0, 0.14); font-size: 0.85rem; padding-top: 0.4rem; padding-bottom: 0.4rem; }
+.group-table .member { padding-left: 1.3rem; font-family: var(--font-mono); font-size: 0.83rem; }
+.group-table tfoot td { border-top: 1px solid var(--rule); font-weight: 650; background: rgba(255, 255, 255, 0.02); }
+td.wrap-cell { white-space: normal; min-width: 12rem; }
+/* Users list: with the group and spend columns, a long email breaks
+   anywhere rather than pushing the row actions out of view. */
+td.trunc.group-cell { max-width: 9rem; }
+td.email-cell { overflow-wrap: anywhere; min-width: 9rem; }
+.summary-table th { white-space: nowrap; }
+.summary-table .m-only { display: none; }
+/* On a phone the spend summaries drop their secondary columns (users,
+   requests, group — folded under the user) and let names wrap, so tokens
+   and cost stay on screen without a sideways swipe. */
+@media (max-width: 700px) {
+  .summary-table .opt, .group-table .opt { display: none; }
+  .summary-table .m-only { display: block; }
+  .summary-table th, .summary-table td, .group-table th, .group-table td { padding-left: 0.65rem; padding-right: 0.65rem; }
+  /* Clear of the scroll-hint fade at the panel's right edge. */
+  .summary-table :is(th, td):last-child, .group-table :is(th, td):last-child { padding-right: 1.4rem; }
+  .summary-table th { white-space: normal; }
+  .summary-table td.name, .group-table .expander, .group-table .member { white-space: normal; overflow-wrap: break-word; }
+  .summary-table td.name { min-width: 7rem; }
+  td.wrap-cell { white-space: nowrap; }
+}
+/* Room for a seven-digit token cap in a phone-width cell. */
+.budget-grid input { padding-left: 0.5rem; padding-right: 0.4rem; font-variant-numeric: tabular-nums; }
 
 .btn {
   display: inline-flex; align-items: center; gap: 0.4rem;
