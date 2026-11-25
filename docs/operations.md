@@ -80,6 +80,11 @@ no-transaction file of any other shape. Comments are allowed anywhere.
   it on an existing release does not update the DLP model URL already stored in
   the database (the chart value only seeds it on first boot) — edit the Sidecar
   URL under **Admin → DLP** as well.
+- **Per-user budgets and groups** (migration `0020`): a `user_groups` table
+  and two `users` columns, both catalog-only changes. `LIMITS_TZ`
+  (`config.limitsTZ` in the chart) sets the zone budget periods follow; it
+  defaults to `UTC`, and an unknown zone fails startup. See
+  [Per-user budgets and groups](configuration.md#per-user-budgets-and-groups).
 - **`TRUSTED_PROXY_CIDRS`** is new; the default keeps the previous behavior.
   See [Security posture → Login lockout](#security-posture) for when to set it.
 - **`OIDC_ISSUER` must be https.** An existing internal plain-http issuer needs
@@ -207,7 +212,8 @@ files drop the index first. For an index on a big table, use such a file with
 - **Postgres** is the source of truth — back it up. It holds identity, keys,
   sealed provider credentials, the usage ledger, DLP incidents, the capture
   index, and runtime settings.
-- **Redis** holds only ephemeral data — rolling-usage counters and, for aliases
+- **Redis** holds only ephemeral data — rolling-usage counters, per-user
+  budget counters (rebuilt from the ledger when missing) and, for aliases
   with the [synthesis cache](configuration.md#synthesis-cache), cached speech
   clips; it can be rebuilt and does not require backup. Cached clips are the
   bulk of it (a few hundred KB per phrase and voice for WAV), so size Redis
@@ -554,6 +560,10 @@ them with the answering replica's own fresh list, so the view lags by up to
 replica keeps publishing through the drain and deletes its key at the end. If
 Redis cannot be read, the answer is the answering replica's requests alone
 with `partial: true`.
+
+`group` is the key owner's current [group](configuration.md#per-user-budgets-and-groups),
+taken from the replica's in-memory copy of users' groups when the request
+started; `""` when the owner has none.
 
 `output_tokens` is best effort: one per streamed chunk that carries output,
 replaced by the upstream's own count when it reports one; always `0` for

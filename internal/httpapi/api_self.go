@@ -2,11 +2,14 @@ package httpapi
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/apikey"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/budget"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/version"
 )
@@ -25,17 +28,76 @@ func (s *Server) handleAuthMode(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleMe returns the caller's identity.
+// handleMe returns the caller's identity, group, and budgets with what is
+// used of them. The identity is answered even when the budget read fails.
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	sess, _ := sessionFrom(r.Context())
-	writeJSON(w, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"subject":    sess.principal.Subject,
 		"email":      sess.principal.Email,
 		"roles":      sess.principal.Roles,
 		"is_admin":   sess.principal.IsAdmin(),
 		"is_auditor": sess.principal.IsAuditor(),
 		"version":    version.Version,
-	})
+	}
+	if group, b, err := s.selfBudget(r.Context(), sess.userID); err != nil {
+		slog.Warn("budget for /api/me not read", "err", err)
+	} else {
+		out["group_name"] = group
+		out["budget"] = b
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// budgetPeriodView is one period of the /api/me budget block; a limit of 0
+// means no cap.
+type budgetPeriodView struct {
+	Start        time.Time `json:"start"`
+	End          time.Time `json:"end"`
+	TokensUsed   int64     `json:"tokens_used"`
+	TokensLimit  int64     `json:"tokens_limit"`
+	CostUSDUsed  float64   `json:"cost_usd_used"`
+	CostUSDLimit float64   `json:"cost_usd_limit"`
+}
+
+type budgetView struct {
+	TZ      string                      `json:"tz"`
+	Periods map[string]budgetPeriodView `json:"periods"`
+}
+
+// selfBudget reads a user's group name, budgets and usage per period from
+// the database (not the Redis counters, which exist only for capped users).
+func (s *Server) selfBudget(ctx context.Context, userID string) (string, budgetView, error) {
+	if s.st == nil || s.st.PG == nil {
+		return "", budgetView{}, errors.New("no database")
+	}
+	var group string
+	var raw []byte
+	if err := s.st.PG.QueryRow(ctx, `
+		SELECT COALESCE(g.name, ''), u.budgets
+		FROM users u LEFT JOIN user_groups g ON g.id = u.group_id
+		WHERE u.id = $1`, userID).Scan(&group, &raw); err != nil {
+		return "", budgetView{}, err
+	}
+	periods := s.currentPeriods()
+	spend, err := s.spendByUser(ctx, periods, userID)
+	if err != nil {
+		return "", budgetView{}, err
+	}
+	b := budget.Parse(raw)
+	view := budgetView{TZ: s.limitsLoc().String(), Periods: map[string]budgetPeriodView{}}
+	for _, p := range budget.Periods {
+		used := spend[userID][p]
+		view.Periods[p.Name()] = budgetPeriodView{
+			Start:        periods[p].Start,
+			End:          periods[p].End,
+			TokensUsed:   used.Tokens,
+			TokensLimit:  b.TokenCap(p),
+			CostUSDUsed:  microToUSD(used.CostMicro),
+			CostUSDLimit: b.CostCap(p),
+		}
+	}
+	return group, view, nil
 }
 
 type keyView struct {

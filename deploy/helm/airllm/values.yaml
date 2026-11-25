@@ -50,6 +50,10 @@ config:                                         # non-secret env (rendered into 
   # = every loopback/private/link-local range. Set it to your ingress
   # controller's pod CIDR so another in-cluster caller can't claim any IP.
   trustedProxyCIDRs: ""
+  # LIMITS_TZ: IANA time zone the per-user budget periods follow (a day starts
+  # at 00:00, a week on Monday, a month on the 1st there). An unknown zone
+  # fails startup.
+  limitsTZ: UTC
   oidc:                                         # used only when authMode: oidc (non-secret parts)
     issuer: ""
     clientId: ""

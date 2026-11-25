@@ -26,11 +26,12 @@ Read by `internal/config` at startup. Invalid values fail fast.
 | `AIRLLM_MASTER_KEY` | — | in `prod` | Base64-encoded **32-byte** AES key that seals provider credentials at rest. **Required when `ENV=prod`.** In `dev`, a random key is generated on first boot and persisted in the `settings` table (per install, not a shared hardcoded value) so sealed credentials survive restarts without configuration. |
 | `LOOKUP_CACHE_TTL` | `30s` | no | How long an API-key or alias lookup is trusted without asking Postgres again (Go duration). The longest a revocation or alias edit made on another replica takes to apply. Must be positive. |
 | `LOOKUP_CACHE_MAX_STALE` | `5m` | no | How old a cached key or alias may get while Postgres is unreachable before it stops being served (Go duration, not below `LOOKUP_CACHE_TTL`). `/readyz` also stays ready through a Postgres outage this long. |
-| `CONFIG_REFRESH_INTERVAL` | `10s` | no | How often providers, prices and the DLP, capture, second-pass and failover settings are re-read from Postgres (Go duration, positive). The longest a provider, price or policy save made on another replica takes to apply here; see [Hot-reload](architecture.md#hot-reload). |
+| `CONFIG_REFRESH_INTERVAL` | `10s` | no | How often providers, prices, the DLP, capture, second-pass and failover settings, and the users' budgets and groups are re-read from Postgres (Go duration, positive). The longest a provider, price, policy, budget or group save made on another replica takes to apply here; see [Hot-reload](architecture.md#hot-reload). |
 | `SHUTDOWN_DRAIN` | `0s` | no | How long the server keeps accepting requests after `SIGTERM`, with `/readyz` answering `503 draining`, while the load balancer stops routing to it (Go duration). The Helm chart sets `5s`. |
 | `SHUTDOWN_TIMEOUT` | `10s` | no | How long in-flight requests, streams included, may then take to finish before the process exits (Go duration, positive). The Helm chart sets `20s`. |
 | `CAPTURE_BLOB_DIR` | `capture-blobs` | no | Filesystem directory for the capture blob store (relative to the working directory by default). The process runs as a non-root user, so point this at a writable path (compose uses `/tmp/airllm-captures`). Back it with a volume or object store on deploy. |
 | `UPSTREAM_CHAT_TIMEOUT` | `120s` | no | Ceiling on a single non-streaming call to an OpenAI-compatible or Vertex upstream — chat completions and embeddings (Go duration, positive). Independent of a target's own `timeout_ms` (see [Circuit breaker](#circuit-breaker)): that one can be set to `0` for an unbounded wait and is enforced by cancelling the attempt; this one is a hard ceiling the provider applies underneath it, regardless of `timeout_ms`. Raise it for a local upstream with a long time-to-first-token on non-streaming requests. |
+| `LIMITS_TZ` | `UTC` | no | IANA time zone (e.g. `Europe/Berlin`) the [per-user budget](#per-user-budgets-and-groups) periods follow: a day starts at 00:00, a week on Monday 00:00 (ISO week), a month on the 1st at 00:00 there. An unknown zone fails startup. |
 | `TRUSTED_PROXY_CIDRS` | loopback, private and link-local ranges | no | Comma-separated CIDRs whose `X-Forwarded-For` is believed when working out a client's IP (login lockout, live view). Set it to your ingress controller's pod CIDR; see [Operations → Security posture](operations.md#security-posture). |
 | `FORWARD_HEADERS` | — | no | Comma-separated request header names to copy onto the outbound upstream request for `/v1/chat/completions` and `/v1/embeddings` (OpenAI-compatible and Vertex providers; audio and the Google Speech/TTS kinds don't forward headers). Forwarding can never override `Content-Type`, `Authorization`, or (on a streaming call, the only one that sets it) `Accept`. A name matching `Authorization`, `X-Api-Key`, or another header the gateway needs for itself (see the full denylist in `internal/config`) is rejected at startup. Empty by default: no client header reaches an upstream unless named here. |
 
@@ -767,6 +768,41 @@ policy or a user's role list changes, and on every OIDC login; existing keys
 pick up policy edits immediately, no re-issue needed.
 
 See the [API reference](api.md) for request/response shapes.
+
+## Per-user budgets and groups
+
+An admin can cap what one **user** spends, across all of that user's API keys,
+per calendar day, ISO week and month, in tokens and in dollars
+(`PUT /api/admin/users/{id}` with `budgets`):
+
+```json
+{"tokens": {"day": 0, "week": 2000000, "month": 0}, "cost_usd": {"day": 5, "week": 0, "month": 50}}
+```
+
+A missing key or `0` is no cap. Tokens are prompt plus completion tokens, the
+same count the role limits use; cost is the ledger's cost. Periods follow
+`LIMITS_TZ` (default UTC). A request from a user who has reached a cap is
+refused with `429` in the protocol's error shape, e.g. `monthly cost budget
+$50.00 reached; resets 2026-12-01 00:00 UTC`. Usage is known only once a
+response finishes, so the request that crosses a cap is served and the next
+one is refused. The budget is checked before the role limits above; both
+apply, so the stricter wins. An edit applies at once on the replica that saved
+it and within `CONFIG_REFRESH_INTERVAL` on the others — keys need no
+re-issue. A key without an owner has no budget, and the second-pass job is
+not counted.
+
+Usage is counted in Redis under `air:ub:<user id>:<tok|cost>:<d|w|m>:<period>`
+(e.g. `2026-11-24`, `2026-W48`, `2026-11`), expiring a day after the period
+ends. The counters are a cache of the usage ledger: a missing one is rebuilt
+from the ledger on the next check, so losing Redis loses nothing. If Redis or
+the rebuild fails, requests are allowed and the error is logged.
+
+**Groups** (`/api/admin/groups`) label users for reporting — "developers",
+"finance" — and carry no budget. A user is in at most one group; deleting a
+group leaves its members ungrouped, as are users created by an OIDC login.
+`GET /api/admin/usage/groups` reports the current day, week or month per group
+and per user, attributing usage to each user's current group; users without
+one, and usage of deleted users, are reported as `Ungrouped`.
 
 ## Kubernetes (Helm chart)
 

@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	// The runtime image has no zoneinfo; LIMITS_TZ needs the zone database.
+	_ "time/tzdata"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/auth"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/blob"

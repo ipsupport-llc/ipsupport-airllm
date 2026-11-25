@@ -15,8 +15,9 @@ import (
 // Every replica keeps the provider registry, the price table and a few
 // settings rows in memory. A save through the admin API reloads them only on
 // the replica that served it; the others pick the change up from the database
-// on their next RefreshConfig. API keys and aliases are not here — the lookup
-// cache already re-asks for them after its TTL.
+// on their next RefreshConfig. So do the users' budgets and groups (see
+// budgets.go). API keys and aliases are not here — the lookup cache already
+// re-asks for them after its TTL.
 
 // settingAppliers lists the settings rows held in memory, and how each is
 // installed.
@@ -115,6 +116,9 @@ func (s *Server) RefreshConfig(ctx context.Context) {
 		slog.Warn("config refresh: prices not read; keeping the current ones", "err", err)
 	} else if s.pricing.Replace(prices) {
 		slog.Info("prices reloaded from the database", "prices", len(prices))
+	}
+	if err := s.loadUserInfoLocked(ctx); err != nil {
+		slog.Warn("config refresh: user budgets and groups not read; keeping the current ones", "err", err)
 	}
 	appliers := s.settingAppliers()
 	names := make([]string, 0, len(appliers))

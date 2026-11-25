@@ -117,14 +117,19 @@ func reserveTokensFor(maxTokens *int) int64 {
 	return defaultTokenReservation
 }
 
-// limitDenied checks the key's usage limits, optimistically reserving
+// limitDenied checks the key owner's calendar budgets, then the key's usage
+// limits, optimistically reserving
 // reserveTokens of token headroom when the check passes (see
 // Limiter.Check's doc) — pass 0 to skip reservation (e.g. for ingresses,
 // like audio, with no token dimension). It returns a 429-ready message and
 // true when the request must be rejected, plus the Decision so the caller
 // can thread its reservation fields through to finalizeUsage/Add. Redis
-// errors fail open.
+// errors fail open. The budget check runs first and reserves nothing, so a
+// request it refuses leaves no key reservation behind.
 func (s *Server) limitDenied(ctx context.Context, ak authedKey, reserveTokens int64) (string, bool, limits.Decision) {
+	if msg, denied := s.budgetDenied(ctx, ak.UserID); denied {
+		return msg, true, limits.Decision{}
+	}
 	dec, err := s.limiter.Check(ctx, ak.KeyID, ak.Policy.ParseLimits(), reserveTokens)
 	if err != nil {
 		slog.Error("limiter check failed; failing open", "err", err)
@@ -232,6 +237,9 @@ func (s *Server) finalizeUsage(ctx context.Context, entry ledger.Entry, keyID, u
 			slog.Error("limiter add failed", "err", err)
 		}
 	}
+	// Budgets count what the ledger row records, whatever the status: a
+	// stream that broke after it started still spent its tokens.
+	s.addBudgetUsage(sctx, entry.UserID, u.BilledTokens(), costMicro)
 	return entry
 }
 
@@ -278,6 +286,7 @@ func (s *Server) finalizeAudioUsage(ctx context.Context, entry ledger.Entry, key
 		if err := s.limiter.Add(sctx, keyID, 0, costMicro, audioSeconds, ttsChars, 0, 0); err != nil {
 			slog.Error("limiter add failed", "err", err)
 		}
+		s.addBudgetUsage(sctx, entry.UserID, 0, costMicro)
 	}
 }
 

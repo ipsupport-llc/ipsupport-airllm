@@ -57,6 +57,8 @@ services:
       OIDC_ALLOW_HTTP_ISSUER: ${OIDC_ALLOW_HTTP_ISSUER:-0}
       # Networks whose X-Forwarded-For is believed (empty = private ranges).
       TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
+      # Time zone of the per-user budget periods (IANA name).
+      LIMITS_TZ: ${LIMITS_TZ:-UTC}
       # sslmode=disable is fine here: Postgres is on the internal compose network only
       # (no host port, no MITM surface) and postgres-alpine ships no TLS.
       DATABASE_URL: "postgres://airllm:${POSTGRES_PASSWORD}@postgres:5432/airllm?sslmode=disable"
