@@ -150,3 +150,16 @@ test("renderFormField budgets: six cells, stored caps filled, 0 shown empty, lab
   assert.match(html, /data-budget="tokens\.day"[^>]*step="1"|step="1"[^>]*data-budget="tokens\.day"/);
   assert.match(html, /Budget &lt;tz&gt;/);
 });
+
+test("liveSummary: group and user names that are Object.prototype keys", () => {
+  const reqs = [
+    { user: "constructor", group: "__proto__", key_name: "k1" },
+    { user: "toString", group: "constructor", key_name: "k2" },
+  ];
+  const s = plain(ctx.liveSummary(reqs, { toString: { tokens: 5, cost_usd: 0.5 } }));
+  assert.deepEqual(s.groups.map((g) => g.group).sort(), ["__proto__", "constructor"]);
+  const byUser = Object.fromEntries(s.users.map((u) => [u.user, u]));
+  assert.equal(byUser.constructor.tokens, null);
+  assert.equal(byUser.toString.tokens, 5);
+  assert.equal({}.inflight, undefined);
+});

@@ -913,12 +913,12 @@ function orderGroupSpend(groups) {
 // active users per group, Ungrouped ("") last; its spend is null when no
 // member's spend is known.
 function liveSummary(requests, spendBySubject) {
-  const users = [], byKey = {};
+  const users = [], byKey = Object.create(null);
   (requests || []).forEach((r) => {
     const key = r.user ? "u:" + r.user : "k:" + (r.key_name || r.key_id || "");
     let u = byKey[key];
     if (!u) {
-      const sp = r.user && spendBySubject ? spendBySubject[r.user] : null;
+      const sp = r.user && spendBySubject && Object.prototype.hasOwnProperty.call(spendBySubject, r.user) ? spendBySubject[r.user] : null;
       u = byKey[key] = { user: r.user || "", key_name: r.user ? "" : (r.key_name || r.key_id || ""), group: r.group || "",
         inflight: 0, tokens: sp ? Number(sp.tokens) || 0 : null, cost_usd: sp ? Number(sp.cost_usd) || 0 : null };
       users.push(u);
@@ -927,7 +927,7 @@ function liveSummary(requests, spendBySubject) {
   });
   const name = (u) => u.user || u.key_name;
   users.sort((a, b) => b.inflight - a.inflight || name(a).localeCompare(name(b)));
-  const groups = [], byGroup = {};
+  const groups = [], byGroup = Object.create(null);
   users.forEach((u) => {
     let g = byGroup[u.group];
     if (!g) { g = byGroup[u.group] = { group: u.group, users: 0, inflight: 0, tokens: null, cost_usd: null }; groups.push(g); }
@@ -969,9 +969,9 @@ function fmtBytes(n) {
 // {session_id: "", requests: [r]} for everything else.
 function groupLive(requests) {
   const list = requests || [];
-  const count = {};
+  const count = Object.create(null);
   list.forEach((r) => { if (r.session_id) count[r.session_id] = (count[r.session_id] || 0) + 1; });
-  const out = [], bySession = {};
+  const out = [], bySession = Object.create(null);
   list.forEach((r) => {
     if (r.session_id && count[r.session_id] > 1) {
       if (!bySession[r.session_id]) { bySession[r.session_id] = { session_id: r.session_id, requests: [] }; out.push(bySession[r.session_id]); }
@@ -1063,7 +1063,7 @@ async function refreshLiveSpend() {
   const r = await api("GET", "/api/admin/users");
   if (!$("#live-root")) return; // navigated away meanwhile
   if (r.ok) {
-    live.spend = {};
+    live.spend = Object.create(null);
     ((r.data && r.data.users) || []).forEach((u) => { live.spend[u.subject] = (u.spend && u.spend.day) || { tokens: 0, cost_usd: 0 }; });
     live.spendErr = "";
   } else {
