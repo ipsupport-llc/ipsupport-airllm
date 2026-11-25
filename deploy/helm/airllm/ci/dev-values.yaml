@@ -1,5 +1,6 @@
 # Local dev shape: demo seed, non-default ports, a ReadWriteOnce capture PVC
-# (renders the Recreate strategy), and a raised startup probe budget.
+# (renders the Recreate strategy), and a startup probe override (exercises the
+# value; migrations no longer need a larger budget).
 existingSecret: airllm-secrets
 config:
   env: dev

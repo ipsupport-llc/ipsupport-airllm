@@ -6,8 +6,8 @@ import (
 )
 
 // swapHandler serves through whichever handler was stored last. The listener
-// opens before migrations run, behind bootHandler; run swaps in the real API
-// handler once setup has finished, on the same http.Server.
+// opens before migrations run, behind a bootHandler; run swaps in the real
+// API handler once setup has finished, on the same http.Server.
 type swapHandler struct {
 	h atomic.Pointer[http.Handler]
 }
@@ -25,19 +25,29 @@ func (s *swapHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	(*s.h.Load()).ServeHTTP(w, r)
 }
 
-// bootHandler answers while the gateway is still migrating and setting up:
-// the process is alive (/healthz, so the startup and liveness probes pass
-// however long a migration takes), but not ready (/readyz), and nothing else
-// is served yet.
-func bootHandler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		writeBootJSON(w, http.StatusOK, "starting")
-	})
-	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		writeBootJSON(w, http.StatusServiceUnavailable, "migrating")
-	})
-	return mux
+// bootHandler answers while the gateway is still setting up. It never
+// reports ready. /healthz passes only while migrations run (waiting for
+// another replica's migration lock included), so the startup probe stops
+// counting for as long as a migration takes; in every other boot phase it
+// fails, and a hang there (a datastore that never answers, OIDC discovery)
+// still runs out the startup probe's budget and restarts the pod.
+type bootHandler struct {
+	migrating atomic.Bool
+}
+
+// SetMigrating marks the start (true) and end (false) of migrations.
+func (b *bootHandler) SetMigrating(on bool) { b.migrating.Store(on) }
+
+func (b *bootHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !b.migrating.Load() {
+		writeBootJSON(w, http.StatusServiceUnavailable, "starting")
+		return
+	}
+	code := http.StatusServiceUnavailable
+	if r.URL.Path == "/healthz" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+		code = http.StatusOK
+	}
+	writeBootJSON(w, code, "migrating")
 }
 
 func writeBootJSON(w http.ResponseWriter, code int, status string) {

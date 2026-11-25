@@ -49,7 +49,10 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_usage_ledger_alias_ts
     ON usage_ledger (alias, ts);
 ```
 
-Keep to one index per file.
+One index per file, dropped first as above: `TestNoTxMigrationsDropIndexFirst`
+(in `internal/store`) fails the build for a no-transaction file with a
+`CREATE INDEX CONCURRENTLY` not preceded by `DROP INDEX CONCURRENTLY IF EXISTS`
+of the same name, or with more than one.
 
 ### Upgrading to this release
 
@@ -83,23 +86,34 @@ Keep to one index per file.
 ### Upgrades and long migrations
 
 The gateway opens its HTTP listener first, then connects to the datastores,
-runs pending migrations and finishes setup. Until that is done, `/healthz`
-answers `200 {"status":"starting"}` and `/readyz`, like every other route,
-`503 {"status":"migrating"}`. So the Helm chart's startup probe
-(`app.startupProbe`, ~60 s by default) only covers the process starting up,
-and readiness keeps the pod out of the Service until its migrations have
-finished — a long migration needs no larger probe budget. Under a rolling
-update the old pods keep serving until a new one is ready; with the `Recreate`
-strategy (a ReadWriteOnce capture volume) the gateway is down until the
-migration finishes. A `helm upgrade --wait` (or `--atomic`) timeout must still
-cover the migration, or Helm gives up on the rollout.
+runs pending migrations and finishes setup. Until setup is done, every route
+answers `503`, `/readyz` included, with `{"status":"starting"}`, or
+`{"status":"migrating"}` while migrations run. The one exception is `/healthz`,
+which answers `200 {"status":"migrating"}` for as long as migrations run,
+waiting for another replica's migration lock included.
+
+So the Helm chart's startup probe (`app.startupProbe`, ~60 s by default)
+covers all of boot except the migrations themselves: a long migration passes
+it, while a hang elsewhere (a datastore that never answers, OIDC discovery)
+still restarts the pod. Once a migration has passed the startup probe, the
+rest of setup falls under the liveness probe (3 × 10 s). Readiness keeps the
+pod out of the Service until setup has finished, and a long migration needs no
+larger probe budget. Under a rolling update the old pods keep serving until a
+new one is ready; with the `Recreate` strategy (a ReadWriteOnce capture
+volume) the gateway is down until the migration finishes. A
+`helm upgrade --wait` (or `--atomic`) timeout must still cover the migration,
+or Helm gives up on the rollout.
 
 Several new pods migrate one at a time (the migration advisory lock); the
 others wait, alive and not ready. A pod stopped mid-migration (a rollback, a
-node drain) rolls back that file's transaction, and the next pod starts it
-again from scratch. For an index on a big table, use a
-[no-transaction migration](#migrations) with `CREATE INDEX CONCURRENTLY`, so
-writes are not blocked for the whole build.
+node drain) rolls back the transaction of a regular migration file, and the
+next pod starts that file again from scratch. A
+[no-transaction file](#migrations) keeps the statements that already
+completed, and an interrupted `CREATE INDEX CONCURRENTLY` leaves an `INVALID`
+index; the next pod reruns the whole file, which is why those files are
+idempotent and drop the index first. For an index on a big table, use such a
+file with `CREATE INDEX CONCURRENTLY`, so writes are not blocked for the whole
+build.
 
 ## Security posture
 

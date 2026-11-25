@@ -98,10 +98,10 @@ app:
       enabled: false
       secretName: ""
   terminationGracePeriodSeconds: 30             # > config.shutdownDrain + config.shutdownTimeout
-  # Covers process start only (budget = periodSeconds x failureThreshold,
-  # default ~60s): the listener opens before schema migrations run, and
-  # readiness holds traffic until they finish, so a long migration needs no
-  # larger budget (see docs/operations.md#upgrades-and-long-migrations).
+  # Budget for booting (periodSeconds x failureThreshold, default ~60s),
+  # except schema migrations: /healthz passes while they run and readiness
+  # holds traffic until setup finishes, so a long migration needs no larger
+  # budget (see docs/operations.md#upgrades-and-long-migrations).
   startupProbe:
     periodSeconds: 3
     failureThreshold: 20

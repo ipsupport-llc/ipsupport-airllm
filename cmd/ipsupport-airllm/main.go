@@ -47,14 +47,15 @@ func run() error {
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	// Listen before connecting and migrating: a long migration must not look
 	// like a hung process to the startup probe. Until the swap at the end of
-	// setup only bootHandler is reachable (alive, not ready), so nothing
+	// setup only the boot handler is reachable (never ready), so nothing
 	// below races with a request.
-	handler := newSwapHandler(bootHandler())
+	boot := &bootHandler{}
+	handler := newSwapHandler(boot)
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           handler,
@@ -67,10 +68,15 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	serveErr := startServing(srv, ln)
+	sv := startServing(srv, ln)
 	// Closes the listener when setup fails; a no-op after serve's shutdown.
 	defer func() { _ = srv.Close() }()
 	slog.Info("listening", "addr", cfg.HTTPAddr)
+
+	// ctx is the signal context, also cancelled if the server stops: a dead
+	// listener aborts setup, a running migration included.
+	ctx, cancelCtx := cancelOnServeFailure(sigCtx, sv)
+	defer cancelCtx()
 
 	st, err := store.Open(ctx, cfg)
 	if err != nil {
@@ -78,7 +84,10 @@ func run() error {
 	}
 	defer st.Close()
 
-	if err := st.Migrate(ctx); err != nil {
+	boot.SetMigrating(true)
+	err = st.Migrate(ctx)
+	boot.SetMigrating(false)
+	if err != nil {
 		return err
 	}
 
@@ -294,41 +303,70 @@ func run() error {
 	spJob.Start(ctx, spInterval)
 	defer spJob.Stop()
 
+	// A setup step that ignores ctx can still finish after the server died.
+	select {
+	case <-sv.failed:
+		return sv.err
+	default:
+	}
 	handler.Store(apiSrv)
 	slog.Info("setup complete; serving the API", "addr", cfg.HTTPAddr)
-	return serve(ctx, srv, serveErr, cfg.ShutdownDrain, cfg.ShutdownTimeout, apiSrv.SetDraining)
+	return serve(sigCtx, srv, sv, cfg.ShutdownDrain, cfg.ShutdownTimeout, apiSrv.SetDraining)
 }
 
-// startServing runs srv on ln in the background. The channel receives the
-// error Serve stops with, unless that is Shutdown or Close.
-func startServing(srv *http.Server, ln net.Listener) <-chan error {
-	errCh := make(chan error, 1)
+// serving is an http.Server running in the background. failed is closed,
+// after err is set, if Serve stops for any reason other than Shutdown or
+// Close.
+type serving struct {
+	failed chan struct{}
+	err    error
+}
+
+// startServing runs srv on ln in the background.
+func startServing(srv *http.Server, ln net.Listener) *serving {
+	sv := &serving{failed: make(chan struct{})}
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
+			sv.err = err
+			close(sv.failed)
 		}
 	}()
-	return errCh
+	return sv
 }
 
-// serve lets srv (started by startServing, which returned errCh) run until
-// ctx is cancelled, then shuts down in two steps. For drain it keeps
-// accepting requests — a load balancer takes a moment to stop routing to a
-// pod that is going away, and a connection refused in that window fails a
-// request a healthy replica would have served. draining is
-// called as the drain starts (readiness reports it). Then it stops accepting
-// and gives in-flight requests, streams included, up to timeout to finish.
-func serve(ctx context.Context, srv *http.Server, errCh <-chan error, drain, timeout time.Duration, draining func()) error {
+// cancelOnServeFailure returns a child of parent that is also cancelled,
+// with the Serve error as its cause, as soon as sv fails.
+func cancelOnServeFailure(parent context.Context, sv *serving) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancelCause(parent)
+	go func() {
+		select {
+		case <-sv.failed:
+			slog.Error("http server stopped; aborting", "err", sv.err)
+			cancel(fmt.Errorf("http server: %w", sv.err))
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, func() { cancel(nil) }
+}
+
+// serve lets srv (started by startServing as sv) run until ctx is
+// cancelled, then shuts down in two steps. For drain it keeps accepting
+// requests — a load balancer takes a moment to stop routing to a pod that is
+// going away, and a connection refused in that window fails a request a
+// healthy replica would have served. draining is called as the drain starts
+// (readiness reports it). Then it stops accepting and gives in-flight
+// requests, streams included, up to timeout to finish.
+func serve(ctx context.Context, srv *http.Server, sv *serving, drain, timeout time.Duration, draining func()) error {
 	select {
-	case err := <-errCh:
-		return err
+	case <-sv.failed:
+		return sv.err
 	case <-ctx.Done():
 	}
 	slog.Info("shutting down", "drain", drain, "timeout", timeout)
 	draining()
 	select {
-	case err := <-errCh:
-		return err
+	case <-sv.failed:
+		return sv.err
 	case <-time.After(drain):
 	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
