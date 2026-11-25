@@ -98,9 +98,10 @@ app:
       enabled: false
       secretName: ""
   terminationGracePeriodSeconds: 30             # > config.shutdownDrain + config.shutdownTimeout
-  # Schema migrations run before the HTTP listener starts, so the startup probe
-  # must cover the longest migration: budget = periodSeconds x failureThreshold
-  # (default ~60s). Raise failureThreshold for an upgrade with a big migration
+  # Budget for boot up to the schema migrations (periodSeconds x
+  # failureThreshold, default ~60s). /healthz passes while a migration runs
+  # and for 60s after, and readiness holds traffic until setup finishes, so a
+  # long migration needs no larger budget
   # (see docs/operations.md#upgrades-and-long-migrations).
   startupProbe:
     periodSeconds: 3

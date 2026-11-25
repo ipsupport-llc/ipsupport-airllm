@@ -117,10 +117,12 @@ spec:
               value: {{ include "airllm.gcpWifCredentialFile" . | quote }}
             {{- end }}
           startupProbe:
-            # Gates liveness until the app has booted. Migrations run before the
-            # listener starts, so a long migration needs a larger budget
-            # (periodSeconds x failureThreshold; default ~60s) — see
-            # docs/operations.md#upgrades-and-long-migrations.
+            # Budget (periodSeconds x failureThreshold; default ~60s) for boot
+            # up to the migrations, waiting for the migration lock included.
+            # /healthz passes while this pod holds the lock and migrates, and
+            # for 60s after (the rest of setup's budget), so a long migration
+            # passes this probe. /readyz keeps traffic away until all of setup
+            # is done — see docs/operations.md#upgrades-and-long-migrations.
             httpGet:
               path: /healthz
               port: http
