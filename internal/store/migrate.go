@@ -19,25 +19,26 @@ const migrationLockKey = 72_70_01
 // noTxDirective, as the exact first line of a migration file, makes Migrate
 // run that file outside a transaction (still under the advisory lock), one
 // statement at a time, and record it in schema_migrations afterwards. It
-// exists for statements Postgres refuses inside a transaction block, chiefly
-// CREATE INDEX CONCURRENTLY, which builds an index on a big table without
+// exists for CREATE INDEX CONCURRENTLY, which Postgres refuses inside a
+// transaction block and which builds an index on a big table without
 // blocking writes for the whole build.
 //
 // A failure part-way leaves whatever already ran in place, and the file is
-// rerun from the top on the next boot, so every statement in such a file
-// must be idempotent (IF NOT EXISTS / IF EXISTS). A failed or interrupted
+// rerun from the top on the next boot. A failed or interrupted
 // CREATE INDEX CONCURRENTLY also leaves an INVALID index behind, which
-// IF NOT EXISTS would then skip — drop it first:
+// IF NOT EXISTS would then skip. So such a file holds exactly this shape:
+// one index, dropped first, then created IF NOT EXISTS under the same name,
+// and nothing else (a non-idempotent statement that committed before a crash
+// would fail every rerun):
 //
 //	-- airllm:no-transaction
 //	DROP INDEX CONCURRENTLY IF EXISTS idx_usage_ledger_alias_ts;
 //	CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_usage_ledger_alias_ts
 //	    ON usage_ledger (alias, ts);
 //
-// The DROP also rebuilds an index that a previous attempt finished without
-// getting to record the file, which is only time lost. One index per file,
-// dropped first: TestNoTxMigrationsDropIndexFirst enforces both. See
-// docs/operations.md#migrations.
+// TestNoTxMigrationsDropIndexFirst enforces the shape. The DROP also
+// rebuilds an index that a previous attempt finished without getting to
+// record the file, which is only time lost. See docs/operations.md#migrations.
 const noTxDirective = "-- airllm:no-transaction"
 
 // Migrate applies any embedded *.sql migrations not yet recorded, in
@@ -60,12 +61,19 @@ const noTxDirective = "-- airllm:no-transaction"
 // releasing) it on a different physical connection than the one that holds
 // it.
 func (s *Store) Migrate(ctx context.Context) error {
-	return s.migrate(ctx, migrations.FS)
+	return s.migrate(ctx, migrations.FS, nil)
+}
+
+// MigrateNotify is Migrate that calls onLocked once it holds the migration
+// lock, before applying anything; until then it may only be waiting for a
+// connection or for another process's migration.
+func (s *Store) MigrateNotify(ctx context.Context, onLocked func()) error {
+	return s.migrate(ctx, migrations.FS, onLocked)
 }
 
 // migrate is Migrate over an arbitrary set of migration files, so tests can
 // supply their own without touching the real migrations directory.
-func (s *Store) migrate(ctx context.Context, fsys fs.FS) error {
+func (s *Store) migrate(ctx context.Context, fsys fs.FS, onLocked func()) error {
 	conn, err := s.PG.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire migration connection: %w", err)
@@ -82,6 +90,9 @@ func (s *Store) migrate(ctx context.Context, fsys fs.FS) error {
 			slog.Error("migration: failed to release advisory lock", "err", err)
 		}
 	}()
+	if onLocked != nil {
+		onLocked()
+	}
 
 	if _, err := conn.Exec(ctx,
 		`CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -156,75 +167,165 @@ func (s *Store) migrate(ctx context.Context, fsys fs.FS) error {
 	return nil
 }
 
-// splitStatements splits a SQL script into its statements on top-level
-// semicolons, skipping those inside quotes, dollar quotes and comments.
-// Statements that hold nothing but comments and whitespace are dropped.
-func splitStatements(script string) []string {
-	var out []string
-	start, hasCode := 0, false
-	flush := func(end int) {
-		if hasCode {
-			out = append(out, strings.TrimSpace(script[start:end]))
-		}
-		start, hasCode = end+1, false
-	}
-	for i := 0; i < len(script); i++ {
-		c := script[i]
+// sqlSegKind classifies a piece of SQL source for splitStatements.
+type sqlSegKind int
+
+const (
+	segCode      sqlSegKind = iota // keywords, names, operators, numbers
+	segSpace                       // whitespace
+	segComment                     // -- or (nested) /* */ comment
+	segQuoted                      // '...', E'...', "...", $tag$...$tag$
+	segSemicolon                   // a top-level ;
+)
+
+type sqlSeg struct {
+	kind sqlSegKind
+	text string
+}
+
+// lexSQL cuts a SQL script into segments that concatenate back to it. It
+// knows just enough of Postgres's lexer to tell a top-level semicolon from
+// one inside a string, quoted name, dollar quote or comment.
+func lexSQL(script string) []sqlSeg {
+	var segs []sqlSeg
+	for i := 0; i < len(script); {
+		start, c := i, script[i]
+		var kind sqlSegKind
 		switch {
 		case c == ';':
-			flush(i)
-		case c == '-' && strings.HasPrefix(script[i:], "--"):
+			kind, i = segSemicolon, i+1
+		case isSpace(c):
+			kind = segSpace
+			for i < len(script) && isSpace(script[i]) {
+				i++
+			}
+		case strings.HasPrefix(script[i:], "--"):
+			kind = segComment
 			if n := strings.IndexByte(script[i:], '\n'); n >= 0 {
 				i += n
 			} else {
 				i = len(script)
 			}
-		case c == '/' && strings.HasPrefix(script[i:], "/*"):
+		case strings.HasPrefix(script[i:], "/*"):
 			// Block comments nest in Postgres.
-			depth := 0
-			for ; i < len(script); i++ {
+			kind = segComment
+			for depth := 0; i < len(script); {
 				if strings.HasPrefix(script[i:], "/*") {
-					depth++
-					i++
+					depth, i = depth+1, i+2
 				} else if strings.HasPrefix(script[i:], "*/") {
-					depth--
-					i++
+					depth, i = depth-1, i+2
 					if depth == 0 {
 						break
 					}
+				} else {
+					i++
 				}
 			}
 		case c == '\'' || c == '"':
-			// A doubled quote is part of the string. E'...' strings also
-			// escape with a backslash.
-			escapes := c == '\'' && i > 0 && (script[i-1] == 'E' || script[i-1] == 'e') && (i < 2 || !isIdentByte(script[i-2]))
-			hasCode = true
-			for i++; i < len(script); i++ {
-				if escapes && script[i] == '\\' {
-					i++
-				} else if script[i] == c {
-					if i+1 < len(script) && script[i+1] == c {
-						i++
-						continue
-					}
-					break
-				}
-			}
+			kind, i = segQuoted, quotedEnd(script, i)
 		case c == '$' && (i == 0 || !isIdentByte(script[i-1])):
-			hasCode = true
-			if tag, ok := dollarTag(script[i:]); ok {
-				if n := strings.Index(script[i+len(tag):], tag); n >= 0 {
-					i += len(tag) + n + len(tag) - 1
+			kind, i = segCode, i+1
+			if tag, ok := dollarTag(script[start:]); ok {
+				kind = segQuoted
+				if n := strings.Index(script[start+len(tag):], tag); n >= 0 {
+					i = start + len(tag) + n + len(tag)
 				} else {
 					i = len(script)
 				}
 			}
-		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
 		default:
+			kind, i = segCode, i+1
+		}
+		if n := len(segs); kind == segCode && n > 0 && segs[n-1].kind == segCode {
+			segs[n-1].text += script[start:i]
+			continue
+		}
+		segs = append(segs, sqlSeg{kind, script[start:i]})
+	}
+	return segs
+}
+
+// quotedEnd returns the index just past the string or quoted name that
+// opens at s[i]. A doubled quote is part of it. An E'...' string also
+// escapes with a backslash, and like Postgres, a '...' string continues in
+// the next '...' when only whitespace with a newline separates them, which
+// keeps E's escapes in effect.
+func quotedEnd(s string, i int) int {
+	q := s[i]
+	escapes := q == '\'' && i > 0 && (s[i-1] == 'E' || s[i-1] == 'e') && (i < 2 || !isIdentByte(s[i-2]))
+	for i++; i < len(s); i++ {
+		switch {
+		case escapes && s[i] == '\\':
+			i++
+		case s[i] == q:
+			if i+1 < len(s) && s[i+1] == q {
+				i++
+				continue
+			}
+			if q == '\'' {
+				if j, ok := stringContinues(s, i+1); ok {
+					i = j
+					continue
+				}
+			}
+			return i + 1
+		}
+	}
+	return len(s)
+}
+
+// stringContinues reports whether s[j:] is Postgres's quote continuation:
+// horizontal whitespace, a newline, then whitespace or -- comments, then a
+// quote, whose index it returns.
+func stringContinues(s string, j int) (int, bool) {
+	for j < len(s) && (s[j] == ' ' || s[j] == '\t' || s[j] == '\f') {
+		j++
+	}
+	if j >= len(s) || (s[j] != '\n' && s[j] != '\r') {
+		return 0, false
+	}
+	for j < len(s) {
+		switch {
+		case isSpace(s[j]):
+			j++
+		case strings.HasPrefix(s[j:], "--"):
+			n := strings.IndexByte(s[j:], '\n')
+			if n < 0 {
+				return 0, false
+			}
+			j += n + 1
+		default:
+			return j, s[j] == '\''
+		}
+	}
+	return 0, false
+}
+
+// splitStatements splits a SQL script into its statements on top-level
+// semicolons. Statements that hold nothing but comments and whitespace are
+// dropped.
+func splitStatements(script string) []string {
+	var out []string
+	var cur strings.Builder
+	hasCode := false
+	flush := func() {
+		if hasCode {
+			out = append(out, strings.TrimSpace(cur.String()))
+		}
+		cur.Reset()
+		hasCode = false
+	}
+	for _, seg := range lexSQL(script) {
+		if seg.kind == segSemicolon {
+			flush()
+			continue
+		}
+		cur.WriteString(seg.text)
+		if seg.kind == segCode || seg.kind == segQuoted {
 			hasCode = true
 		}
 	}
-	flush(len(script))
+	flush()
 	return out
 }
 
@@ -245,4 +346,8 @@ func dollarTag(s string) (string, bool) {
 
 func isIdentByte(c byte) bool {
 	return c == '_' || c == '$' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c >= 0x80
+}
+
+func isSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'
 }

@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"io/fs"
 	"reflect"
-	"regexp"
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/testdb"
 	"github.com/ipsupport-llc/ipsupport-airllm/migrations"
@@ -30,6 +30,9 @@ func TestSplitStatements(t *testing.T) {
 		{"escape string", `SELECT E'a\';b'; SELECT 2`, []string{`SELECT E'a\';b'`, "SELECT 2"}},
 		{"escape string with doubled quote", `SELECT E'a''b\';c'; SELECT 2;`, []string{`SELECT E'a''b\';c'`, "SELECT 2"}},
 		{"escape string ending in a backslash", `SELECT E'a\\'; SELECT 2`, []string{`SELECT E'a\\'`, "SELECT 2"}},
+		{"escape string continued on the next line", "SELECT E'a'\n'b\\';c';\nSELECT 2;", []string{"SELECT E'a'\n'b\\';c'", "SELECT 2"}},
+		{"escape string continued past a comment line", "SELECT E'a'  \n-- note\n\t'b\\';c'; SELECT 2", []string{"SELECT E'a'  \n-- note\n\t'b\\';c'", "SELECT 2"}},
+		{"standard string continued on the next line", "SELECT 'a'\n'b;c'; SELECT 2", []string{"SELECT 'a'\n'b;c'", "SELECT 2"}},
 		{"standard string with doubled quotes", "SELECT 'x'';y''', ''';'; SELECT 2", []string{"SELECT 'x'';y''', ''';'", "SELECT 2"}},
 		{"standard string keeps backslash literal", `SELECT 'a\'; SELECT 2`, []string{`SELECT 'a\'`, "SELECT 2"}},
 		{"quoted identifier with doubled quote", `SELECT 1 AS "a"";b"; SELECT 2`, []string{`SELECT 1 AS "a"";b"`, "SELECT 2"}},
@@ -118,7 +121,7 @@ DROP INDEX CONCURRENTLY IF EXISTS items_v_idx;
 CREATE INDEX CONCURRENTLY IF NOT EXISTS items_v_idx ON items (v);
 `)},
 	}
-	if err := st.migrate(ctx, files); err != nil {
+	if err := st.migrate(ctx, files, nil); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	if exists, valid := indexValid(t, st, schema, "items_v_idx"); !exists || !valid {
@@ -129,14 +132,14 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS items_v_idx ON items (v);
 			t.Errorf("%s not recorded in schema_migrations", v)
 		}
 	}
-	if err := st.migrate(ctx, files); err != nil {
+	if err := st.migrate(ctx, files, nil); err != nil {
 		t.Errorf("second migrate (nothing pending) = %v", err)
 	}
 
 	// Control: without the directive the same statement runs in a
 	// transaction, which Postgres refuses, and nothing is recorded.
 	files["0003_in_tx.sql"] = &fstest.MapFile{Data: []byte(`CREATE INDEX CONCURRENTLY items_id_v_idx ON items (id, v);`)}
-	if err := st.migrate(ctx, files); err == nil || !strings.Contains(err.Error(), "transaction block") {
+	if err := st.migrate(ctx, files, nil); err == nil || !strings.Contains(err.Error(), "transaction block") {
 		t.Errorf("CONCURRENTLY inside a transaction = %v, want a transaction-block error", err)
 	}
 	if applied(t, st, "0003_in_tx.sql") {
@@ -161,7 +164,7 @@ DROP INDEX CONCURRENTLY IF EXISTS items_v_key;
 CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS items_v_key ON items (v);
 `)},
 	}
-	if err := st.migrate(ctx, files); err == nil {
+	if err := st.migrate(ctx, files, nil); err == nil {
 		t.Fatal("migrate succeeded over duplicate values, want a unique violation")
 	}
 	if exists, valid := indexValid(t, st, schema, "items_v_key"); !exists || valid {
@@ -174,7 +177,7 @@ CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS items_v_key ON items (v);
 	if _, err := st.PG.Exec(ctx, `DELETE FROM items WHERE id = 2`); err != nil {
 		t.Fatalf("remove duplicate: %v", err)
 	}
-	if err := st.migrate(ctx, files); err != nil {
+	if err := st.migrate(ctx, files, nil); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
 	if exists, valid := indexValid(t, st, schema, "items_v_key"); !exists || !valid {
@@ -185,11 +188,86 @@ CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS items_v_key ON items (v);
 	}
 }
 
-var (
-	createConcurrently = regexp.MustCompile(`(?is)^CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+(?:IF\s+NOT\s+EXISTS\s+)?("(?:[^"]|"")+"|[^\s(]+)`)
-	dropConcurrently   = regexp.MustCompile(`(?is)^DROP\s+INDEX\s+CONCURRENTLY\s+IF\s+EXISTS\s+("(?:[^"]|"")+"|[^\s;]+)$`)
-	lineComment        = regexp.MustCompile(`--[^\n]*`)
-)
+// TestMigrateNotifyCallsOnLockedOnlyOnceTheLockIsHeld: the boot phase that
+// keeps the pod live is entered through onLocked, so it must not fire while
+// Migrate still waits for another process's lock, and must fire before any
+// file is applied.
+func TestMigrateNotifyCallsOnLockedOnlyOnceTheLockIsHeld(t *testing.T) {
+	st := isolatedStore(t, "migrate_onlocked")
+	ctx := context.Background()
+
+	held, err := st.PG.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire held conn: %v", err)
+	}
+	defer held.Release()
+	if _, err := held.Exec(ctx, `SELECT pg_advisory_lock($1)`, int64(migrationLockKey)); err != nil {
+		t.Fatalf("take the lock: %v", err)
+	}
+
+	locked := make(chan bool, 1) // whether the items table was still missing
+	files := fstest.MapFS{"0001_items.sql": {Data: []byte(`CREATE TABLE items (id int PRIMARY KEY);`)}}
+	done := make(chan error, 1)
+	go func() {
+		done <- st.migrate(ctx, files, func() {
+			var missing bool
+			_ = st.PG.QueryRow(ctx, `SELECT to_regclass('items') IS NULL`).Scan(&missing)
+			locked <- missing
+		})
+	}()
+
+	select {
+	case <-locked:
+		t.Fatal("onLocked ran while another connection held the migration lock")
+	case err := <-done:
+		t.Fatalf("migrate returned (%v) while the lock was held", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	if _, err := held.Exec(ctx, `SELECT pg_advisory_unlock($1)`, int64(migrationLockKey)); err != nil {
+		t.Fatalf("release the lock: %v", err)
+	}
+	select {
+	case missing := <-locked:
+		if !missing {
+			t.Error("onLocked ran after a migration was applied, want before")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("onLocked never ran after the lock was released")
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+}
+
+// sqlTokens is stmt's tokens with comments and whitespace dropped, using the
+// migrator's own lexer: a string or quoted name is one token, and so is each
+// of ( ) , — everything else runs together between those.
+func sqlTokens(stmt string) []string {
+	var toks []string
+	for _, seg := range lexSQL(stmt) {
+		switch seg.kind {
+		case segQuoted:
+			toks = append(toks, seg.text)
+		case segCode:
+			word := ""
+			for _, r := range seg.text {
+				if strings.ContainsRune("(),", r) {
+					if word != "" {
+						toks = append(toks, word)
+					}
+					toks, word = append(toks, string(r)), ""
+					continue
+				}
+				word += string(r)
+			}
+			if word != "" {
+				toks = append(toks, word)
+			}
+		}
+	}
+	return toks
+}
 
 // indexName folds an index name the way Postgres does: a quoted name keeps
 // its case, an unquoted one is lowercased; a schema prefix is dropped.
@@ -205,64 +283,81 @@ func indexName(raw string) string {
 	return strings.ToLower(raw)
 }
 
-// checkNoTxIndexes enforces the rule for a no-transaction migration: at
-// most one CREATE INDEX CONCURRENTLY, named, and preceded in the same file
-// by DROP INDEX CONCURRENTLY IF EXISTS of that name — the drop clears an
-// INVALID index a failed earlier attempt left behind, which IF NOT EXISTS
-// would otherwise keep.
-func checkNoTxIndexes(sql string) error {
-	dropped := map[string]bool{}
-	creates := 0
-	for _, stmt := range splitStatements(sql) {
-		stmt = strings.TrimSpace(lineComment.ReplaceAllString(stmt, ""))
-		if m := dropConcurrently.FindStringSubmatch(stmt); m != nil {
-			dropped[indexName(m[1])] = true
-			continue
+func hasKeywords(toks []string, words ...string) bool {
+	if len(toks) < len(words) {
+		return false
+	}
+	for i, w := range words {
+		if !strings.EqualFold(toks[i], w) {
+			return false
 		}
-		m := createConcurrently.FindStringSubmatch(stmt)
-		if m == nil {
-			continue
-		}
-		if creates++; creates > 1 {
-			return errors.New("more than one CREATE INDEX CONCURRENTLY; put each index in its own file")
-		}
-		if strings.EqualFold(m[1], "ON") {
-			return errors.New("CREATE INDEX CONCURRENTLY without an index name; name it so it can be dropped first")
-		}
-		if name := indexName(m[1]); !dropped[name] {
-			return fmt.Errorf("CREATE INDEX CONCURRENTLY %s is not preceded by DROP INDEX CONCURRENTLY IF EXISTS %s", name, name)
-		}
+	}
+	return true
+}
+
+const noTxShape = "a no-transaction migration must be exactly `DROP INDEX CONCURRENTLY IF EXISTS <name>; CREATE [UNIQUE] INDEX CONCURRENTLY IF NOT EXISTS <name> ON ...`"
+
+// checkNoTxFile enforces the only shape a no-transaction migration may
+// have (see noTxDirective): DROP INDEX CONCURRENTLY IF EXISTS <name>, then
+// one CREATE [UNIQUE] INDEX CONCURRENTLY IF NOT EXISTS <name>, nothing else.
+func checkNoTxFile(sql string) error {
+	stmts := splitStatements(sql)
+	if len(stmts) != 2 {
+		return fmt.Errorf("%d statements; %s", len(stmts), noTxShape)
+	}
+	drop := sqlTokens(stmts[0])
+	if len(drop) != 6 || !hasKeywords(drop, "DROP", "INDEX", "CONCURRENTLY", "IF", "EXISTS") {
+		return fmt.Errorf("first statement %q; %s", stmts[0], noTxShape)
+	}
+	create := sqlTokens(stmts[1])
+	if len(create) > 1 && strings.EqualFold(create[1], "UNIQUE") {
+		create = append([]string{create[0]}, create[2:]...)
+	}
+	if len(create) < 8 || !hasKeywords(create, "CREATE", "INDEX", "CONCURRENTLY", "IF", "NOT", "EXISTS") || !strings.EqualFold(create[7], "ON") {
+		return fmt.Errorf("second statement %q; %s", stmts[1], noTxShape)
+	}
+	if d, c := indexName(drop[5]), indexName(create[6]); d != c {
+		return fmt.Errorf("drops index %s but creates %s; %s", d, c, noTxShape)
 	}
 	return nil
 }
 
-func TestCheckNoTxIndexes(t *testing.T) {
+func TestCheckNoTxFile(t *testing.T) {
+	const drop = "DROP INDEX CONCURRENTLY IF EXISTS a_idx;\n"
 	for _, tc := range []struct {
 		name, sql string
 		ok        bool
 	}{
-		{"drop then create", "DROP INDEX CONCURRENTLY IF EXISTS a_idx;\nCREATE INDEX CONCURRENTLY IF NOT EXISTS a_idx ON t (a);", true},
-		{"unique, schema-qualified drop, mixed case", "drop index concurrently if exists public.A_IDX;\ncreate unique index concurrently a_idx on t (a);", true},
-		{"quoted name", `DROP INDEX CONCURRENTLY IF EXISTS "A idx"; CREATE INDEX CONCURRENTLY "A idx" ON t (a);`, true},
-		{"no index at all", "ALTER TABLE t ADD COLUMN IF NOT EXISTS b int;", true},
+		{"canonical", noTxDirective + "\n" + drop + "CREATE INDEX CONCURRENTLY IF NOT EXISTS a_idx ON t (a);\n", true},
+		{"unique, lower case, schema-qualified drop", "drop index concurrently if exists public.A_IDX;\ncreate unique index concurrently if not exists a_idx on t(a) where a > 0;", true},
+		{"quoted name", `DROP INDEX CONCURRENTLY IF EXISTS "A idx"; CREATE INDEX CONCURRENTLY IF NOT EXISTS "A idx" ON t (a);`, true},
+		{"comments anywhere", "-- why\n" + drop + "CREATE /* x; */ INDEX -- y\n CONCURRENTLY IF NOT EXISTS a_idx ON t (a); -- done\n", true},
+
 		{"no drop", "CREATE INDEX CONCURRENTLY IF NOT EXISTS a_idx ON t (a);", false},
-		{"drop after create", "CREATE INDEX CONCURRENTLY a_idx ON t (a);\nDROP INDEX CONCURRENTLY IF EXISTS a_idx;", false},
-		{"drop of another index", "DROP INDEX CONCURRENTLY IF EXISTS b_idx;\nCREATE INDEX CONCURRENTLY a_idx ON t (a);", false},
-		{"drop only in a comment", "-- DROP INDEX CONCURRENTLY IF EXISTS a_idx;\nCREATE INDEX CONCURRENTLY a_idx ON t (a);", false},
-		{"quoted name differs in case", `DROP INDEX CONCURRENTLY IF EXISTS a_idx; CREATE INDEX CONCURRENTLY "A_idx" ON t (a);`, false},
-		{"unnamed", "CREATE INDEX CONCURRENTLY ON t (a);", false},
-		{"two indexes", "DROP INDEX CONCURRENTLY IF EXISTS a_idx;\nCREATE INDEX CONCURRENTLY a_idx ON t (a);\nDROP INDEX CONCURRENTLY IF EXISTS b_idx;\nCREATE INDEX CONCURRENTLY b_idx ON t (b);", false},
+		{"create without IF NOT EXISTS", drop + "CREATE INDEX CONCURRENTLY a_idx ON t (a);", false},
+		{"drop after create", "CREATE INDEX CONCURRENTLY IF NOT EXISTS a_idx ON t (a);\n" + drop, false},
+		{"drop of another index", "DROP INDEX CONCURRENTLY IF EXISTS b_idx;\nCREATE INDEX CONCURRENTLY IF NOT EXISTS a_idx ON t (a);", false},
+		{"drop only in a line comment", "-- DROP INDEX CONCURRENTLY IF EXISTS a_idx;\nCREATE INDEX CONCURRENTLY IF NOT EXISTS a_idx ON t (a);", false},
+		{"drop only in a block comment", "/* DROP INDEX CONCURRENTLY IF EXISTS a_idx; */ CREATE INDEX CONCURRENTLY IF NOT EXISTS a_idx ON t (a);", false},
+		{"nested block comment hides the create", drop + "/* /* */ CREATE INDEX CONCURRENTLY IF NOT EXISTS a_idx ON t (a); */ ALTER TABLE t ADD COLUMN b int;", false},
+		{"comment between keywords hides a missing drop", "CREATE /**/ INDEX CONCURRENTLY IF NOT EXISTS a_idx ON t (a);", false},
+		{"drop without IF EXISTS", "DROP INDEX CONCURRENTLY a_idx;\nCREATE INDEX CONCURRENTLY IF NOT EXISTS a_idx ON t (a);", false},
+		{"quoted name differs in case", `DROP INDEX CONCURRENTLY IF EXISTS a_idx; CREATE INDEX CONCURRENTLY IF NOT EXISTS "A_idx" ON t (a);`, false},
+		{"unnamed", drop + "CREATE INDEX CONCURRENTLY ON t (a);", false},
+		{"extra ALTER", drop + "CREATE INDEX CONCURRENTLY IF NOT EXISTS a_idx ON t (a);\nALTER TABLE t ADD COLUMN b int;", false},
+		{"only an ALTER", "ALTER TABLE t ADD COLUMN IF NOT EXISTS b int;", false},
+		{"two indexes", drop + "CREATE INDEX CONCURRENTLY IF NOT EXISTS a_idx ON t (a);\nDROP INDEX CONCURRENTLY IF EXISTS b_idx;\nCREATE INDEX CONCURRENTLY IF NOT EXISTS b_idx ON t (b);", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := checkNoTxIndexes(tc.sql); (err == nil) != tc.ok {
-				t.Errorf("checkNoTxIndexes = %v, want ok=%v", err, tc.ok)
+			if err := checkNoTxFile(tc.sql); (err == nil) != tc.ok {
+				t.Errorf("checkNoTxFile = %v, want ok=%v", err, tc.ok)
 			}
 		})
 	}
 }
 
 // TestNoTxMigrationsDropIndexFirst gates every real no-transaction migration
-// on checkNoTxIndexes (see noTxDirective).
+// on checkNoTxFile (see noTxDirective).
 func TestNoTxMigrationsDropIndexFirst(t *testing.T) {
 	entries, err := fs.ReadDir(migrations.FS, ".")
 	if err != nil {
@@ -279,7 +374,7 @@ func TestNoTxMigrationsDropIndexFirst(t *testing.T) {
 		if first, _, _ := strings.Cut(string(b), "\n"); strings.TrimSuffix(first, "\r") != noTxDirective {
 			continue
 		}
-		if err := checkNoTxIndexes(string(b)); err != nil {
+		if err := checkNoTxFile(string(b)); err != nil {
 			t.Errorf("%s: %v", e.Name(), err)
 		}
 	}
