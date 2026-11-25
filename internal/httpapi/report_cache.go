@@ -83,7 +83,7 @@ func (s *Server) cachedSpendByUser(ctx context.Context) (map[string]map[budget.P
 	key := "spend:" + periods[budget.Day].Start.Format(time.RFC3339) + ":" +
 		periods[budget.Week].Start.Format(time.RFC3339) + ":" + periods[budget.Month].Start.Format(time.RFC3339)
 	v, err := s.reports.get(key, s.clock(), func() (any, error) {
-		return s.spendByUser(ctx, periods, "")
+		return s.spendByUser(ctx, periods)
 	})
 	if err != nil {
 		return nil, err

@@ -14,6 +14,10 @@ import (
 
 // Entry is a single usage record.
 type Entry struct {
+	// TS is when the request settled, stamped by the gateway so that the row
+	// and the per-user budget counters agree on its day, week and month;
+	// zero = the insert's own now().
+	TS               time.Time
 	KeyID            string // uuid; empty -> NULL
 	UserID           string // uuid; empty -> NULL
 	Alias            string
@@ -141,12 +145,12 @@ func (l *Ledger) write(e Entry) {
 			key_id, user_id, alias, provider_name, upstream_model,
 			ingress_protocol, upstream_protocol,
 			prompt_tokens, completion_tokens, reasoning_tokens, cost_usd,
-			status, latency_ms, error, tier, attempts, session, cached
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+			status, latency_ms, error, tier, attempts, session, cached, ts
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18, COALESCE($19, now()))`,
 		nullUUID(e.KeyID), nullUUID(e.UserID), e.Alias, e.ProviderName, e.UpstreamModel,
 		e.IngressProtocol, e.UpstreamProtocol,
 		e.PromptTokens, e.CompletionTokens, e.ReasoningTokens, e.CostUSD,
-		e.Status, e.LatencyMS, e.ErrorMsg, e.Tier, e.Attempts, nullString(e.Session), e.Cached,
+		e.Status, e.LatencyMS, e.ErrorMsg, e.Tier, e.Attempts, nullString(e.Session), e.Cached, nullTime(e.TS),
 	)
 	if err != nil {
 		slog.Error("ledger record failed", "err", err, "provider", e.ProviderName, "model", e.UpstreamModel)
@@ -158,6 +162,13 @@ func nullUUID(s string) any {
 		return nil
 	}
 	return s
+}
+
+func nullTime(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return t
 }
 
 func nullString(s string) any {

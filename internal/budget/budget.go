@@ -6,7 +6,9 @@
 // counters are a cache of the usage ledger: a counter that is missing when a
 // request is checked is rebuilt from the ledger and created with SET NX, and
 // settling a request only increments counters that already exist, so a
-// counter is never created holding just the latest request. Enforcement is
+// counter is never created holding just the latest request. Counters expire
+// CounterTTL after a rebuild, which bounds how long any drift from the
+// ledger can last. Enforcement is
 // check-before only, with no reservation: cost is known only once a response
 // has finished, so one request may overshoot a cap and the next one is
 // refused. Redis or ledger trouble fails open.

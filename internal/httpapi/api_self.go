@@ -65,8 +65,10 @@ type budgetView struct {
 	Periods map[string]budgetPeriodView `json:"periods"`
 }
 
-// selfBudget reads a user's group name, budgets and usage per period from
-// the database (not the Redis counters, which exist only for capped users).
+// selfBudget reads a user's group name, budgets and, when the user has any
+// cap, the usage per period from the budget counters (the same ones the
+// data plane checks, rebuilt from the ledger when missing). A user without
+// caps gets no usage read at all: every used value is 0.
 func (s *Server) selfBudget(ctx context.Context, userID string) (string, budgetView, error) {
 	if s.st == nil || s.st.PG == nil {
 		return "", budgetView{}, errors.New("no database")
@@ -79,21 +81,27 @@ func (s *Server) selfBudget(ctx context.Context, userID string) (string, budgetV
 		WHERE u.id = $1`, userID).Scan(&group, &raw); err != nil {
 		return "", budgetView{}, err
 	}
-	periods := s.currentPeriods()
-	spend, err := s.spendByUser(ctx, periods, userID)
-	if err != nil {
-		return "", budgetView{}, err
-	}
 	b := budget.Parse(raw)
+	var used map[budget.Period]budget.Usage
+	if b.Any() {
+		if s.budgets == nil {
+			return "", budgetView{}, errors.New("no budget counters")
+		}
+		var err error
+		if used, err = s.budgets.Usage(ctx, userID); err != nil {
+			return "", budgetView{}, err
+		}
+	}
+	periods := s.currentPeriods()
 	view := budgetView{TZ: s.limitsLoc().String(), Periods: map[string]budgetPeriodView{}}
 	for _, p := range budget.Periods {
-		used := spend[userID][p]
+		u := used[p]
 		view.Periods[p.Name()] = budgetPeriodView{
 			Start:        periods[p].Start,
 			End:          periods[p].End,
-			TokensUsed:   used.Tokens,
+			TokensUsed:   u.Tokens,
 			TokensLimit:  b.TokenCap(p),
-			CostUSDUsed:  microToUSD(used.CostMicro),
+			CostUSDUsed:  microToUSD(u.CostMicro),
 			CostUSDLimit: b.CostCap(p),
 		}
 	}

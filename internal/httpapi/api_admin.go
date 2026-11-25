@@ -81,11 +81,11 @@ func (s *Server) adminRoutes() {
 }
 
 func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
-	// Spend is read before the users, in one query for all of them.
+	// Spend is read before the users, in one query for all of them. Without
+	// it the list is still answered, every row's spend null.
 	spend, err := s.cachedSpendByUser(r.Context())
 	if err != nil {
-		writeControlError(w, http.StatusInternalServerError, "failed to load spend")
-		return
+		slog.Error("users list: spend not read", "err", err)
 	}
 	rows, err := s.st.PG.Query(r.Context(), `
 		SELECT u.id::text, u.subject, u.email, u.display, u.roles, u.disabled, u.auth_source, u.created_at,
@@ -109,7 +109,7 @@ func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 		GroupID    *string              `json:"group_id"`
 		GroupName  string               `json:"group_name"`
 		Budgets    budget.Budgets       `json:"budgets"`
-		Spend      map[string]spendView `json:"spend"`
+		Spend      map[string]spendView `json:"spend"` // null when it could not be read
 	}
 	out := []user{}
 	for rows.Next() {
@@ -121,7 +121,9 @@ func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		u.Budgets = budget.Parse(rawBudgets)
-		u.Spend = spendViews(spend[u.ID])
+		if spend != nil {
+			u.Spend = spendViews(spend[u.ID])
+		}
 		out = append(out, u)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"users": out})
