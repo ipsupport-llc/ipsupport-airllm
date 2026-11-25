@@ -320,6 +320,23 @@ func TestUserUpdateValidatesBudgetsAndGroup(t *testing.T) {
 	if stored["tokens"]["week"] != 2000000 || stored["cost_usd"]["day"] != 5 || stored["cost_usd"]["month"] != 50 {
 		t.Errorf("stored budgets %s, want the valid save kept", raw)
 	}
+	var roles []string
+	if err := f.pool.QueryRow(context.Background(), `SELECT roles FROM users WHERE id = $1`, uid).Scan(&roles); err != nil || len(roles) != 1 {
+		t.Errorf("roles %v (%v), want the fixture role kept", roles, err)
+	}
+
+	// The console's full six-cell grid with zeros clears every cap, as does null.
+	for _, body := range []string{
+		`{"budgets":{"tokens":{"day":0,"week":0,"month":0},"cost_usd":{"day":0,"week":0,"month":0}},"group_id":null}`,
+		`{"budgets":null}`,
+	} {
+		wantStatus(t, call(t, s, http.MethodPut, "/api/admin/users/"+uid, `{"budgets":{"tokens":{"day":7}}}`), http.StatusOK, "set a cap")
+		wantStatus(t, call(t, s, http.MethodPut, "/api/admin/users/"+uid, body), http.StatusOK, body)
+		u := listedUser(t, s, uid)
+		if u.Budgets.Tokens["day"] != 0 || s.userInfoFor(uid).Budgets.Any() {
+			t.Errorf("%s: budgets %+v, want none", body, u.Budgets)
+		}
+	}
 }
 
 // adminUser is the part of a GET /api/admin/users row these tests read.
@@ -375,6 +392,16 @@ func TestGroupsCRUDAndDeleteUngroupsMembers(t *testing.T) {
 	wantStatus(t, call(t, s, http.MethodPut, "/api/admin/users/"+uid, fmt.Sprintf(`{"group_id":%q}`, g.ID)), http.StatusOK, "join")
 	if u := listedUser(t, s, uid); u.GroupID == nil || *u.GroupID != g.ID || u.GroupName != name {
 		t.Errorf("listed user group = %v %q, want %s %q", u.GroupID, u.GroupName, g.ID, name)
+	}
+	// An explicit null leaves the group; a body without group_id keeps it.
+	wantStatus(t, call(t, s, http.MethodPut, "/api/admin/users/"+uid, `{"group_id":null}`), http.StatusOK, "leave")
+	if u := listedUser(t, s, uid); u.GroupID != nil || u.GroupName != "" || s.userInfoFor(uid).GroupName != "" {
+		t.Errorf("after group_id null: %v %q", u.GroupID, u.GroupName)
+	}
+	wantStatus(t, call(t, s, http.MethodPut, "/api/admin/users/"+uid, fmt.Sprintf(`{"group_id":%q}`, g.ID)), http.StatusOK, "rejoin")
+	wantStatus(t, call(t, s, http.MethodPut, "/api/admin/users/"+uid, `{"display":"D"}`), http.StatusOK, "unrelated edit")
+	if u := listedUser(t, s, uid); u.GroupID == nil || *u.GroupID != g.ID {
+		t.Errorf("group_id omitted: group = %v, want kept", u.GroupID)
 	}
 
 	renamed := name + "-x"
