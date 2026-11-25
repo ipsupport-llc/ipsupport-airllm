@@ -415,6 +415,16 @@ func TestCorruptCounterIsRebuilt(t *testing.T) {
 	if u, err := c.Usage(ctx, user, nov24h); err != nil || u[Day].Tokens != 500 {
 		t.Errorf("usage = %+v (%v)", u, err)
 	}
+	// All digits but beyond int64: Go can't parse it, and the publish must
+	// replace it rather than keep it as "higher" forever.
+	_ = c.rdb.HSet(ctx, dayHash(user), "tok", "99999999999999999999999999", "cost", "0").Err()
+	_ = c.rdb.Del(ctx, freshKey(user, Day, nov24)).Err()
+	if u, err := c.Usage(ctx, user, nov24h); err != nil || u[Day].Tokens != 500 {
+		t.Errorf("usage after an overflowing field = %+v (%v)", u, err)
+	}
+	if v, _ := c.rdb.HGet(ctx, dayHash(user), "tok").Result(); v != "500" {
+		t.Errorf("overflowing tok = %q, want it replaced by the ledger's 500", v)
+	}
 }
 
 // TestColdPathLoserUsesThePublishedCounters: without counters, a check that

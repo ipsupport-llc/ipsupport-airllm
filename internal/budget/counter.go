@@ -314,7 +314,7 @@ if redis.call("get", KEYS[3]) ~= ARGV[1] then
 end
 local function pick(field, sum)
 	local cur = redis.call("hget", KEYS[1], field)
-	if cur and string.match(cur, "^%d+$") and tonumber(cur) >= tonumber(sum) then
+	if cur and #cur <= 18 and string.match(cur, "^%d+$") and tonumber(cur) >= tonumber(sum) then
 		return cur
 	end
 	return sum
@@ -407,7 +407,8 @@ func (c *Counter) refreshInBackground(userID string, p Period, now time.Time) {
 		slog.Warn("budget: refreshing counters from the ledger failed; retrying later", "err", err, "user_id", userID)
 		rctx, rcancel := context.WithTimeout(context.Background(), redisTimeout)
 		defer rcancel()
-		_ = c.rdb.Set(rctx, freshKey(userID, p, start), 1, retryAfter).Err()
+		// SetNX: never shorten a marker another replica just published.
+		_ = c.rdb.SetNX(rctx, freshKey(userID, p, start), 1, retryAfter).Err()
 	}()
 }
 
