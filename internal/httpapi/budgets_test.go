@@ -224,14 +224,14 @@ func TestBudgetCounterRebuiltFromLedger(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"rate_limit_error"`) {
 		t.Errorf("body %s, want the OpenAI rate_limit_error shape", rec.Body.String())
 	}
-	if v, err := f.rdb.Get(context.Background(), "air:ub:"+uid+":cost:m:2026-10").Int64(); err != nil || v != 1_000_000 {
+	if v, err := f.rdb.HGet(context.Background(), "air:ub:"+uid+":2026-10", "cost").Int64(); err != nil || v != 1_000_000 {
 		t.Errorf("cost counter = %d (%v), want 1000000 micro-USD", v, err)
 	}
 
 	// A token cap: rebuilt as 150 tokens, then a served request adds its own.
 	setBudgets(t, f, s, uid, `{"tokens":{"month":1000000}}`)
 	wantStatus(t, f.chat(t, s, token), http.StatusOK, "under the token cap")
-	v, err := f.rdb.Get(context.Background(), "air:ub:"+uid+":tok:m:2026-10").Int64()
+	v, err := f.rdb.HGet(context.Background(), "air:ub:"+uid+":2026-10", "tok").Int64()
 	if err != nil || v <= 150 {
 		t.Errorf("token counter = %d (%v), want 150 from the ledger plus the served request", v, err)
 	}
@@ -698,7 +698,7 @@ func TestLedgerRowAndCounterShareOneTimestamp(t *testing.T) {
 	if !ts[0].Equal(f.clock.Now()) {
 		t.Errorf("ledger row stamped %v, want the settle instant %v", ts[0], f.clock.Now())
 	}
-	v, err := f.rdb.Get(context.Background(), "air:ub:"+uid+":tok:d:2026-10-03").Int64()
+	v, err := f.rdb.HGet(context.Background(), "air:ub:"+uid+":2026-10-03", "tok").Int64()
 	if err != nil || v == 0 {
 		t.Errorf("3 Oct token counter = %d (%v), want the request counted there", v, err)
 	}
@@ -729,7 +729,7 @@ func TestMeReadsCountersOnlyForCappedUsers(t *testing.T) {
 	if got := monthUsed(); got != 0 {
 		t.Errorf("uncapped user's month usage = %d, want 0 (not read)", got)
 	}
-	if n, _ := f.rdb.Exists(context.Background(), "air:ub:"+uid+":tok:m:2026-10").Result(); n != 0 {
+	if n, _ := f.rdb.Exists(context.Background(), "air:ub:"+uid+":2026-10").Result(); n != 0 {
 		t.Error("an uncapped user's /api/me created budget counters")
 	}
 

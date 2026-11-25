@@ -791,22 +791,26 @@ it and within `CONFIG_REFRESH_INTERVAL` (default 10 s) on the others — keys
 need no re-issue. A key without an owner has no budget, and the second-pass
 job is not counted.
 
-Usage is counted in Redis under `air:ub:<user id>:<tok|cost>:<d|w|m>:<period>`
-(e.g. `2026-11-24`, `2026-W48`, `2026-11`), kept until a day after the period
-ends. The counters are a cache of the usage ledger, refreshed from it: settled
-requests add to them, and every 10 minutes (a marker
-`air:ub:<user id>:fresh:<period>` expiring) the next check re-derives them
-from the ledger, while the existing values keep being enforced — one replica
-at a time per user and period, under `air:ub:<user id>:lock:<period>`. A
-request that settles while its counters are being re-derived, a failed Redis
-write or a dropped ledger row can leave a counter off by that request; **the
-error lasts at most about 10 minutes**, until the next refresh. When a user
-has no counters at all (first use, or Redis lost them), checks on other
-replicas wait up to a second for the one rebuilding them, then let the
-request through. Losing Redis loses nothing. If Redis or the ledger read
-fails, requests are allowed and the error is logged. A request's ledger row
-and its counters use the same settle timestamp, so both put it in the same
-day, week and month.
+Usage is counted in Redis in one hash per user and period,
+`air:ub:<user id>:<period>` (e.g. `2026-11-24`, `2026-W48`, `2026-11`) with
+fields `tok` and `cost`, kept until a day after the period ends. The hash is a
+cache of the usage ledger: settled requests add to it, and every 10 minutes
+(a marker `air:ub:<user id>:fresh:<period>` expiring) a background refresh
+re-derives it from the ledger while checks keep enforcing the current values
+without waiting. A refresh never lowers a counter — it stores the larger of
+the counter and the ledger sum — so a request that settles during it is not
+lost. A failed Redis write or a dropped ledger row can leave a counter low by
+that request; **an under-count lasts at most about 10 minutes**, until the
+next refresh. A request counted twice (by the refresh's ledger read and by
+its own increment) stays over-counted until the period ends, erring on the
+side of refusing. When there is no hash at all (first use, or Redis lost it),
+the check builds it from the ledger; checks on other replicas wait up to 2 s
+for that, then read the ledger themselves. Building and refreshing run on one
+replica at a time per user and period (lock `air:ub:<user id>:lock:<period>`).
+A failed refresh is retried after 30 s. Losing Redis's data loses nothing.
+If Redis cannot be reached, or a user has no hash and the ledger cannot be
+read, the request is let through and the error is logged. A request's ledger row and its counters use the same settle
+timestamp, so both put it in the same day, week and month.
 
 **Groups** (`/api/admin/groups`) label users for reporting — "developers",
 "finance" — and carry no budget. A user is in at most one group; deleting a
