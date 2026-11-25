@@ -35,8 +35,9 @@ const migrationLockKey = 72_70_01
 //	    ON usage_ledger (alias, ts);
 //
 // The DROP also rebuilds an index that a previous attempt finished without
-// getting to record the file, which is only time lost. Keep to one index per
-// file. See docs/operations.md#migrations.
+// getting to record the file, which is only time lost. One index per file,
+// dropped first: TestNoTxMigrationsDropIndexFirst enforces both. See
+// docs/operations.md#migrations.
 const noTxDirective = "-- airllm:no-transaction"
 
 // Migrate applies any embedded *.sql migrations not yet recorded, in
@@ -194,13 +195,19 @@ func splitStatements(script string) []string {
 				}
 			}
 		case c == '\'' || c == '"':
-			// A doubled quote closes and reopens, which comes out the same.
-			// E'...' strings also escape with a backslash.
+			// A doubled quote is part of the string. E'...' strings also
+			// escape with a backslash.
 			escapes := c == '\'' && i > 0 && (script[i-1] == 'E' || script[i-1] == 'e') && (i < 2 || !isIdentByte(script[i-2]))
 			hasCode = true
-			for i++; i < len(script) && script[i] != c; i++ {
+			for i++; i < len(script); i++ {
 				if escapes && script[i] == '\\' {
 					i++
+				} else if script[i] == c {
+					if i+1 < len(script) && script[i+1] == c {
+						i++
+						continue
+					}
+					break
 				}
 			}
 		case c == '$' && (i == 0 || !isIdentByte(script[i-1])):
