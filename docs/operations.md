@@ -31,6 +31,26 @@ automatically on boot**, in lexicographic order, inside `store.Migrate`. To add
 one, drop a new `NNNN_name.sql` file with the next number; do not edit applied
 migrations. A clean re-bootstrap is `make compose-down && make compose-up`.
 
+Each file runs in its own transaction, unless its first line is exactly
+`-- airllm:no-transaction`. Such a file runs outside a transaction (still under
+the migration advisory lock), one statement at a time, and is recorded only
+after its last statement succeeds. Use it for statements Postgres refuses
+inside a transaction, chiefly `CREATE INDEX CONCURRENTLY`, which indexes a big
+table without blocking writes. A failure leaves the statements that already ran
+in place and the whole file reruns on the next boot, so every statement must be
+idempotent (`IF NOT EXISTS` / `IF EXISTS`). A failed or interrupted
+`CONCURRENTLY` build also leaves an `INVALID` index that `IF NOT EXISTS` would
+skip, so drop it first:
+
+```sql
+-- airllm:no-transaction
+DROP INDEX CONCURRENTLY IF EXISTS idx_usage_ledger_alias_ts;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_usage_ledger_alias_ts
+    ON usage_ledger (alias, ts);
+```
+
+Keep to one index per file.
+
 ### Upgrading to this release
 
 - **`config.env` now defaults to `prod`** (it was `dev`). A release that never
