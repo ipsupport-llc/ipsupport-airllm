@@ -24,6 +24,7 @@ func setBase(t *testing.T) {
 	t.Setenv("AUTH_MODE", "")
 	t.Setenv("SEED_DEV", "")
 	t.Setenv("TRUSTED_PROXY_CIDRS", "")
+	t.Setenv("LIMITS_TZ", "")
 	t.Setenv("OIDC_ALLOW_HTTP_ISSUER", "")
 	t.Setenv("AIRLLM_MASTER_KEY", "")
 	t.Setenv("AIRLLM_SESSION_KEY", "")
@@ -617,5 +618,33 @@ func TestOIDCAllowHTTPIssuerEscapeHatch(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "OIDC_ALLOW_HTTP_ISSUER") || !strings.Contains(buf.String(), "level=WARN") {
 		t.Fatalf("expected a WARN log, got %q", buf.String())
+	}
+}
+
+func TestLimitsTZ(t *testing.T) {
+	setBase(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.LimitsTZ != time.UTC {
+		t.Errorf("default LimitsTZ = %v, want UTC", c.LimitsTZ)
+	}
+	t.Setenv("LIMITS_TZ", "Europe/Berlin")
+	if c, err = Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.LimitsTZ.String() != "Europe/Berlin" {
+		t.Errorf("LimitsTZ = %v, want Europe/Berlin", c.LimitsTZ)
+	}
+}
+
+func TestLimitsTZRejectsUnknownZone(t *testing.T) {
+	for _, bad := range []string{"Mars/Olympus", "not a zone", "+03:00"} {
+		setBase(t)
+		t.Setenv("LIMITS_TZ", bad)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "LIMITS_TZ") {
+			t.Errorf("LIMITS_TZ=%q: err = %v, want a LIMITS_TZ error", bad, err)
+		}
 	}
 }

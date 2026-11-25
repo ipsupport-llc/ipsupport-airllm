@@ -2,13 +2,16 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/auth"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/budget"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 )
 
@@ -104,14 +107,24 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	// general admin API: any other caller omitting roles/disabled must not
 	// silently wipe the user's roles or re-enable a disabled account just
 	// because it meant to touch something else.
+	//
+	// group_id and budgets are raw so that a field left out (nil) is told
+	// apart from an explicit null (no group / no caps).
 	var body struct {
-		Email    *string  `json:"email"`
-		Display  *string  `json:"display"`
-		Roles    []string `json:"roles"`
-		Disabled *bool    `json:"disabled"`
+		Email    *string         `json:"email"`
+		Display  *string         `json:"display"`
+		Roles    []string        `json:"roles"`
+		Disabled *bool           `json:"disabled"`
+		GroupID  json.RawMessage `json:"group_id"`
+		Budgets  json.RawMessage `json:"budgets"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeControlError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	setGroup, groupID, budgetsJSON, err := parseGroupAndBudgets(body.GroupID, body.Budgets)
+	if err != nil {
+		writeControlError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	known, err := s.knownRoles(r)
@@ -159,6 +172,16 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		s.writeUserErr(w, err)
 		return
 	}
+	if setGroup || budgetsJSON != nil {
+		if err := s.users().SetGroupBudgets(r.Context(), tx, id, setGroup, groupID, budgetsJSON); err != nil {
+			if isForeignKeyViolation(err) {
+				writeControlError(w, http.StatusBadRequest, "group not found")
+				return
+			}
+			s.writeUserErr(w, err)
+			return
+		}
+	}
 	if err := store.RebuildKeySnapshotsUser(r.Context(), tx, id); err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to rebuild key snapshots")
 		return
@@ -167,8 +190,52 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		writeControlError(w, http.StatusInternalServerError, "operation failed")
 		return
 	}
-	s.audit(r.Context(), sess.principal.Subject, "user.update", id, map[string]any{"disabled": disabled, "roles": roles})
+	detail := map[string]any{"disabled": disabled, "roles": roles}
+	if setGroup {
+		detail["group_id"] = groupID
+	}
+	if budgetsJSON != nil {
+		detail["budgets"] = json.RawMessage(*budgetsJSON)
+	}
+	if setGroup || budgetsJSON != nil {
+		s.reloadUserInfo(r.Context())
+	}
+	s.audit(r.Context(), sess.principal.Subject, "user.update", id, detail)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// parseGroupAndBudgets validates the group_id and budgets of a user update.
+// setGroup reports whether group_id was given (groupID nil = no group);
+// budgetsJSON is nil when budgets was left out, else the normalized value to
+// store — the whole object is replaced, a period left out meaning no cap.
+func parseGroupAndBudgets(rawGroup, rawBudgets json.RawMessage) (setGroup bool, groupID, budgetsJSON *string, err error) {
+	if len(rawGroup) > 0 {
+		setGroup = true
+		if string(rawGroup) != "null" {
+			var g string
+			if json.Unmarshal(rawGroup, &g) != nil || !isUUID(g) {
+				return false, nil, nil, errors.New("group_id must be a group id or null")
+			}
+			groupID = &g
+		}
+	}
+	if len(rawBudgets) > 0 {
+		b, err := budget.Validate(rawBudgets)
+		if err != nil {
+			return false, nil, nil, err
+		}
+		raw, _ := json.Marshal(b)
+		str := string(raw)
+		budgetsJSON = &str
+	}
+	return setGroup, groupID, budgetsJSON, nil
+}
+
+// isForeignKeyViolation reports a Postgres foreign key violation, e.g. a
+// group_id naming no group.
+func isForeignKeyViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23503"
 }
 
 func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {

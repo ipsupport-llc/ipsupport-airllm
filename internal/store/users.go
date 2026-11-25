@@ -91,6 +91,23 @@ func (p *PGUsers) Update(ctx context.Context, q Querier, id, email, display stri
 	return err
 }
 
+// SetGroupBudgets sets a user's group (when setGroup; groupID nil = no
+// group) and budgets (when budgets is non-nil: the JSON stored whole). q
+// lets the caller run it inside a transaction.
+func (p *PGUsers) SetGroupBudgets(ctx context.Context, q Querier, id string, setGroup bool, groupID, budgets *string) error {
+	tag, err := q.Exec(ctx, `
+		UPDATE users SET
+			group_id = CASE WHEN $2 THEN $3::uuid ELSE group_id END,
+			budgets = COALESCE($4::jsonb, budgets),
+			updated_at = now()
+		WHERE id = $1`,
+		id, setGroup, groupID, budgets)
+	if err == nil && tag.RowsAffected() == 0 {
+		return ErrUserNotFound
+	}
+	return err
+}
+
 func (p *PGUsers) SetPassword(ctx context.Context, id, hash string) error {
 	tag, err := p.st.PG.Exec(ctx,
 		`UPDATE users SET password_hash=$2, password_set_at=now() WHERE id=$1 AND auth_source='local'`, id, hash)

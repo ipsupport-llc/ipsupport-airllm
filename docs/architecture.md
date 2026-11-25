@@ -142,7 +142,8 @@ next request or job without a restart. Provider edits rebuild the registry the
 same way, and a saved or imported price is set in the in-memory price table.
 
 That reload happens on the replica that served the save. Every replica also
-re-reads providers, prices and those settings every `CONFIG_REFRESH_INTERVAL`
+re-reads providers, prices, those settings and the users' budgets and groups
+(see [Per-user budgets](configuration.md#per-user-budgets-and-groups)) every `CONFIG_REFRESH_INTERVAL`
 (10 s) and installs whatever changed, so a save reaches the other replicas
 within one interval. The registry is rebuilt only when the provider rows
 changed — a rebuild hands every provider a fresh set of concurrency slots —

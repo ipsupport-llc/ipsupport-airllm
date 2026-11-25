@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/budget"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/pricing"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
@@ -25,12 +26,17 @@ func (s *Server) adminRoutes() {
 	s.mux.HandleFunc("PUT /api/admin/users/{id}", a(s.handleUpdateUser))
 	s.mux.HandleFunc("POST /api/admin/users/{id}/password", a(s.handleResetPassword))
 	s.mux.HandleFunc("DELETE /api/admin/users/{id}", a(s.handleDeleteUser))
+	s.mux.HandleFunc("GET /api/admin/groups", a(s.handleAdminGroups))
+	s.mux.HandleFunc("POST /api/admin/groups", a(s.handleAdminCreateGroup))
+	s.mux.HandleFunc("PUT /api/admin/groups/{id}", a(s.handleAdminUpdateGroup))
+	s.mux.HandleFunc("DELETE /api/admin/groups/{id}", a(s.handleAdminDeleteGroup))
 	s.mux.HandleFunc("GET /api/admin/keys", a(s.handleAdminKeys))
 	s.mux.HandleFunc("POST /api/admin/keys/{id}/revoke", a(s.handleAdminRevokeKey))
 	s.mux.HandleFunc("GET /api/admin/usage", a(s.handleAdminUsage))
 	s.mux.HandleFunc("GET /api/admin/usage/series", a(s.handleAdminUsageSeries))
 	s.mux.HandleFunc("GET /api/admin/usage/breakdown", a(s.handleAdminUsageBreakdown))
 	s.mux.HandleFunc("GET /api/admin/usage/recent", a(s.handleAdminUsageRecent))
+	s.mux.HandleFunc("GET /api/admin/usage/groups", a(s.handleAdminUsageGroups))
 	s.mux.HandleFunc("GET /api/admin/live", a(s.handleAdminLive))
 	s.mux.HandleFunc("GET /api/admin/audit", a(s.handleAdminAudit))
 	s.mux.HandleFunc("GET /api/admin/roles", a(s.handleAdminRoles))
@@ -75,31 +81,54 @@ func (s *Server) adminRoutes() {
 }
 
 func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.st.PG.Query(r.Context(),
-		`SELECT id::text, subject, email, display, roles, disabled, auth_source, created_at FROM users ORDER BY created_at`)
+	// Spend is read before the users, in one query for all of them. Without
+	// it the list is still answered, every row's spend null.
+	spend, err := s.cachedSpendByUser(r.Context())
+	if err != nil {
+		slog.Error("users list: spend not read", "err", err)
+	}
+	rows, err := s.st.PG.Query(r.Context(), `
+		SELECT u.id::text, u.subject, u.email, u.display, u.roles, u.disabled, u.auth_source, u.created_at,
+		       u.group_id::text, COALESCE(g.name, ''), u.budgets
+		FROM users u LEFT JOIN user_groups g ON g.id = u.group_id
+		ORDER BY u.created_at`)
 	if err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to list users")
 		return
 	}
 	defer rows.Close()
 	type user struct {
-		ID         string    `json:"id"`
-		Subject    string    `json:"subject"`
-		Email      string    `json:"email"`
-		Display    string    `json:"display"`
-		Roles      []string  `json:"roles"`
-		Disabled   bool      `json:"disabled"`
-		AuthSource string    `json:"auth_source"`
-		CreatedAt  time.Time `json:"created_at"`
+		ID         string               `json:"id"`
+		Subject    string               `json:"subject"`
+		Email      string               `json:"email"`
+		Display    string               `json:"display"`
+		Roles      []string             `json:"roles"`
+		Disabled   bool                 `json:"disabled"`
+		AuthSource string               `json:"auth_source"`
+		CreatedAt  time.Time            `json:"created_at"`
+		GroupID    *string              `json:"group_id"`
+		GroupName  string               `json:"group_name"`
+		Budgets    budget.Budgets       `json:"budgets"`
+		Spend      map[string]spendView `json:"spend"` // null when it could not be read
 	}
 	out := []user{}
 	for rows.Next() {
 		var u user
-		if err := rows.Scan(&u.ID, &u.Subject, &u.Email, &u.Display, &u.Roles, &u.Disabled, &u.AuthSource, &u.CreatedAt); err != nil {
+		var rawBudgets []byte
+		if err := rows.Scan(&u.ID, &u.Subject, &u.Email, &u.Display, &u.Roles, &u.Disabled, &u.AuthSource, &u.CreatedAt,
+			&u.GroupID, &u.GroupName, &rawBudgets); err != nil {
 			writeControlError(w, http.StatusInternalServerError, "failed to read users")
 			return
 		}
+		u.Budgets = budget.Parse(rawBudgets)
+		if spend != nil {
+			u.Spend = spendViews(spend[u.ID])
+		}
 		out = append(out, u)
+	}
+	if err := rows.Err(); err != nil {
+		writeControlError(w, http.StatusInternalServerError, "failed to read users")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"users": out})
 }

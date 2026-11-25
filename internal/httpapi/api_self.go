@@ -2,11 +2,14 @@ package httpapi
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/apikey"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/budget"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/store"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/version"
 )
@@ -25,17 +28,90 @@ func (s *Server) handleAuthMode(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleMe returns the caller's identity.
+// handleMe returns the caller's identity, group, and budgets with what is
+// used of them. The identity is answered even when the budget read fails.
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	sess, _ := sessionFrom(r.Context())
-	writeJSON(w, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"subject":    sess.principal.Subject,
 		"email":      sess.principal.Email,
 		"roles":      sess.principal.Roles,
 		"is_admin":   sess.principal.IsAdmin(),
 		"is_auditor": sess.principal.IsAuditor(),
 		"version":    version.Version,
-	})
+	}
+	group, b, err := s.selfBudget(r.Context(), sess.userID)
+	if group != nil {
+		out["group_name"] = *group
+	}
+	if err != nil {
+		slog.Warn("budget for /api/me not read", "err", err)
+	} else {
+		out["budget"] = b
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// budgetPeriodView is one period of the /api/me budget block; a limit of 0
+// means no cap.
+type budgetPeriodView struct {
+	Start        time.Time `json:"start"`
+	End          time.Time `json:"end"`
+	TokensUsed   int64     `json:"tokens_used"`
+	TokensLimit  int64     `json:"tokens_limit"`
+	CostUSDUsed  float64   `json:"cost_usd_used"`
+	CostUSDLimit float64   `json:"cost_usd_limit"`
+}
+
+type budgetView struct {
+	TZ      string                      `json:"tz"`
+	Periods map[string]budgetPeriodView `json:"periods"`
+}
+
+// selfBudget reads a user's group name, budgets and, when the user has any
+// cap, the usage per period from the budget counters (the same ones the
+// data plane enforces, rebuilt from the ledger when missing). A user without
+// caps gets no usage read at all: every used value is 0. The group name is
+// returned (non-nil) once the user row is read, even if the usage read then
+// fails. One instant picks both the counters and the period bounds shown.
+func (s *Server) selfBudget(ctx context.Context, userID string) (*string, budgetView, error) {
+	if s.st == nil || s.st.PG == nil {
+		return nil, budgetView{}, errors.New("no database")
+	}
+	var group string
+	var raw []byte
+	if err := s.st.PG.QueryRow(ctx, `
+		SELECT COALESCE(g.name, ''), u.budgets
+		FROM users u LEFT JOIN user_groups g ON g.id = u.group_id
+		WHERE u.id = $1`, userID).Scan(&group, &raw); err != nil {
+		return nil, budgetView{}, err
+	}
+	now := s.clock()
+	b := budget.Parse(raw)
+	var used map[budget.Period]budget.Usage
+	if b.Any() {
+		if s.budgets == nil {
+			return &group, budgetView{}, errors.New("no budget counters")
+		}
+		var err error
+		if used, err = s.budgets.Usage(ctx, userID, now); err != nil {
+			return &group, budgetView{}, err
+		}
+	}
+	periods := s.periodsAt(now)
+	view := budgetView{TZ: s.limitsLoc().String(), Periods: map[string]budgetPeriodView{}}
+	for _, p := range budget.Periods {
+		u := used[p]
+		view.Periods[p.Name()] = budgetPeriodView{
+			Start:        periods[p].Start,
+			End:          periods[p].End,
+			TokensUsed:   u.Tokens,
+			TokensLimit:  b.TokenCap(p),
+			CostUSDUsed:  microToUSD(u.CostMicro),
+			CostUSDLimit: b.CostCap(p),
+		}
+	}
+	return &group, view, nil
 }
 
 type keyView struct {

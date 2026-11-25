@@ -93,6 +93,11 @@ type Config struct {
 	// a client's IP (login lockout, live view). Defaults to the loopback,
 	// private and link-local ranges (DefaultTrustedProxyCIDRs).
 	TrustedProxyCIDRs []netip.Prefix
+
+	// LimitsTZ, from LIMITS_TZ (an IANA zone name, default UTC), is the zone
+	// per-user budget periods follow: a day starts at 00:00, a week on
+	// Monday 00:00 and a month on the 1st at 00:00 there.
+	LimitsTZ *time.Location
 }
 
 // DefaultTrustedProxyCIDRs is the TRUSTED_PROXY_CIDRS default: every
@@ -175,6 +180,9 @@ func Load() (*Config, error) {
 	}
 	if c.TrustedProxyCIDRs, err = parseTrustedProxyCIDRs(os.Getenv("TRUSTED_PROXY_CIDRS")); err != nil {
 		return nil, err
+	}
+	if c.LimitsTZ, err = time.LoadLocation(env("LIMITS_TZ", "UTC")); err != nil {
+		return nil, fmt.Errorf("LIMITS_TZ must be an IANA time zone name such as UTC or Europe/Berlin: %w", err)
 	}
 
 	key, dev, err := loadMasterKey(c.Env)

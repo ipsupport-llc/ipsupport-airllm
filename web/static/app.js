@@ -51,6 +51,7 @@ async function api(method, path, body) {
 // fresh sign-in (init -> renderShell -> route) reopens the same page.
 function sessionExpired() {
   stopLive();
+  stopGroupSpend();
   me = null;
   window.onhashchange = null;
   renderLogin();
@@ -188,7 +189,7 @@ const NAV = [
   { href: "#/keys", label: "API Keys" },
   { href: "#/usage", label: "Usage" },
 ];
-const ADMIN_TABS = ["users", "keys", "usage", "roles", "aliases", "providers", "pricing", "dlp", "audit"];
+const ADMIN_TABS = ["users", "groups", "keys", "usage", "roles", "aliases", "providers", "pricing", "dlp", "audit"];
 
 function renderShell() {
   // Live is an org-wide view, so it sits with the other admin-only views.
@@ -220,7 +221,7 @@ function renderShell() {
     </div>`;
   const cpBtn = $("#change-pw");
   if (cpBtn) cpBtn.addEventListener("click", changePassword);
-  $("#logout").addEventListener("click", async () => { stopLive(); await api("POST", "/auth/logout"); me = null; renderLogin(); });
+  $("#logout").addEventListener("click", async () => { stopLive(); stopGroupSpend(); await api("POST", "/auth/logout"); me = null; renderLogin(); });
   window.onhashchange = route;
   route();
 }
@@ -248,6 +249,7 @@ function setActiveNav() {
 
 function route() {
   stopLive();
+  stopGroupSpend();
   setActiveNav();
   const view = $("#view");
   const hash = location.hash || "#/";
@@ -275,9 +277,11 @@ async function viewDashboard(view) {
   const token = dashGuard.start();
   view.innerHTML = `<h1 class="page-title">Dashboard</h1><div id="dash"></div>`;
   const seriesPath = me.is_admin ? "/api/admin/usage/series" : "/api/usage/series";
-  const [u, k, sr] = await Promise.all([api("GET", "/api/usage"), api("GET", "/api/keys"), api("GET", seriesPath)]);
+  // /api/me is fetched again (not the copy from sign-in) so the budget
+  // bars show current spend.
+  const [u, k, sr, m] = await Promise.all([api("GET", "/api/usage"), api("GET", "/api/keys"), api("GET", seriesPath), api("GET", "/api/me")]);
   if (!dashGuard.current(token)) return;
-  if (loadFailed($("#dash"), [u, k, sr], () => viewDashboard(view))) return;
+  if (loadFailed($("#dash"), [u, k, sr, m], () => viewDashboard(view))) return;
   const usage = u.data || {};
   const keys = (k.data && k.data.keys) || [];
   const active = keys.filter((x) => x.status === "active").length;
@@ -300,6 +304,7 @@ async function viewDashboard(view) {
       </div>`
     : `<div class="empty" style="margin-top:1rem">No usage history yet.</div>`;
   $("#dash").innerHTML = `
+    ${budgetSection((m.data || {}).budget)}
     <h2 class="section-label">Your usage</h2>
     ${usageCards(usage)}
     ${sparksHtml}
@@ -308,6 +313,29 @@ async function viewDashboard(view) {
       <div class="empty">${active} active key${active === 1 ? "" : "s"} of ${keys.length} total.</div>
     </div>
     ${connectPanel()}`;
+}
+
+// budgetSection renders the signed-in user's budget bars, one card per
+// capped period and unit, or nothing when no cap is set.
+function budgetSection(budget) {
+  const bars = budgetBars(budget);
+  if (!bars.length) return "";
+  const tz = (budget && budget.tz) || "UTC";
+  const period = { day: "Today", week: "This week", month: "This month" };
+  const card = (b) => {
+    const cost = b.unit === "cost_usd";
+    const used = cost ? fmtUSD(b.used) : fmtCompact(b.used);
+    const limit = cost ? fmtUSD(b.limit) : fmtCompact(b.limit) + " tokens";
+    const full = cost ? "" : ` title="${esc(fmtNum(b.used))} of ${esc(fmtNum(b.limit))} tokens"`;
+    const state = b.level === "over" ? `<span class="badge revoked">limit reached</span>` : `${Math.floor(b.pct)}% used`;
+    return `<div class="card budget-card ${b.level}">
+      <div class="label">${period[b.period]} · ${cost ? "cost" : "tokens"}</div>
+      <div class="value"${full}>${used} <span class="of">of ${limit}</span></div>
+      <div class="meter" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.min(100, Math.round(b.pct))}"><span style="width:${Math.min(100, b.pct).toFixed(1)}%"></span></div>
+      <div class="sub">${state} · resets ${esc(fmtZoned(b.end, tz))}</div>
+    </div>`;
+  };
+  return `<h2 class="section-label">Your budget</h2><div class="cards">${bars.map(card).join("")}</div>`;
 }
 
 function usageCards(u) {
@@ -757,6 +785,164 @@ function toolCallFindingNote(f, messages) {
   return { where: `tool call ${name} (message ${(ref.message || 0) + 1})`, excerpt };
 }
 
+// ---------- budgets & groups: pure helpers ----------
+// Per-user budgets cap tokens and cost per calendar day / ISO week / month
+// in the gateway's LIMITS_TZ; groups only label users for reporting. The
+// helpers below are top-level so web/budgets.test.mjs can extract them.
+
+// fmtCompact shortens a count for tight cells: 950, 12.5K, 1.2M, 3B.
+function fmtCompact(n) {
+  const v = Number(n) || 0, a = Math.abs(v);
+  const f = (x, s) => (Math.round(x * 10) / 10).toLocaleString("en-US") + s;
+  if (a >= 999.95e6) return f(v / 1e9, "B");
+  if (a >= 999.95e3) return f(v / 1e6, "M");
+  if (a >= 1e3) return f(v / 1e3, "K");
+  return String(Math.round(v));
+}
+
+// fmtZoned renders an instant as wall time in an IANA zone, the shape the
+// gateway's budget 429 uses: "2026-12-01 00:00 UTC". An unknown zone falls
+// back to UTC (and says so) rather than to the browser's own zone.
+function fmtZoned(iso, tz) {
+  const d = new Date(iso);
+  if (!iso || isNaN(d)) return "—";
+  for (const zone of [tz || "UTC", "UTC"]) {
+    let parts;
+    try {
+      parts = new Intl.DateTimeFormat("en-US", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit",
+        hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(d);
+    } catch (_) { continue; }
+    const p = {};
+    parts.forEach((x) => { p[x.type] = x.value; });
+    return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute} ${zone}`;
+  }
+  return d.toISOString();
+}
+
+// fmtPeriodRange renders a report period: "2026-11-01 00:00 – 2026-12-01 00:00 UTC".
+function fmtPeriodRange(start, end, tz) {
+  return fmtZoned(start, tz).replace(/ \S+$/, "") + " – " + fmtZoned(end, tz);
+}
+
+// budgetPct is the share of a cap used, in percent, or null when there is
+// no cap (limit 0 or missing). Not clamped: cost is known only after a
+// response, so one request may overshoot the cap.
+function budgetPct(used, limit) {
+  const l = Number(limit) || 0;
+  if (l <= 0) return null;
+  return ((Number(used) || 0) * 100) / l;
+}
+
+// budgetLevel is the highlight class for a percent: "over" from 100,
+// "warn" from 80, "" below that or without a cap.
+function budgetLevel(pct) {
+  if (pct == null) return "";
+  if (pct >= 100) return "over";
+  return pct >= 80 ? "warn" : "";
+}
+
+// budgetBars turns the budget block of GET /api/me into one entry per
+// capped period and unit (day, week, month; tokens before cost). Empty
+// when nothing is capped, so the dashboard shows no budget section.
+function budgetBars(budget) {
+  const periods = (budget && budget.periods) || {};
+  const out = [];
+  ["day", "week", "month"].forEach((period) => {
+    const x = periods[period];
+    if (!x) return;
+    [["tokens", x.tokens_used, x.tokens_limit], ["cost_usd", x.cost_usd_used, x.cost_usd_limit]].forEach(([unit, used, limit]) => {
+      const pct = budgetPct(used, limit);
+      if (pct == null) return;
+      out.push({ period, unit, used: Number(used) || 0, limit: Number(limit), pct, level: budgetLevel(pct), end: x.end });
+    });
+  });
+  return out;
+}
+
+// monthSpend summarizes an admin users-list row for its spend column: month
+// cost against the month cost cap ("$12.40 / $50.00", or just the spend
+// without a cap), a tokens line when a month token cap is set, and the
+// highlight level of whichever of the two is closer to its cap.
+function monthSpend(u) {
+  const s = (u && u.spend && u.spend.month) || {};
+  const b = (u && u.budgets) || {};
+  const capCost = Number(b.cost_usd && b.cost_usd.month) || 0;
+  const capTok = Number(b.tokens && b.tokens.month) || 0;
+  // spend: null = the server couldn't compute it; say so instead of "$0".
+  if (u && u.spend === null) {
+    return { cost: "—" + (capCost > 0 ? " / " + fmtUSD(capCost) : ""), tokens: capTok > 0 ? `— / ${fmtCompact(capTok)} tok` : "", level: budgetLevel(null) };
+  }
+  const pc = budgetPct(s.cost_usd, capCost), pt = budgetPct(s.tokens, capTok);
+  const worst = pc == null ? pt : (pt == null ? pc : Math.max(pc, pt));
+  return {
+    cost: fmtUSD(s.cost_usd) + (capCost > 0 ? " / " + fmtUSD(capCost) : ""),
+    tokens: capTok > 0 ? `${fmtCompact(s.tokens)} / ${fmtCompact(capTok)} tok` : "",
+    level: budgetLevel(worst),
+  };
+}
+
+// parseBudgets reads the user editor's budget grid — raw cell strings keyed
+// "tokens.day" … "cost_usd.month" — into the API's budgets object. Every
+// cell is sent and an empty one is 0 (no cap), so clearing a cell clears
+// the stored cap. Throws on a negative or non-numeric value and on a
+// fractional token count.
+function parseBudgets(cells) {
+  const out = { tokens: {}, cost_usd: {} };
+  for (const unit of ["tokens", "cost_usd"]) {
+    for (const period of ["day", "week", "month"]) {
+      const t = String((cells || {})[unit + "." + period] ?? "").trim();
+      const v = t === "" ? 0 : Number(t);
+      const name = (unit === "tokens" ? "Tokens" : "Cost $") + " per " + period;
+      if (!Number.isFinite(v) || v < 0) throw new Error(`${name} must be a non-negative number`);
+      if (unit === "tokens" && !Number.isInteger(v)) throw new Error(`${name} must be a whole number`);
+      out[unit][period] = v;
+    }
+  }
+  return out;
+}
+
+// orderGroupSpend keeps the API's cost-descending order of GET
+// /api/admin/usage/groups but moves Ungrouped (group_id null) last.
+function orderGroupSpend(groups) {
+  const list = groups || [];
+  return list.filter((g) => g.group_id != null).concat(list.filter((g) => g.group_id == null));
+}
+
+// liveSummary rolls the Live page's in-flight requests up per user: in
+// flight count, the user's current group and today's spend from
+// spendBySubject ({subject: {tokens, cost_usd}}; null while not loaded, so
+// spend is null = unknown). A request without an owner (a key with no
+// user) counts under its key name, ungrouped and without spend, so the
+// in-flight counts always add up to the table below. groups sums those
+// active users per group, Ungrouped ("") last; its spend is null when no
+// member's spend is known.
+function liveSummary(requests, spendBySubject) {
+  const users = [], byKey = Object.create(null);
+  (requests || []).forEach((r) => {
+    const key = r.user ? "u:" + r.user : "k:" + (r.key_name || r.key_id || "");
+    let u = byKey[key];
+    if (!u) {
+      const sp = r.user && spendBySubject && Object.prototype.hasOwnProperty.call(spendBySubject, r.user) ? spendBySubject[r.user] : null;
+      u = byKey[key] = { user: r.user || "", key_name: r.user ? "" : (r.key_name || r.key_id || ""), group: r.group || "",
+        inflight: 0, tokens: sp ? Number(sp.tokens) || 0 : null, cost_usd: sp ? Number(sp.cost_usd) || 0 : null };
+      users.push(u);
+    }
+    u.inflight++;
+  });
+  const name = (u) => u.user || u.key_name;
+  users.sort((a, b) => b.inflight - a.inflight || name(a).localeCompare(name(b)));
+  const groups = [], byGroup = Object.create(null);
+  users.forEach((u) => {
+    let g = byGroup[u.group];
+    if (!g) { g = byGroup[u.group] = { group: u.group, users: 0, inflight: 0, tokens: null, cost_usd: null }; groups.push(g); }
+    g.users++;
+    g.inflight += u.inflight;
+    if (u.tokens != null) { g.tokens = (g.tokens || 0) + u.tokens; g.cost_usd = (g.cost_usd || 0) + u.cost_usd; }
+  });
+  groups.sort((a, b) => (a.group === "") - (b.group === "") || b.inflight - a.inflight || a.group.localeCompare(b.group));
+  return { users, groups };
+}
+
 // ---------- live (admin) ----------
 // Requests in flight right now, from GET /api/admin/live. Polled every 2s
 // while the page is visible and not paused; elapsed times tick client-side
@@ -787,9 +973,9 @@ function fmtBytes(n) {
 // {session_id: "", requests: [r]} for everything else.
 function groupLive(requests) {
   const list = requests || [];
-  const count = {};
+  const count = Object.create(null);
   list.forEach((r) => { if (r.session_id) count[r.session_id] = (count[r.session_id] || 0) + 1; });
-  const out = [], bySession = {};
+  const out = [], bySession = Object.create(null);
   list.forEach((r) => {
     if (r.session_id && count[r.session_id] > 1) {
       if (!bySession[r.session_id]) { bySession[r.session_id] = { session_id: r.session_id, requests: [] }; out.push(bySession[r.session_id]); }
@@ -811,7 +997,11 @@ function stalePods(pods, generatedAt, maxAgeMs) {
     .filter((p) => p.age_ms > maxAgeMs);
 }
 
-const live = { timer: null, tick: null, paused: false, fetchedAt: 0 };
+// spend is today's spend per user subject from the admin users list,
+// refreshed every 15s from the poll loop (not every 2s); spendErr holds the
+// last failure; reqs is the last snapshot, so the summary can redraw when
+// spend arrives.
+const live = { timer: null, tick: null, paused: false, fetchedAt: 0, spend: null, spendAt: 0, spendErr: "", reqs: [] };
 
 function stopLive() {
   clearTimeout(live.timer);
@@ -826,6 +1016,10 @@ function onLiveVisibility() {
 
 function viewLive(view) {
   live.paused = false;
+  live.spend = null;
+  live.spendAt = 0;
+  live.spendErr = "";
+  live.reqs = [];
   view.innerHTML = `<div class="page-head"><h1 class="page-title">Live</h1>
       <div class="row"><span class="muted" id="live-status"></span>
         <button class="btn ghost sm" id="live-pause" type="button">Pause</button></div></div>
@@ -861,7 +1055,60 @@ async function pollLive() {
   live.fetchedAt = Date.now();
   renderLive(root, r.data || {});
   liveStatus();
+  if (Date.now() - live.spendAt >= 15000) refreshLiveSpend();
   if (!document.hidden) live.timer = setTimeout(pollLive, 2000);
+}
+
+// refreshLiveSpend reloads today's per-user spend for the summary. A
+// failure only blanks the spend columns (with a Retry); the in-flight view
+// keeps polling.
+async function refreshLiveSpend() {
+  live.spendAt = Date.now();
+  const r = await api("GET", "/api/admin/users");
+  if (!$("#live-root")) return; // navigated away meanwhile
+  if (r.ok) {
+    live.spend = Object.create(null);
+    ((r.data && r.data.users) || []).forEach((u) => { if (u.spend) live.spend[u.subject] = u.spend.day || { tokens: 0, cost_usd: 0 }; });
+    live.spendErr = "";
+  } else {
+    live.spend = null;
+    live.spendErr = apiError(r);
+  }
+  renderLiveSummary();
+}
+
+// renderLiveSummary draws "who is active now" above the request table:
+// one row per user with requests in flight and a roll-up of those users
+// per group.
+function renderLiveSummary() {
+  const el = $("#live-summary");
+  if (!el) return;
+  if (!live.reqs.length) { el.innerHTML = ""; return; }
+  const s = liveSummary(live.reqs, live.spend);
+  const tok = (v) => (v == null ? `<span class="muted">—</span>` : `<span title="${esc(fmtNum(v))}">${fmtCompact(v)}</span>`);
+  const usd = (v) => (v == null ? `<span class="muted">—</span>` : fmtUSD(v));
+  const grp = (g) => (g ? esc(g) : `<span class="muted">Ungrouped</span>`);
+  // On a phone the group column folds into a line under the user (the
+  // "m-only" line), so the numbers stay on screen.
+  const userRows = s.users.map((u) => `<tr>
+    <td class="name">${u.user ? esc(u.user) : `<span class="mono">${esc(u.key_name)}</span> <span class="muted">(no owner)</span>`}
+      <div class="sub m-only">${grp(u.group)}</div></td>
+    <td class="opt">${grp(u.group)}</td><td class="num">${fmtNum(u.inflight)}</td><td class="num">${tok(u.tokens)}</td><td class="num">${usd(u.cost_usd)}</td></tr>`).join("");
+  const groupRows = s.groups.map((g) => `<tr>
+    <td class="name">${grp(g.group)}</td><td class="num opt">${fmtNum(g.users)}</td><td class="num">${fmtNum(g.inflight)}</td><td class="num">${tok(g.tokens)}</td><td class="num">${usd(g.cost_usd)}</td></tr>`).join("");
+  const err = live.spendErr ? `<div class="load-error-body"><p class="err-text">Today's spend unavailable: ${esc(live.spendErr)}</p>
+    <button class="btn sm" type="button" id="live-spend-retry">Retry</button></div>` : "";
+  const table = (cols, rows) => `<div class="table-scroll"><table class="summary-table"><thead><tr>${cols.map(([c, cls]) => `<th class="${cls}">${c}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table></div>`;
+  const named = s.users.filter((u) => u.user).length, keys = s.users.length - named;
+  const head = `${named} user${named === 1 ? "" : "s"}${keys ? ` · ${keys} ownerless key${keys === 1 ? "" : "s"}` : ""}`;
+  el.innerHTML = `<div class="live-summary">
+    <div class="panel"><div class="panel-head"><h2>Active now · ${head}</h2></div>${err}
+      ${table([["User", ""], ["Group", "opt"], ["In flight", "num"], ["Tokens today", "num"], ["Cost today", "num"]], userRows)}</div>
+    <div class="panel"><div class="panel-head"><h2>By group · active users</h2></div>
+      ${table([["Group", ""], ["Users", "num opt"], ["In flight", "num"], ["Tokens today", "num"], ["Cost today", "num"]], groupRows)}</div>
+  </div>`;
+  const retry = $("#live-spend-retry");
+  if (retry) retry.addEventListener("click", refreshLiveSpend);
 }
 
 function tickLive() {
@@ -897,12 +1144,14 @@ function renderLive(root, d) {
   if (d.partial) notes.push(`<div class="notice warn">Partial view: the shared store is unreachable, so only this pod's own requests are shown.</div>`);
   if (stale.length) notes.push(`<div class="notice warn">No recent heartbeat from ${stale.map((p) => `<span class="mono">${esc(p.pod)}</span> (${fmtElapsed(p.age_ms)} ago)`).join(", ")} — its requests may be missing or finished.</div>`);
   const podChips = pods.map((p) => `<span class="pod-chip${stale.some((s) => s.pod === p.pod) ? " stale" : ""}"><span class="mono">${esc(p.pod)}</span> · ${fmtNum(p.inflight)}</span>`).join("");
-  root.innerHTML = notes.join("") + `<div class="panel">
+  live.reqs = reqs;
+  root.innerHTML = notes.join("") + `<div id="live-summary"></div><div class="panel">
     <div class="panel-head"><h2>${reqs.length} in flight</h2><div class="pod-chips">${podChips}</div></div>
     ${reqs.length === 0 ? `<div class="empty">No requests in flight</div>` : `<div class="table-scroll"><table class="live-table">
       <thead><tr>${["Elapsed", "User / key", "Endpoint", "Alias → upstream", "Phase", "Attempt", "Output", "Pod", "Client IP"].map((c) => `<th>${c}</th>`).join("")}</tr></thead>
       <tbody>${body}</tbody></table></div>`}
   </div>`;
+  renderLiveSummary();
 }
 
 // ---------- keys ----------
@@ -999,7 +1248,7 @@ function viewAdmin(view, tab) {
   view.innerHTML = `<h1 class="page-title">Admin console</h1><div class="tabs">${tabs}</div><div id="atab"></div>`;
   const c = $("#atab");
   ({
-    users: adminUsers, keys: adminKeys, usage: adminUsage, roles: adminRoles,
+    users: adminUsers, groups: adminGroups, keys: adminKeys, usage: adminUsage, roles: adminRoles,
     aliases: adminAliases, providers: adminProviders, pricing: adminPricing,
     dlp: adminDLP, audit: adminAudit,
   }[tab] || adminUsers)(c);
@@ -1049,11 +1298,15 @@ async function adminUsers(c) {
   if (loadFailed(c, [r], () => adminUsers(c))) return;
   const users = (r.data && r.data.users) || [];
   c.innerHTML = `<div class="row" style="margin-bottom:1rem"><button class="btn sm" id="new-user">New user</button></div>` +
-    panelTable("Users", ["Subject", "Email", "Roles", "Auth", "Status", "Created", ""],
-      users.map((u) => `<tr>
+    panelTable("Users", ["Subject", "Email", "Group", "Roles", "Month spend", "Auth", "Status", "Created", ""],
+      users.map((u) => {
+        const ms = monthSpend(u);
+        return `<tr>
         <td>${esc(u.subject)}</td>
-        <td>${esc(u.email)}</td>
+        <td class="email-cell">${esc(u.email)}</td>
+        <td class="trunc group-cell" title="${esc(u.group_name)}">${u.group_name ? esc(u.group_name) : `<span class="muted">—</span>`}</td>
         <td>${(u.roles || []).map((x) => `<span class="badge ${x === "airllm_admin" ? "admin" : "neutral"}">${esc(x)}</span>`).join(" ")}</td>
+        <td class="nw"><span class="spend ${ms.level}">${esc(ms.cost)}</span>${ms.tokens ? `<div class="sub spend ${ms.level}">${esc(ms.tokens)}</div>` : ""}</td>
         <td>${esc(u.auth_source || "local")}</td>
         <td>${u.disabled ? `<span class="badge revoked">disabled</span>` : `<span class="badge active">active</span>`}</td>
         <td>${fmtTime(u.created_at)}</td>
@@ -1061,7 +1314,8 @@ async function adminUsers(c) {
           <button class="btn ghost sm" data-edit-user='${esc(JSON.stringify(u))}'>Edit</button>
           ${u.auth_source === "oidc" ? "" : `<button class="btn ghost sm" data-reset-user="${esc(u.id)}">Reset pw</button>`}
           ${u.subject === me.subject ? "" : `<button class="btn danger sm" data-del-user="${esc(u.id)}" data-name="${esc(u.subject)}">Delete</button>`}
-        </td></tr>`));
+        </td></tr>`;
+      }));
   $("#new-user").addEventListener("click", () => editUser(c, null));
   document.querySelectorAll("[data-edit-user]").forEach((b) =>
     b.addEventListener("click", () => editUser(c, JSON.parse(b.getAttribute("data-edit-user")))));
@@ -1076,8 +1330,12 @@ async function adminUsers(c) {
 }
 
 async function editUser(c, u) {
-  const rolesR = await api("GET", "/api/admin/roles");
+  const [rolesR, groupsR] = await Promise.all([api("GET", "/api/admin/roles"), api("GET", "/api/admin/groups")]);
   if (!rolesR.ok) { toast("Could not load roles: " + apiError(rolesR), "err"); return; }
+  if (!groupsR.ok) { toast("Could not load groups: " + apiError(groupsR), "err"); return; }
+  const groupOptions = [{ value: "", label: "No group" },
+    ...((groupsR.data && groupsR.data.groups) || []).map((g) => ({ value: g.id, label: g.name }))];
+  const tz = me.budget && me.budget.tz;
   const availRoles = ((rolesR.data && rolesR.data.roles) || []).map((rp) => rp.role);
   // Roles are picked, not typed, so a typo can't be saved silently. A role
   // the user already holds stays listed even without a policy row.
@@ -1090,21 +1348,41 @@ async function editUser(c, u) {
     { name: "display", label: "Display name", value: u ? (u.display || "") : "" },
     { name: "roles", label: "Roles", type: "checkgroup", options: roleOptions, value: u ? (u.roles || []) : [] },
     { name: "disabled", label: "Disabled", type: "checkbox", value: u ? !!u.disabled : false },
+    { name: "group_id", label: "Group", type: "select", options: groupOptions, value: u ? (u.group_id || "") : "" },
+    { name: "budgets", type: "budgets", value: u ? (u.budgets || {}) : {},
+      label: `Budget per calendar period${tz ? ` (${tz})` : ""} — empty = no cap` },
   );
   if (isNew) fields.push({ name: "password", label: "Password", type: "password", value: "" });
   modalForm(isNew ? "New user" : `Edit user ${u.subject}`, fields, async (v) => {
     const roles = v.roles;
+    let budgets;
+    try { budgets = parseBudgets(v.budgets); } catch (e) { toast(e.message, "err"); return false; }
+    // Sent explicitly (null = no group, 0 = no cap): the update keeps the
+    // stored value of any field it omits.
+    const groupID = v.group_id || null;
     let x;
     if (isNew) {
       x = await api("POST", "/api/admin/users", {
         username: v.username, email: v.email, display: v.display, roles, password: v.password,
       });
-    } else {
-      x = await api("PUT", `/api/admin/users/${encodeURIComponent(u.id)}`, {
-        email: v.email, display: v.display, roles, disabled: v.disabled,
-      });
+      if (!x.ok) { toast((x.data && x.data.error) || "Failed", "err"); return false; }
+      // Create answers only {id}; group and budgets go in a follow-up
+      // update, skipped when nothing is set.
+      const capped = Object.values(budgets).some((per) => Object.values(per).some((n) => n > 0));
+      if (groupID || capped) {
+        const y = await api("PUT", `/api/admin/users/${encodeURIComponent(x.data.id)}`, { group_id: groupID, budgets });
+        if (!y.ok) {
+          toast(`User ${v.username} created, but group and budget were not saved: ${apiError(y)} — edit the user to set them`, "err");
+          adminUsers(c);
+          return true;
+        }
+      }
+      toast("User created"); adminUsers(c); return true;
     }
-    if (x.ok) { toast(isNew ? "User created" : "User saved"); adminUsers(c); return true; }
+    x = await api("PUT", `/api/admin/users/${encodeURIComponent(u.id)}`, {
+      email: v.email, display: v.display, roles, disabled: v.disabled, group_id: groupID, budgets,
+    });
+    if (x.ok) { toast("User saved"); adminUsers(c); return true; }
     toast((x.data && x.data.error) || "Failed", "err"); return false;
   });
 }
@@ -1118,6 +1396,125 @@ function resetUserPassword(_c, id) {
     if (x.ok) { toast("Password reset"); return true; }
     toast((x.data && x.data.error) || "Failed", "err"); return false;
   });
+}
+
+// ---------- groups (admin) ----------
+// User groups are labels for reporting: CRUD on top, spend per group for
+// the current day / week / month below, refreshed every 15s while visible.
+// The selected period and the expanded groups survive refreshes.
+const gspend = { timer: null, period: "month", open: new Set(), guard: staleGuard() };
+
+function stopGroupSpend() {
+  clearTimeout(gspend.timer);
+  gspend.timer = null;
+  document.removeEventListener("visibilitychange", onGroupSpendVisibility);
+}
+
+function onGroupSpendVisibility() {
+  if (!document.hidden && !gspend.timer) loadGroupSpend();
+}
+
+async function adminGroups(c) {
+  stopGroupSpend();
+  const r = await api("GET", "/api/admin/groups");
+  if (loadFailed(c, [r], () => adminGroups(c))) return;
+  const groups = (r.data && r.data.groups) || [];
+  c.innerHTML = `<div class="row" style="margin-bottom:1rem"><button class="btn sm" id="new-group">New group</button></div>` +
+    panelTable("Groups", ["Name", "Description", "Members", ""],
+      groups.map((g) => `<tr>
+        <td>${esc(g.name)}</td>
+        <td class="wrap-cell">${esc(g.description) || `<span class="muted">—</span>`}</td>
+        <td class="num">${fmtNum(g.member_count)}</td>
+        <td class="actions">
+          <button class="btn ghost sm" data-edit-group='${esc(JSON.stringify(g))}'>Edit</button>
+          <button class="btn danger sm" data-del-group="${esc(g.id)}" data-name="${esc(g.name)}" data-members="${Number(g.member_count) || 0}">Delete</button>
+        </td></tr>`)) +
+    `<div id="group-spend"><div class="empty">Loading…</div></div>`;
+  $("#new-group").addEventListener("click", () => editGroup(c, null));
+  c.querySelectorAll("[data-edit-group]").forEach((b) =>
+    b.addEventListener("click", () => editGroup(c, JSON.parse(b.getAttribute("data-edit-group")))));
+  c.querySelectorAll("[data-del-group]").forEach((b) => b.addEventListener("click", async () => {
+    const name = b.getAttribute("data-name"), n = Number(b.getAttribute("data-members"));
+    const who = n ? ` Its ${n} member${n === 1 ? "" : "s"} become${n === 1 ? "s" : ""} ungrouped.` : "";
+    if (!confirm(`Delete group "${name}"?${who}`)) return;
+    const x = await api("DELETE", `/api/admin/groups/${encodeURIComponent(b.getAttribute("data-del-group"))}`);
+    if (x.ok) { toast(`Group ${name} deleted`); adminGroups(c); }
+    else toast(apiError(x), "err");
+  }));
+  document.addEventListener("visibilitychange", onGroupSpendVisibility);
+  loadGroupSpend();
+}
+
+function editGroup(c, g) {
+  modalForm(g ? `Edit group ${g.name}` : "New group", [
+    { name: "name", label: "Name", value: g ? g.name : "" },
+    { name: "description", label: "Description", value: g ? (g.description || "") : "" },
+  ], async (v) => {
+    const body = { name: v.name.trim(), description: v.description.trim() };
+    if (!body.name) { toast("Name is required", "err"); return false; }
+    const x = g
+      ? await api("PUT", `/api/admin/groups/${encodeURIComponent(g.id)}`, body)
+      : await api("POST", "/api/admin/groups", body);
+    if (x.ok) { toast(g ? "Group saved" : "Group created"); adminGroups(c); return true; }
+    toast(x.status === 409 ? `A group named "${body.name}" already exists` : apiError(x), "err");
+    return false;
+  });
+}
+
+async function loadGroupSpend() {
+  clearTimeout(gspend.timer);
+  gspend.timer = null;
+  if (!$("#group-spend") || document.hidden) return; // resumes on visibilitychange
+  const token = gspend.guard.start();
+  const r = await api("GET", `/api/admin/usage/groups?period=${encodeURIComponent(gspend.period)}`);
+  const el = $("#group-spend");
+  if (!gspend.guard.current(token) || !el) return;
+  // A failed load stops refreshing until Retry.
+  if (loadFailed(el, [r], loadGroupSpend)) return;
+  renderGroupSpend(el, r.data || {});
+  gspend.timer = setTimeout(loadGroupSpend, 15000);
+}
+
+function renderGroupSpend(el, d) {
+  const groups = orderGroupSpend(d.groups);
+  const total = d.total || {};
+  const tok = (n) => `<span title="${esc(fmtNum(n))}">${fmtCompact(n)}</span>`;
+  const periods = [["day", "Day"], ["week", "Week"], ["month", "Month"]];
+  const rows = groups.map((g) => {
+    const key = g.group_id == null ? "ungrouped" : String(g.group_id);
+    const open = gspend.open.has(key);
+    const users = g.users || [];
+    const name = g.group_id == null ? `<span class="muted">${esc(g.name || "Ungrouped")}</span>` : esc(g.name);
+    return `<tr class="group-row${open ? " open" : ""}">
+        <td><button class="expander" type="button" data-gkey="${esc(key)}" aria-expanded="${open}"${users.length ? "" : " disabled"}>
+          <span class="caret">${users.length ? "▸" : "·"}</span>${name}</button></td>
+        <td class="num opt">${fmtNum(users.length)}</td><td class="num opt">${fmtNum(g.requests)}</td>
+        <td class="num">${tok(g.tokens)}</td><td class="num">${fmtUSD(g.cost_usd)}</td></tr>` +
+      (open ? users.map((u) => `<tr class="member-row">
+        <td><span class="member">${u.subject ? esc(u.subject) : `<span class="muted">deleted users</span>`}</span></td><td class="opt"></td><td class="num opt">${fmtNum(u.requests)}</td>
+        <td class="num">${tok(u.tokens)}</td><td class="num">${fmtUSD(u.cost_usd)}</td></tr>`).join("") : "");
+  }).join("");
+  el.innerHTML = `<div class="panel">
+    <div class="panel-head wrap"><h2>Spend by group</h2>
+      <div class="seg" role="tablist">${periods.map(([p, l]) => `<button type="button" role="tab" data-period="${p}" aria-selected="${p === gspend.period}" class="${p === gspend.period ? "active" : ""}">${l}</button>`).join("")}</div></div>
+    <div class="panel-sub">${esc(fmtPeriodRange(d.start, d.end, d.tz))} · refreshes every 15s</div>
+    ${groups.length === 0 ? `<div class="empty">No usage in this period.</div>` : `<div class="table-scroll"><table class="group-table">
+      <thead><tr><th>Group</th><th class="num opt">Users</th><th class="num opt">Requests</th><th class="num">Tokens</th><th class="num">Cost</th></tr></thead>
+      <tbody>${rows}</tbody>
+      <tfoot><tr><td>Total</td><td class="num opt">${fmtNum(groups.reduce((n, g) => n + (g.users || []).length, 0))}</td>
+        <td class="num opt">${fmtNum(total.requests)}</td><td class="num">${tok(total.tokens)}</td><td class="num">${fmtUSD(total.cost_usd)}</td></tr></tfoot>
+    </table></div>`}
+  </div>`;
+  el.querySelectorAll("[data-period]").forEach((b) => b.addEventListener("click", () => {
+    if (b.getAttribute("data-period") === gspend.period) return;
+    gspend.period = b.getAttribute("data-period");
+    loadGroupSpend();
+  }));
+  el.querySelectorAll("[data-gkey]").forEach((b) => b.addEventListener("click", () => {
+    const k = b.getAttribute("data-gkey");
+    if (gspend.open.has(k)) gspend.open.delete(k); else gspend.open.add(k);
+    renderGroupSpend(el, d);
+  }));
 }
 
 async function adminKeys(c) {
@@ -2073,6 +2470,19 @@ function renderFormField(f) {
         return `<input type="number" min="0" step="any" data-limit="${d}.${w}" value="${esc(v)}" aria-label="${label} per ${w}" />`;
       }).join("")}`).join("")}</div></div>`;
   }
+  if (f.type === "budgets") {
+    // A user's budgets ({tokens|cost_usd: {day|week|month: N}}) in the same
+    // grid style as role limits; 0 is shown as an empty cell (no cap).
+    const b = f.value || {};
+    const units = [["tokens", "Tokens", "1"], ["cost_usd", "Cost $", "any"]];
+    const periods = [["day", "Day"], ["week", "Week"], ["month", "Month"]];
+    return `<div class="field" data-field="${f.name}"><span class="lab">${esc(f.label)}</span>
+      <div class="limits-grid budget-grid"><span></span>${periods.map(([, pl]) => `<span class="lab">${pl}</span>`).join("")}
+      ${units.map(([u, label, step]) => `<span class="lab">${label}</span>${periods.map(([p, pl]) => {
+        const n = Number(b[u] && b[u][p]) || 0;
+        return `<input type="number" min="0" step="${step}" data-budget="${u}.${p}" value="${n > 0 ? esc(n) : ""}" placeholder="no cap" aria-label="${label} per ${pl.toLowerCase()}" />`;
+      }).join("")}`).join("")}</div></div>`;
+  }
   if (f.type === "textarea") {
     return `${open}
       <textarea name="${f.name}">${esc(f.value)}</textarea></label>`;
@@ -2137,6 +2547,10 @@ function modalForm(title, fields, onSubmit) {
           if (!Object.keys(out[d]).length) delete out[d];
         });
         v[f.name] = out;
+      } else if (f.type === "budgets") {
+        // Raw cell strings; the caller parses and validates them.
+        v[f.name] = {};
+        form.querySelectorAll("[data-budget]").forEach((el) => { v[f.name][el.getAttribute("data-budget")] = el.value; });
       } else {
         const el = form[f.name];
         v[f.name] = f.type === "checkbox" ? el.checked : el.value;

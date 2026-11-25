@@ -117,14 +117,19 @@ func reserveTokensFor(maxTokens *int) int64 {
 	return defaultTokenReservation
 }
 
-// limitDenied checks the key's usage limits, optimistically reserving
+// limitDenied checks the key owner's calendar budgets, then the key's usage
+// limits, optimistically reserving
 // reserveTokens of token headroom when the check passes (see
 // Limiter.Check's doc) — pass 0 to skip reservation (e.g. for ingresses,
 // like audio, with no token dimension). It returns a 429-ready message and
 // true when the request must be rejected, plus the Decision so the caller
 // can thread its reservation fields through to finalizeUsage/Add. Redis
-// errors fail open.
+// errors fail open. The budget check runs first and reserves nothing, so a
+// request it refuses leaves no key reservation behind.
 func (s *Server) limitDenied(ctx context.Context, ak authedKey, reserveTokens int64) (string, bool, limits.Decision) {
+	if msg, denied := s.budgetDenied(ctx, ak.UserID); denied {
+		return msg, true, limits.Decision{}
+	}
 	dec, err := s.limiter.Check(ctx, ak.KeyID, ak.Policy.ParseLimits(), reserveTokens)
 	if err != nil {
 		slog.Error("limiter check failed; failing open", "err", err)
@@ -188,6 +193,7 @@ func (s *Server) releaseReservation(ctx context.Context, keyID string, rsv *limi
 // knowing what one is; the reasoning count rides along for the ledger, the
 // metrics and the log line, where an operator can see the split.
 func (s *Server) finalizeUsage(ctx context.Context, entry ledger.Entry, keyID, upstreamModel string, u llm.Usage, rsv *limits.Decision) ledger.Entry {
+	entry.TS = s.clock()
 	entry.PromptTokens = u.PromptTokens
 	entry.CompletionTokens = u.CompletionTokens
 	entry.ReasoningTokens = u.ReasoningTokens
@@ -232,6 +238,9 @@ func (s *Server) finalizeUsage(ctx context.Context, entry ledger.Entry, keyID, u
 			slog.Error("limiter add failed", "err", err)
 		}
 	}
+	// Budgets count what the ledger row records, whatever the status: a
+	// stream that broke after it started still spent its tokens.
+	s.addBudgetUsage(sctx, entry.UserID, entry.TS, u.BilledTokens(), costMicro)
 	return entry
 }
 
@@ -253,6 +262,7 @@ func (s *Server) finalizeUsage(ctx context.Context, entry ledger.Entry, keyID, u
 // alias that has the cache, logged as "cache"; empty for every other
 // request, whose log line keeps its shape.
 func (s *Server) finalizeAudioUsage(ctx context.Context, entry ledger.Entry, keyID string, costMicro, audioSeconds, ttsChars int64, cache cacheOutcome) {
+	entry.TS = s.clock()
 	entry.CostUSD = float64(costMicro) / 1e6
 	s.ledger.Record(ctx, entry)
 	s.metrics.RecordUsage(entry.IngressProtocol, llm.Usage{}, entry.CostUSD)
@@ -278,6 +288,7 @@ func (s *Server) finalizeAudioUsage(ctx context.Context, entry ledger.Entry, key
 		if err := s.limiter.Add(sctx, keyID, 0, costMicro, audioSeconds, ttsChars, 0, 0); err != nil {
 			slog.Error("limiter add failed", "err", err)
 		}
+		s.addBudgetUsage(sctx, entry.UserID, entry.TS, 0, costMicro)
 	}
 }
 

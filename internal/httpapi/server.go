@@ -5,6 +5,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/auth"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/blob"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/breaker"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/budget"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/capture"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/config"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/lcr"
@@ -91,6 +93,10 @@ type Server struct {
 	lcr           *lcr.Store    // per-(provider,model) EWMA availability for the lcr strategy; nil Snapshot returns all-1.0
 	live          *liveRegistry // this pod's in-flight data-plane requests; nil tracks nothing
 
+	budgets  *budget.Counter                     // per-user calendar budgets; nil enforces none
+	userInfo atomic.Pointer[map[string]userInfo] // users with budgets or a group, by id; see budgets.go
+	reports  reportCache                         // recent spend aggregates for the users list and group report
+
 	// Test hooks: non-nil values replace the real implementations in tests.
 	auditHook    func(ctx context.Context, actor, action, target string, detail any)
 	ensureUserFn func(ctx context.Context, p auth.Principal) (ensuredUser, error)
@@ -159,6 +165,10 @@ func NewServer(cfg *config.Config, st *store.Store, deps Deps) *Server {
 		s.blobStore = deps.Blob
 	}
 	s.captureIdx = &captureIndex{pg: st.PG}
+	s.budgets = budget.NewCounter(st.RDB, s.limitsLoc(), now, s.ledgerUsage)
+	if err := s.loadUserInfoLocked(context.Background()); err != nil {
+		slog.Warn("user budgets and groups not loaded; retrying on the next config refresh", "err", err)
+	}
 	s.routes()
 	return s
 }
@@ -309,8 +319,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// purgeLookupCaches forgets every cached API key and alias plan.
+// purgeLookupCaches forgets every cached API key and alias plan, and the
+// cached spend reports (a user or group edit changes them).
 func (s *Server) purgeLookupCaches() {
+	s.reports.purge()
 	s.keyCache.Purge()
 	if s.router != nil {
 		s.router.PurgeCache()
