@@ -163,3 +163,9 @@ test("liveSummary: group and user names that are Object.prototype keys", () => {
   assert.equal(byUser.toString.tokens, 5);
   assert.equal({}.inflight, undefined);
 });
+
+test("monthSpend: null spend (server couldn't compute it) is unknown, not $0", () => {
+  const m = plain(ctx.monthSpend({ spend: null, budgets: { cost_usd: { month: 50 }, tokens: { month: 1000000 } } }));
+  assert.ok(m.cost.startsWith("—"), m.cost);
+  assert.ok(m.tokens.startsWith("—"), m.tokens);
+});

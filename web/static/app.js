@@ -868,6 +868,10 @@ function monthSpend(u) {
   const b = (u && u.budgets) || {};
   const capCost = Number(b.cost_usd && b.cost_usd.month) || 0;
   const capTok = Number(b.tokens && b.tokens.month) || 0;
+  // spend: null = the server couldn't compute it; say so instead of "$0".
+  if (u && u.spend === null) {
+    return { cost: "—" + (capCost > 0 ? " / " + fmtUSD(capCost) : ""), tokens: capTok > 0 ? `— / ${fmtCompact(capTok)} tok` : "", level: budgetLevel(null) };
+  }
   const pc = budgetPct(s.cost_usd, capCost), pt = budgetPct(s.tokens, capTok);
   const worst = pc == null ? pt : (pt == null ? pc : Math.max(pc, pt));
   return {
@@ -1064,7 +1068,7 @@ async function refreshLiveSpend() {
   if (!$("#live-root")) return; // navigated away meanwhile
   if (r.ok) {
     live.spend = Object.create(null);
-    ((r.data && r.data.users) || []).forEach((u) => { live.spend[u.subject] = (u.spend && u.spend.day) || { tokens: 0, cost_usd: 0 }; });
+    ((r.data && r.data.users) || []).forEach((u) => { if (u.spend) live.spend[u.subject] = u.spend.day || { tokens: 0, cost_usd: 0 }; });
     live.spendErr = "";
   } else {
     live.spend = null;
