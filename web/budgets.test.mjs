@@ -35,7 +35,7 @@ test("fmtCompact", () => {
 test("fmtZoned: wall time in the given zone, UTC fallback for a bad zone", () => {
   assert.equal(ctx.fmtZoned("2026-12-01T00:00:00Z", "UTC"), "2026-12-01 00:00 UTC");
   assert.equal(ctx.fmtZoned("2026-12-01T05:00:00Z", "America/New_York"), "2026-12-01 00:00 America/New_York");
-  assert.equal(ctx.fmtZoned("2026-11-30T23:00:00Z", "Europe/Kyiv"), "2026-12-01 01:00 Europe/Kyiv");
+  assert.equal(ctx.fmtZoned("2026-11-30T23:00:00Z", "Europe/Berlin"), "2026-12-01 00:00 Europe/Berlin");
   assert.equal(ctx.fmtZoned("2026-12-01T00:00:00Z", "Not/AZone"), "2026-12-01 00:00 UTC");
   assert.equal(ctx.fmtZoned("2026-12-01T00:00:00Z", ""), "2026-12-01 00:00 UTC");
   assert.equal(ctx.fmtZoned("", "UTC"), "—");
