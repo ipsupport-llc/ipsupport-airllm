@@ -41,8 +41,10 @@ in place and the whole file reruns on the next boot, and a failed or
 interrupted `CONCURRENTLY` build leaves an `INVALID` index that `IF NOT EXISTS`
 would skip. So a no-transaction file has exactly this shape and nothing else:
 one index, dropped first, then created `IF NOT EXISTS` under the same name.
-`UNIQUE` is allowed; any other statement is not, because one that committed
-before a crash and isn't idempotent would fail every rerun.
+The index name is unqualified in both statements (no schema; the table after
+`ON` may be qualified). `UNIQUE` is allowed; any other statement is not,
+because one that committed before a crash and isn't idempotent would fail
+every rerun.
 
 ```sql
 -- airllm:no-transaction

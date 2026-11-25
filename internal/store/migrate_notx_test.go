@@ -32,6 +32,17 @@ func TestSplitStatements(t *testing.T) {
 		{"escape string ending in a backslash", `SELECT E'a\\'; SELECT 2`, []string{`SELECT E'a\\'`, "SELECT 2"}},
 		{"escape string continued on the next line", "SELECT E'a'\n'b\\';c';\nSELECT 2;", []string{"SELECT E'a'\n'b\\';c'", "SELECT 2"}},
 		{"escape string continued past a comment line", "SELECT E'a'  \n-- note\n\t'b\\';c'; SELECT 2", []string{"SELECT E'a'  \n-- note\n\t'b\\';c'", "SELECT 2"}},
+		// Checked against PostgreSQL 18: -- comments may sit anywhere in the
+		// separator and a CR alone is a newline; a /* */ comment ends the
+		// string instead, so 'b\' is a new standard string and ; splits.
+		{"continued after a comment on the same line", "SELECT E'a' -- n\n'b\\';c'; SELECT 2", []string{"SELECT E'a' -- n\n'b\\';c'", "SELECT 2"}},
+		{"continued after a CR-terminated comment", "SELECT E'a' -- n\r'b\\';c'; SELECT 2", []string{"SELECT E'a' -- n\r'b\\';c'", "SELECT 2"}},
+		{"continued on a CR-only line", "SELECT E'a'\r'b\\';c';\rSELECT 2", []string{"SELECT E'a'\r'b\\';c'", "SELECT 2"}},
+		{"continued with vertical tab and form feed", "SELECT E'a'\v\f\n\v'b\\';c'; SELECT 2", []string{"SELECT E'a'\v\f\n\v'b\\';c'", "SELECT 2"}},
+		{"block comment after the newline ends the string", "SELECT E'a'\n/* x */'b\\';c'", []string{"SELECT E'a'\n/* x */'b\\'", "c'"}},
+		{"block comment holding the newline ends the string", "SELECT E'a' /* x\n */'b\\';c'", []string{"SELECT E'a' /* x\n */'b\\'", "c'"}},
+		{"no newline, no continuation", "SELECT E'a' 'b\\';c'", []string{"SELECT E'a' 'b\\'", "c'"}},
+		{"line comment ends at CR", "SELECT 1 -- x\r; SELECT 2", []string{"SELECT 1 -- x", "SELECT 2"}},
 		{"standard string continued on the next line", "SELECT 'a'\n'b;c'; SELECT 2", []string{"SELECT 'a'\n'b;c'", "SELECT 2"}},
 		{"standard string with doubled quotes", "SELECT 'x'';y''', ''';'; SELECT 2", []string{"SELECT 'x'';y''', ''';'", "SELECT 2"}},
 		{"standard string keeps backslash literal", `SELECT 'a\'; SELECT 2`, []string{`SELECT 'a\'`, "SELECT 2"}},
@@ -269,18 +280,26 @@ func sqlTokens(stmt string) []string {
 	return toks
 }
 
-// indexName folds an index name the way Postgres does: a quoted name keeps
-// its case, an unquoted one is lowercased; a schema prefix is dropped.
+// indexName folds an unqualified index name the way Postgres does: a
+// quoted name keeps its case, an unquoted one is lowercased.
 func indexName(raw string) string {
-	if !strings.HasPrefix(raw, `"`) {
-		if i := strings.LastIndex(raw, "."); i >= 0 {
-			raw = raw[i+1:]
-		}
-	}
 	if len(raw) > 1 && strings.HasPrefix(raw, `"`) && strings.HasSuffix(raw, `"`) {
 		return strings.ReplaceAll(raw[1:len(raw)-1], `""`, `"`)
 	}
 	return strings.ToLower(raw)
+}
+
+// qualified reports whether the name at toks[i] carries a schema: a dot in
+// an unquoted token (public.x, public."X"), or a following token that
+// starts with one ("s".x, "s"."x").
+func qualified(toks []string, i int) bool {
+	if i >= len(toks) {
+		return false
+	}
+	if !strings.HasPrefix(toks[i], `"`) && strings.Contains(toks[i], ".") {
+		return true
+	}
+	return i+1 < len(toks) && strings.HasPrefix(toks[i+1], ".")
 }
 
 func hasKeywords(toks []string, words ...string) bool {
@@ -306,12 +325,18 @@ func checkNoTxFile(sql string) error {
 		return fmt.Errorf("%d statements; %s", len(stmts), noTxShape)
 	}
 	drop := sqlTokens(stmts[0])
+	if hasKeywords(drop, "DROP", "INDEX", "CONCURRENTLY", "IF", "EXISTS") && qualified(drop, 5) {
+		return fmt.Errorf("first statement %q: the index name must be unqualified (no schema)", stmts[0])
+	}
 	if len(drop) != 6 || !hasKeywords(drop, "DROP", "INDEX", "CONCURRENTLY", "IF", "EXISTS") {
 		return fmt.Errorf("first statement %q; %s", stmts[0], noTxShape)
 	}
 	create := sqlTokens(stmts[1])
 	if len(create) > 1 && strings.EqualFold(create[1], "UNIQUE") {
 		create = append([]string{create[0]}, create[2:]...)
+	}
+	if hasKeywords(create, "CREATE", "INDEX", "CONCURRENTLY", "IF", "NOT", "EXISTS") && qualified(create, 6) {
+		return fmt.Errorf("second statement %q: the index name must be unqualified (no schema)", stmts[1])
 	}
 	if len(create) < 8 || !hasKeywords(create, "CREATE", "INDEX", "CONCURRENTLY", "IF", "NOT", "EXISTS") || !strings.EqualFold(create[7], "ON") {
 		return fmt.Errorf("second statement %q; %s", stmts[1], noTxShape)
@@ -329,7 +354,9 @@ func TestCheckNoTxFile(t *testing.T) {
 		ok        bool
 	}{
 		{"canonical", noTxDirective + "\n" + drop + "CREATE INDEX CONCURRENTLY IF NOT EXISTS a_idx ON t (a);\n", true},
-		{"unique, lower case, schema-qualified drop", "drop index concurrently if exists public.A_IDX;\ncreate unique index concurrently if not exists a_idx on t(a) where a > 0;", true},
+		{"unique, lower case, qualified table", "drop index concurrently if exists A_IDX;\ncreate unique index concurrently if not exists a_idx on public.t(a) where a > 0;", true},
+		{"CR-only line endings", "-- airllm:no-transaction\r" + "DROP INDEX CONCURRENTLY IF EXISTS a_idx;\r-- note\rCREATE INDEX CONCURRENTLY IF NOT EXISTS a_idx ON t (a);\r", true},
+		{"CR-terminated comment can't hide a statement", "DROP INDEX CONCURRENTLY IF EXISTS a_idx; -- x\rALTER TABLE t ADD COLUMN b int;\nCREATE INDEX CONCURRENTLY IF NOT EXISTS a_idx ON t (a);", false},
 		{"quoted name", `DROP INDEX CONCURRENTLY IF EXISTS "A idx"; CREATE INDEX CONCURRENTLY IF NOT EXISTS "A idx" ON t (a);`, true},
 		{"comments anywhere", "-- why\n" + drop + "CREATE /* x; */ INDEX -- y\n CONCURRENTLY IF NOT EXISTS a_idx ON t (a); -- done\n", true},
 
@@ -353,6 +380,23 @@ func TestCheckNoTxFile(t *testing.T) {
 				t.Errorf("checkNoTxFile = %v, want ok=%v", err, tc.ok)
 			}
 		})
+	}
+}
+
+func TestCheckNoTxFileRejectsQualifiedIndexNames(t *testing.T) {
+	const create = "CREATE INDEX CONCURRENTLY IF NOT EXISTS a_idx ON t (a);"
+	for _, sql := range []string{
+		"DROP INDEX CONCURRENTLY IF EXISTS public.a_idx;\n" + create,
+		// Would drop another schema's index and leave an INVALID a_idx.
+		"DROP INDEX CONCURRENTLY IF EXISTS other.a_idx;\n" + create,
+		`DROP INDEX CONCURRENTLY IF EXISTS "S"."A";` + "\n" + `CREATE INDEX CONCURRENTLY IF NOT EXISTS "A" ON t (a);`,
+		`DROP INDEX CONCURRENTLY IF EXISTS public."A";` + "\n" + `CREATE INDEX CONCURRENTLY IF NOT EXISTS "A" ON t (a);`,
+		`DROP INDEX CONCURRENTLY IF EXISTS "s".a_idx;` + "\n" + create,
+		"DROP INDEX CONCURRENTLY IF EXISTS a_idx;\nCREATE INDEX CONCURRENTLY IF NOT EXISTS public.a_idx ON t (a);",
+	} {
+		if err := checkNoTxFile(sql); err == nil || !strings.Contains(err.Error(), "unqualified") {
+			t.Errorf("checkNoTxFile(%q) = %v, want an unqualified-name error", sql, err)
+		}
 	}
 }
 

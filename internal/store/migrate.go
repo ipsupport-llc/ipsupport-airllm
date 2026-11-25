@@ -27,9 +27,10 @@ const migrationLockKey = 72_70_01
 // rerun from the top on the next boot. A failed or interrupted
 // CREATE INDEX CONCURRENTLY also leaves an INVALID index behind, which
 // IF NOT EXISTS would then skip. So such a file holds exactly this shape:
-// one index, dropped first, then created IF NOT EXISTS under the same name,
-// and nothing else (a non-idempotent statement that committed before a crash
-// would fail every rerun):
+// one index, dropped first, then created IF NOT EXISTS under the same
+// unqualified name (no schema; the table may be qualified), and nothing else
+// (a non-idempotent statement that committed before a crash would fail
+// every rerun):
 //
 //	-- airllm:no-transaction
 //	DROP INDEX CONCURRENTLY IF EXISTS idx_usage_ledger_alias_ts;
@@ -201,7 +202,7 @@ func lexSQL(script string) []sqlSeg {
 			}
 		case strings.HasPrefix(script[i:], "--"):
 			kind = segComment
-			if n := strings.IndexByte(script[i:], '\n'); n >= 0 {
+			if n := strings.IndexAny(script[i:], "\n\r"); n >= 0 {
 				i += n
 			} else {
 				i = len(script)
@@ -274,28 +275,27 @@ func quotedEnd(s string, i int) int {
 	return len(s)
 }
 
-// stringContinues reports whether s[j:] is Postgres's quote continuation:
-// horizontal whitespace, a newline, then whitespace or -- comments, then a
-// quote, whose index it returns.
+// stringContinues reports whether s[j:] is Postgres's quote continuation —
+// whitespace and -- comments holding at least one newline (\n or \r), then
+// a quote — and returns that quote's index. A /* */ comment ends the string
+// instead, as it does in the server (checked against PostgreSQL 18).
 func stringContinues(s string, j int) (int, bool) {
-	for j < len(s) && (s[j] == ' ' || s[j] == '\t' || s[j] == '\f') {
-		j++
-	}
-	if j >= len(s) || (s[j] != '\n' && s[j] != '\r') {
-		return 0, false
-	}
+	newline := false
 	for j < len(s) {
-		switch {
-		case isSpace(s[j]):
+		switch c := s[j]; {
+		case c == '\n' || c == '\r':
+			newline = true
+			j++
+		case isSpace(c):
 			j++
 		case strings.HasPrefix(s[j:], "--"):
-			n := strings.IndexByte(s[j:], '\n')
+			n := strings.IndexAny(s[j:], "\n\r")
 			if n < 0 {
 				return 0, false
 			}
-			j += n + 1
+			j += n
 		default:
-			return j, s[j] == '\''
+			return j, newline && c == '\''
 		}
 	}
 	return 0, false

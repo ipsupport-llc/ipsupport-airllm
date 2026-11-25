@@ -39,20 +39,32 @@ const postMigrationGrace = 60 * time.Second
 // other boot phase it fails, so a hang there (a datastore that never
 // answers, OIDC discovery) restarts the pod as before.
 type bootHandler struct {
-	now       func() time.Time // the clock; nil means time.Now
-	migrating atomic.Bool
-	doneAt    atomic.Int64 // unix nanos migrations finished; 0 = not yet
+	now func() time.Time // the clock; nil means time.Now
+	// phase switches in one atomic store, so /healthz has no gap between
+	// migrating and the grace period. nil: not live.
+	phase atomic.Pointer[bootPhase]
+}
+
+type bootPhase struct {
+	migrating bool
+	// doneAt is when migrations succeeded. A time.Time from time.Now keeps
+	// its monotonic reading, so a wall-clock step does not stretch or cut
+	// the grace period.
+	doneAt time.Time
 }
 
 // MigrationStarted marks the migration lock as held.
-func (b *bootHandler) MigrationStarted() { b.migrating.Store(true) }
+func (b *bootHandler) MigrationStarted() { b.phase.Store(&bootPhase{migrating: true}) }
 
-// MigrationFinished ends the migrating phase and starts the grace period,
-// if MigrationStarted was called.
-func (b *bootHandler) MigrationFinished() {
-	if b.migrating.Swap(false) {
-		b.doneAt.Store(b.clock().UnixNano())
+// MigrationFinished ends the migrating phase. Only migrations that
+// succeeded (ok) after MigrationStarted start the grace period; after a
+// failure the process is about to exit.
+func (b *bootHandler) MigrationFinished(ok bool) {
+	if p := b.phase.Load(); ok && p != nil && p.migrating {
+		b.phase.Store(&bootPhase{doneAt: b.clock()})
+		return
 	}
+	b.phase.Store(nil)
 }
 
 func (b *bootHandler) clock() time.Time {
@@ -64,9 +76,9 @@ func (b *bootHandler) clock() time.Time {
 
 func (b *bootHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	status, live := "starting", false
-	if b.migrating.Load() {
+	if p := b.phase.Load(); p != nil && p.migrating {
 		status, live = "migrating", true
-	} else if at := b.doneAt.Load(); at != 0 && b.clock().Sub(time.Unix(0, at)) < postMigrationGrace {
+	} else if p != nil && b.clock().Sub(p.doneAt) < postMigrationGrace {
 		live = true
 	}
 	code := http.StatusServiceUnavailable

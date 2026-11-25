@@ -63,7 +63,7 @@ func TestBootHandlerPhases(t *testing.T) {
 	check("migrating", b, migrating)
 	now = now.Add(10 * time.Minute) // a long migration: no time limit
 	check("still migrating", b, migrating)
-	b.MigrationFinished()
+	b.MigrationFinished(true)
 	check("right after migrations", b, grace)
 	now = now.Add(postMigrationGrace - time.Second)
 	check("end of the grace period", b, grace)
@@ -71,9 +71,28 @@ func TestBootHandlerPhases(t *testing.T) {
 	check("after the grace period", b, starting)
 
 	// A Migrate that fails before taking the lock never went live.
+	early := &bootHandler{now: func() time.Time { return now }}
+	early.MigrationFinished(false)
+	check("migration never started", early, starting)
+
+	// A failed migration gets no grace: the process is about to exit.
 	failed := &bootHandler{now: func() time.Time { return now }}
-	failed.MigrationFinished()
-	check("migration never started", failed, starting)
+	failed.MigrationStarted()
+	failed.MigrationFinished(false)
+	check("migration failed", failed, starting)
+}
+
+// The grace period is measured on the monotonic clock, so stepping the wall
+// clock can't stretch or cut it.
+func TestBootHandlerGraceUsesTheMonotonicClock(t *testing.T) {
+	b := &bootHandler{}
+	b.MigrationStarted()
+	b.MigrationFinished(true)
+	// time.Time.String documents the trailing "m=±..." for a monotonic reading.
+	p := b.phase.Load()
+	if p == nil || p.migrating || !strings.Contains(p.doneAt.String(), " m=") {
+		t.Fatalf("phase %+v: want a grace start with a monotonic reading", p)
+	}
 }
 
 // TestSwapHandlerServesTheRealHandlerAfterTheSwap runs one http.Server the
