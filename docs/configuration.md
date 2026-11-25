@@ -802,7 +802,10 @@ the rebuild fails, requests are allowed and the error is logged.
 group leaves its members ungrouped, as are users created by an OIDC login.
 `GET /api/admin/usage/groups` reports the current day, week or month per group
 and per user, attributing usage to each user's current group; users without
-one, and usage of deleted users, are reported as `Ungrouped`.
+one, and usage of deleted users, are reported as `Ungrouped`. Each replica
+reuses that report, and the spend in the admin users list, for up to 15 s
+(forgotten on any admin save), so consoles polling them do not each scan the
+ledger; new usage shows within that time.
 
 ## Kubernetes (Helm chart)
 

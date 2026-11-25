@@ -82,7 +82,7 @@ func (s *Server) adminRoutes() {
 
 func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	// Spend is read before the users, in one query for all of them.
-	spend, err := s.spendByUser(r.Context(), s.currentPeriods(), "")
+	spend, err := s.cachedSpendByUser(r.Context())
 	if err != nil {
 		writeControlError(w, http.StatusInternalServerError, "failed to load spend")
 		return

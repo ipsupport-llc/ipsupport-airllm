@@ -1,11 +1,13 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
@@ -233,30 +235,38 @@ func (s *Server) handleAdminUsageGroups(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	win := s.currentPeriods()[period]
+	rep, err := s.reports.get("groups:"+period.Name()+":"+win.Start.Format(time.RFC3339), s.clock(), func() (any, error) {
+		return s.groupReport(r.Context(), period, win)
+	})
+	if err != nil {
+		writeControlError(w, http.StatusInternalServerError, "failed to load usage")
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
 
+// groupReport builds the body of GET /api/admin/usage/groups.
+func (s *Server) groupReport(ctx context.Context, period budget.Period, win periodWindow) (map[string]any, error) {
 	groups := map[string]*groupUsage{}
 	ungrouped := &groupUsage{Name: ungroupedName, Users: []groupUsageUser{}}
-	grows, err := s.st.PG.Query(r.Context(), `SELECT id::text, name FROM user_groups`)
+	grows, err := s.st.PG.Query(ctx, `SELECT id::text, name FROM user_groups`)
 	if err != nil {
-		writeControlError(w, http.StatusInternalServerError, "failed to load groups")
-		return
+		return nil, err
 	}
 	for grows.Next() {
 		var id, name string
 		if err := grows.Scan(&id, &name); err != nil {
 			grows.Close()
-			writeControlError(w, http.StatusInternalServerError, "failed to read groups")
-			return
+			return nil, err
 		}
 		groups[id] = &groupUsage{GroupID: &id, Name: name, Users: []groupUsageUser{}}
 	}
 	grows.Close()
 	if err := grows.Err(); err != nil {
-		writeControlError(w, http.StatusInternalServerError, "failed to read groups")
-		return
+		return nil, err
 	}
 
-	rows, err := s.st.PG.Query(r.Context(), `
+	rows, err := s.st.PG.Query(ctx, `
 		SELECT l.user_id::text, COALESCE(u.subject, ''), u.group_id::text,
 		       COALESCE(SUM(l.prompt_tokens + l.completion_tokens), 0)::bigint,
 		       COALESCE(round(SUM(l.cost_usd) * 1000000), 0)::bigint,
@@ -265,8 +275,7 @@ func (s *Server) handleAdminUsageGroups(w http.ResponseWriter, r *http.Request) 
 		WHERE l.ts >= $1 AND l.ts < $2
 		GROUP BY l.user_id, u.subject, u.group_id`, win.Start, win.End)
 	if err != nil {
-		writeControlError(w, http.StatusInternalServerError, "failed to load usage")
-		return
+		return nil, err
 	}
 	defer rows.Close()
 	var total usageTotals
@@ -275,8 +284,7 @@ func (s *Server) handleAdminUsageGroups(w http.ResponseWriter, r *http.Request) 
 		var u groupUsageUser
 		var groupID *string
 		if err := rows.Scan(&u.UserID, &u.Subject, &groupID, &u.Tokens, &u.costMicro, &u.Requests); err != nil {
-			writeControlError(w, http.StatusInternalServerError, "failed to read usage")
-			return
+			return nil, err
 		}
 		u.CostUSD = microToUSD(u.costMicro)
 		g := ungrouped
@@ -292,8 +300,7 @@ func (s *Server) handleAdminUsageGroups(w http.ResponseWriter, r *http.Request) 
 		total.Requests += u.Requests
 	}
 	if err := rows.Err(); err != nil {
-		writeControlError(w, http.StatusInternalServerError, "failed to read usage")
-		return
+		return nil, err
 	}
 	total.CostUSD = microToUSD(totalMicro)
 
@@ -321,12 +328,12 @@ func (s *Server) handleAdminUsageGroups(w http.ResponseWriter, r *http.Request) 
 		}
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
-	writeJSON(w, http.StatusOK, map[string]any{
+	return map[string]any{
 		"period": period.Name(),
 		"tz":     s.limitsLoc().String(),
 		"start":  win.Start,
 		"end":    win.End,
 		"total":  total,
 		"groups": out,
-	})
+	}, nil
 }

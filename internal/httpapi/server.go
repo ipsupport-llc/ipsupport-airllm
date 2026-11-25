@@ -95,6 +95,7 @@ type Server struct {
 
 	budgets  *budget.Counter                     // per-user calendar budgets; nil enforces none
 	userInfo atomic.Pointer[map[string]userInfo] // users with budgets or a group, by id; see budgets.go
+	reports  reportCache                         // recent spend aggregates for the users list and group report
 
 	// Test hooks: non-nil values replace the real implementations in tests.
 	auditHook    func(ctx context.Context, actor, action, target string, detail any)
@@ -318,8 +319,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// purgeLookupCaches forgets every cached API key and alias plan.
+// purgeLookupCaches forgets every cached API key and alias plan, and the
+// cached spend reports (a user or group edit changes them).
 func (s *Server) purgeLookupCaches() {
+	s.reports.purge()
 	s.keyCache.Purge()
 	if s.router != nil {
 		s.router.PurgeCache()
