@@ -22,11 +22,16 @@ type authedKey struct {
 	KeyID  string
 	UserID string
 	Policy policy.KeyPolicy
-	// KeyName and Owner (the owner's subject) only label the key in the
-	// admin live view.
-	KeyName string
-	Owner   string
+	// KeyName, Owner (the owner's subject) and OwnerLabel (see
+	// userLabelSQL) only label the key in the admin live view.
+	KeyName    string
+	Owner      string
+	OwnerLabel string
 }
+
+// userLabelSQL is a user's human label for the console: the display name,
+// else the email, else the subject. It reads the users row aliased u.
+const userLabelSQL = `COALESCE(NULLIF(btrim(u.display), ''), NULLIF(btrim(u.email), ''), u.subject)`
 
 // requireAPIKey authenticates a Bearer API key and stores the resolved key
 // on the request context. It returns OpenAI-shaped errors on failure.
@@ -65,12 +70,12 @@ func (s *Server) loadKey(ctx context.Context, hash string) (authedKey, error) {
 	// (RebuildKeySnapshotsUser only touches active keys' snapshots — it
 	// was never the mechanism that was supposed to revoke access here).
 	err := s.st.PG.QueryRow(ctx, `
-		SELECT k.id::text, k.user_id::text, k.policy_snapshot, k.name, u.subject
+		SELECT k.id::text, k.user_id::text, k.policy_snapshot, k.name, u.subject, `+userLabelSQL+`
 		FROM api_keys k
 		JOIN users u ON u.id = k.user_id
 		WHERE k.hash = $1 AND k.status = 'active' AND NOT u.disabled`,
 		hash,
-	).Scan(&ak.KeyID, &ak.UserID, &raw, &ak.KeyName, &ak.Owner)
+	).Scan(&ak.KeyID, &ak.UserID, &raw, &ak.KeyName, &ak.Owner, &ak.OwnerLabel)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return authedKey{}, lookupcache.Miss(err)
 	}

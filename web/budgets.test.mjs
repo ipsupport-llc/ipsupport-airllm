@@ -169,3 +169,20 @@ test("monthSpend: null spend (server couldn't compute it) is unknown, not $0", (
   assert.ok(m.cost.startsWith("—"), m.cost);
   assert.ok(m.tokens.startsWith("—"), m.tokens);
 });
+
+test("liveSummary: keyed by subject, carries the label, sorted by what is shown", () => {
+  const reqs = [
+    { user: "370926235989083751", user_label: "Zed Zimmer", key_name: "a" },
+    { user: "100", user_label: "Amy Adams", key_name: "c" },
+    { user: "370926235989083751", user_label: "Zed Zimmer", key_name: "b" },
+    { user: "200", key_name: "d" }, // from a pod that predates user_label
+    { user: "300", user_label: "Bea Brown", key_name: "e" },
+  ];
+  const s = plain(ctx.liveSummary(reqs, { "370926235989083751": { tokens: 7, cost_usd: 0.1 } }));
+  assert.deepEqual(s.users.map((u) => [u.user, u.label, u.inflight, u.tokens]), [
+    ["370926235989083751", "Zed Zimmer", 2, 7],
+    ["200", "200", 1, null],
+    ["100", "Amy Adams", 1, null],
+    ["300", "Bea Brown", 1, null],
+  ]);
+});

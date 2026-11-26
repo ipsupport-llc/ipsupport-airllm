@@ -400,6 +400,10 @@ details.hint[open] summary { margin-bottom: 0.4rem; }
 .pod-chip.stale { color: var(--warn); border-color: rgba(251, 191, 36, 0.4); }
 .live-table td { vertical-align: top; white-space: nowrap; }
 .live-table td.wrap { white-space: normal; min-width: 220px; overflow-wrap: anywhere; }
+/* A user label can be a long email: it breaks rather than widening the table. */
+.live-table td.user { white-space: normal; min-width: 9rem; overflow-wrap: anywhere; }
+.live-table td.user .sub { white-space: nowrap; }
+.live-table .waiting { white-space: normal; }
 .live-table tr.session-head td { background: rgba(240, 166, 58, 0.05); border-left: 2px solid var(--accent); padding-top: 0.45rem; padding-bottom: 0.45rem; font-size: 0.84rem; }
 .live-table tr.in-group td:first-child { border-left: 2px solid rgba(240, 166, 58, 0.45); }
 .live-table tr.failover td { background: rgba(251, 191, 36, 0.04); }
@@ -447,6 +451,7 @@ td.wrap-cell { white-space: normal; min-width: 12rem; }
 td.trunc.group-cell { max-width: 9rem; }
 td.email-cell { overflow-wrap: anywhere; min-width: 9rem; }
 .summary-table th { white-space: nowrap; }
+.summary-table td.name { min-width: 9rem; overflow-wrap: anywhere; }
 .summary-table .m-only { display: none; }
 /* On a phone the spend summaries drop their secondary columns (users,
    requests, group — folded under the user) and let names wrap, so tokens
@@ -458,7 +463,7 @@ td.email-cell { overflow-wrap: anywhere; min-width: 9rem; }
   /* Clear of the scroll-hint fade at the panel's right edge. */
   .summary-table :is(th, td):last-child, .group-table :is(th, td):last-child { padding-right: 1.4rem; }
   .summary-table th { white-space: normal; }
-  .summary-table td.name, .group-table .expander, .group-table .member { white-space: normal; overflow-wrap: break-word; }
+  .summary-table td.name, .group-table .expander, .group-table .member { white-space: normal; overflow-wrap: anywhere; }
   .summary-table td.name { min-width: 7rem; }
   td.wrap-cell { white-space: nowrap; }
 }

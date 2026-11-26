@@ -474,6 +474,9 @@ func TestUsageByGroupReport(t *testing.T) {
 	s := f.server(t)
 	asAdmin(s)
 	alice, bob := f.user(t, "alice"), f.user(t, "bob")
+	// Labels: alice by display name, bob (no display name) by email.
+	f.exec(t, `UPDATE users SET display = 'Alice Example', email = 'alice@example.com' WHERE id = $1`, alice)
+	f.exec(t, `UPDATE users SET email = 'bob@example.com' WHERE id = $1`, bob)
 	rec := call(t, s, http.MethodPost, "/api/admin/groups", fmt.Sprintf(`{"name":"finance-%s"}`, f.suffix))
 	wantStatus(t, rec, http.StatusCreated, "create group")
 	var g groupView
@@ -505,6 +508,7 @@ func TestUsageByGroupReport(t *testing.T) {
 			Users    []struct {
 				UserID   *string `json:"user_id"`
 				Subject  string  `json:"subject"`
+				Label    string  `json:"label"`
 				Tokens   int64   `json:"tokens"`
 				CostUSD  float64 `json:"cost_usd"`
 				Requests int64   `json:"requests"`
@@ -553,15 +557,16 @@ func TestUsageByGroupReport(t *testing.T) {
 		t.Fatalf("group %s missing", g.ID)
 	}
 	fg := rep.Groups[finance]
-	if fg.Tokens != 150 || fg.CostUSD != 4 || fg.Requests != 2 || len(fg.Users) != 1 || fg.Users[0].UserID == nil || *fg.Users[0].UserID != alice {
-		t.Errorf("finance = %+v, want alice's 150 tokens, $4, 2 requests", fg)
+	if fg.Tokens != 150 || fg.CostUSD != 4 || fg.Requests != 2 || len(fg.Users) != 1 || fg.Users[0].UserID == nil || *fg.Users[0].UserID != alice ||
+		fg.Users[0].Subject != "alice-"+f.suffix || fg.Users[0].Label != "Alice Example" {
+		t.Errorf("finance = %+v, want alice's 150 tokens, $4, 2 requests, labelled Alice Example", fg)
 	}
 	var bobSeen, deletedSeen bool
 	for _, u := range rep.Groups[ungrouped].Users {
-		if u.UserID != nil && *u.UserID == bob && u.Tokens == 10 && u.CostUSD == 0.5 {
+		if u.UserID != nil && *u.UserID == bob && u.Tokens == 10 && u.CostUSD == 0.5 && u.Label == "bob@example.com" {
 			bobSeen = true
 		}
-		if u.UserID == nil {
+		if u.UserID == nil && u.Subject == "" && u.Label == "" {
 			deletedSeen = true
 		}
 	}
