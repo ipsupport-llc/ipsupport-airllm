@@ -565,9 +565,16 @@ with `partial: true`.
 taken from the replica's in-memory copy of users' groups when the request
 started; `""` when the owner has none.
 
+`user` is the key owner's subject, the stable id; `user_label` is the
+owner's display name, else email, else subject, read with the key (so a
+rename shows within the key cache TTL). The console shows the label with the
+subject as a tooltip.
+
 `output_tokens` is best effort: one per streamed chunk that carries output,
 replaced by the upstream's own count when it reports one; always `0` for
-unary requests. `client_ip` is resolved the same way as for the
+unary requests, whose bytes are counted only once the response is written,
+so the console shows a unary request with no output yet as waiting for
+response. `client_ip` is resolved the same way as for the
 login lockout: the TCP peer, or — when the peer is a private/loopback proxy —
 the rightmost public `X-Forwarded-For` entry. No prompt or response content and no key secret is ever kept.
 

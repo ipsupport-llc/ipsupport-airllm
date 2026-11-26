@@ -911,7 +911,8 @@ function orderGroupSpend(groups) {
 // liveSummary rolls the Live page's in-flight requests up per user: in
 // flight count, the user's current group and today's spend from
 // spendBySubject ({subject: {tokens, cost_usd}}; null while not loaded, so
-// spend is null = unknown). A request without an owner (a key with no
+// spend is null = unknown). Users are keyed by subject (user) and carry the
+// label shown for them (user_label, else the subject). A request without an owner (a key with no
 // user) counts under its key name, ungrouped and without spend, so the
 // in-flight counts always add up to the table below. groups sums those
 // active users per group, Ungrouped ("") last; its spend is null when no
@@ -923,13 +924,13 @@ function liveSummary(requests, spendBySubject) {
     let u = byKey[key];
     if (!u) {
       const sp = r.user && spendBySubject && Object.prototype.hasOwnProperty.call(spendBySubject, r.user) ? spendBySubject[r.user] : null;
-      u = byKey[key] = { user: r.user || "", key_name: r.user ? "" : (r.key_name || r.key_id || ""), group: r.group || "",
+      u = byKey[key] = { user: r.user || "", label: r.user ? (r.user_label || r.user) : "", key_name: r.user ? "" : (r.key_name || r.key_id || ""), group: r.group || "",
         inflight: 0, tokens: sp ? Number(sp.tokens) || 0 : null, cost_usd: sp ? Number(sp.cost_usd) || 0 : null };
       users.push(u);
     }
     u.inflight++;
   });
-  const name = (u) => u.user || u.key_name;
+  const name = (u) => u.label || u.key_name;
   users.sort((a, b) => b.inflight - a.inflight || name(a).localeCompare(name(b)));
   const groups = [], byGroup = Object.create(null);
   users.forEach((u) => {
@@ -965,6 +966,24 @@ function fmtBytes(n) {
   if (v < 1024) return `${v} B`;
   if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
   return `${(v / 1024 / 1024).toFixed(1)} MB`;
+}
+
+// userLabelHTML renders a user for the console: the human label (display
+// name, else email; the API falls back to the subject) with the subject
+// (the stable id) in a tooltip. A label that is missing (an older pod or
+// report) or equal to the id shows just the id.
+function userLabelHTML(id, label) {
+  const shown = label || id || "";
+  return shown === (id || "") ? esc(shown) : `<span title="${esc(id)}">${esc(shown)}</span>`;
+}
+
+// liveOutputHTML renders a live request's Output cell. A unary request
+// learns its tokens and bytes only when the response completes, so with
+// nothing out yet it reads as waiting rather than as zeros; a stream shows
+// its running counts.
+function liveOutputHTML(r) {
+  if (!r.stream && !Number(r.output_tokens) && !Number(r.bytes_out)) return `<span class="muted waiting">waiting for response</span>`;
+  return `${fmtNum(r.output_tokens)} tok<div class="sub">${fmtBytes(r.bytes_out)}</div>`;
 }
 
 // groupLive groups in-flight requests that share a session_id. Returns a
@@ -1091,7 +1110,7 @@ function renderLiveSummary() {
   // On a phone the group column folds into a line under the user (the
   // "m-only" line), so the numbers stay on screen.
   const userRows = s.users.map((u) => `<tr>
-    <td class="name">${u.user ? esc(u.user) : `<span class="mono">${esc(u.key_name)}</span> <span class="muted">(no owner)</span>`}
+    <td class="name">${u.user ? userLabelHTML(u.user, u.label) : `<span class="mono">${esc(u.key_name)}</span> <span class="muted">(no owner)</span>`}
       <div class="sub m-only">${grp(u.group)}</div></td>
     <td class="opt">${grp(u.group)}</td><td class="num">${fmtNum(u.inflight)}</td><td class="num">${tok(u.tokens)}</td><td class="num">${usd(u.cost_usd)}</td></tr>`).join("");
   const groupRows = s.groups.map((g) => `<tr>
@@ -1126,18 +1145,18 @@ function renderLive(root, d) {
   const phaseBadge = { routing: "neutral", upstream: "admin", streaming: "active" };
   const row = (r, inGroup) => `<tr class="${inGroup ? "in-group" : ""}${r.attempt > 1 ? " failover" : ""}">
     <td class="mono num" data-elapsed="${Number(r.elapsed_ms) || 0}">${fmtElapsed(r.elapsed_ms)}</td>
-    <td>${esc(r.user) || `<span class="muted">—</span>`}<div class="sub mono">${esc(r.key_name || r.key_id)}</div></td>
+    <td class="user">${r.user ? userLabelHTML(r.user, r.user_label) : `<span class="muted">—</span>`}<div class="sub mono">${esc(r.key_name || r.key_id)}</div></td>
     <td class="mono">${esc(r.endpoint)}${r.stream ? ` <span class="badge neutral">stream</span>` : ""}</td>
     <td class="mono wrap">${esc(r.alias)}<div class="sub">${r.provider ? `→ ${esc(r.provider)}/${esc(r.upstream_model)}` : `<span class="muted">not routed yet</span>`}</div></td>
     <td><span class="badge ${phaseBadge[r.phase] || "neutral"}">${esc(r.phase)}</span></td>
     <td>${r.attempt > 1 ? `<span class="badge warn" title="failed over to attempt ${Number(r.attempt)}">#${Number(r.attempt)} failover</span>` : Number(r.attempt) || 1}</td>
-    <td class="mono num">${fmtNum(r.output_tokens)} tok<div class="sub">${fmtBytes(r.bytes_out)}</div></td>
+    <td class="mono num">${liveOutputHTML(r)}</td>
     <td class="mono" title="${esc(r.pod)}">${esc(String(r.pod || "").split("-").pop())}</td>
     <td class="mono">${esc(r.client_ip)}</td></tr>`;
   const body = groupLive(reqs).map((g) => g.session_id
     ? `<tr class="session-head"><td colspan="9"><span class="badge neutral">session</span>
         <span class="mono" title="${esc(g.session_id)}">${esc(g.session_id)}</span>
-        <span class="muted">· ${g.requests.length} requests in flight · ${esc(g.requests[0].user || g.requests[0].key_name || "")}</span></td></tr>`
+        <span class="muted">· ${g.requests.length} requests in flight · ${g.requests[0].user ? userLabelHTML(g.requests[0].user, g.requests[0].user_label) : esc(g.requests[0].key_name || "")}</span></td></tr>`
       + g.requests.map((r) => row(r, true)).join("")
     : row(g.requests[0], false)).join("");
   const notes = [];
@@ -1491,7 +1510,7 @@ function renderGroupSpend(el, d) {
         <td class="num opt">${fmtNum(users.length)}</td><td class="num opt">${fmtNum(g.requests)}</td>
         <td class="num">${tok(g.tokens)}</td><td class="num">${fmtUSD(g.cost_usd)}</td></tr>` +
       (open ? users.map((u) => `<tr class="member-row">
-        <td><span class="member">${u.subject ? esc(u.subject) : `<span class="muted">deleted users</span>`}</span></td><td class="opt"></td><td class="num opt">${fmtNum(u.requests)}</td>
+        <td><span class="member">${u.subject ? userLabelHTML(u.subject, u.label) : `<span class="muted">deleted users</span>`}</span></td><td class="opt"></td><td class="num opt">${fmtNum(u.requests)}</td>
         <td class="num">${tok(u.tokens)}</td><td class="num">${fmtUSD(u.cost_usd)}</td></tr>`).join("") : "");
   }).join("");
   el.innerHTML = `<div class="panel">

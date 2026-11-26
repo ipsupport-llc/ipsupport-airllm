@@ -53,7 +53,8 @@ type liveRequest struct {
 	KeyID         string    `json:"key_id"`
 	KeyName       string    `json:"key_name"`
 	User          string    `json:"user"`
-	Group         string    `json:"group"` // the owner's current group; "" when none (or from a pod that predates groups)
+	UserLabel     string    `json:"user_label"` // display name, else email, else user; "" from a pod that predates it
+	Group         string    `json:"group"`      // the owner's current group; "" when none (or from a pod that predates groups)
 	SessionID     string    `json:"session_id"`
 	ClientIP      string    `json:"client_ip"`
 	Alias         string    `json:"alias"`
@@ -238,6 +239,7 @@ func (s *Server) trackLive(endpoint string, next http.HandlerFunc) http.HandlerF
 			KeyID:     ak.KeyID,
 			KeyName:   ak.KeyName,
 			User:      ak.Owner,
+			UserLabel: ak.OwnerLabel,
 			Group:     s.userInfoFor(ak.UserID).GroupName,
 			SessionID: clientSessionFrom(r.Context()),
 			ClientIP:  s.clientIP(r),
