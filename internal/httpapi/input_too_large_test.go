@@ -16,8 +16,8 @@ import (
 // TestEmbeddingInputTooLargeIsAClientError: llama.cpp's server answers an
 // embedding input longer than its physical batch with a 500 server_error
 // "input (N tokens) is too large to process". That is the request's fault,
-// so the client must get a 400, and the target must stay available for the
-// next (normal-sized) request instead of being marked down for everyone.
+// so the client must get a 400, and the target must stay available instead
+// of being marked down for everyone: a second request still reaches it.
 func TestEmbeddingInputTooLargeIsAClientError(t *testing.T) {
 	var calls atomic.Int32
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

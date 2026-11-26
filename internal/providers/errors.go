@@ -140,7 +140,7 @@ type llamaCppErrorBody struct {
 // comes back as a 500 server_error, but it is the request that can't fit,
 // not a failing server: unrecognized, it counted against the target and
 // marked the model unavailable for every client.
-var llamaCppInputTooLargePattern = regexp.MustCompile(`(?i)too large to process`)
+var llamaCppInputTooLargePattern = regexp.MustCompile(`(?is)\binput\b.*\btoo large to process\b.*\bphysical batch size\b`)
 
 // googleErrorBody is the error shape every Google API uses, Vertex AI's
 // OpenAI-compatible surface included. It shares the `error` wrapper with the
