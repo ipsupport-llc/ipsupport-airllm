@@ -135,6 +135,8 @@ func TestClassifyErrorBody(t *testing.T) {
 
 		// llama.cpp / Ollama: the reason is in error.type, and code is numeric.
 		{"llama.cpp context size", `{"error":{"code":500,"message":"context size exceeded","type":"exceed_context_size_error"}}`, ErrCodeContextLengthExceeded},
+		{"llama.cpp input over the physical batch (embeddings)", `{"error":{"code":500,"message":"input is too large to process. increase the physical batch size","type":"server_error"}}`, ErrCodeContextLengthExceeded},
+		{"llama.cpp input over the physical batch, with counts", `{"error":{"code":500,"message":"input (8582 tokens) is too large to process. increase the physical batch size (current batch size: 8192)","type":"server_error"}}`, ErrCodeContextLengthExceeded},
 		{"llama.cpp other type", `{"error":{"code":500,"message":"boom","type":"server_error"}}`, ""},
 
 		// Google / Vertex AI: numeric code, reason in a status enum.

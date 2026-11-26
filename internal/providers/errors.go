@@ -128,9 +128,19 @@ var ollamaMultimodalRejectionPattern = regexp.MustCompile(`(?i)does not support 
 // error.type, not error.code, and there is no error.code field at all.
 type llamaCppErrorBody struct {
 	Error struct {
-		Type string `json:"type"`
+		Type    string `json:"type"`
+		Message string `json:"message"`
 	} `json:"error"`
 }
+
+// llamaCppInputTooLargePattern matches llama.cpp's server refusing an input
+// that doesn't fit its physical batch — what an embedding model (whose whole
+// input must fit one batch) answers for a too-long input, e.g. "input (8582
+// tokens) is too large to process. increase the physical batch size". It
+// comes back as a 500 server_error, but it is the request that can't fit,
+// not a failing server: unrecognized, it counted against the target and
+// marked the model unavailable for every client.
+var llamaCppInputTooLargePattern = regexp.MustCompile(`(?i)too large to process`)
 
 // googleErrorBody is the error shape every Google API uses, Vertex AI's
 // OpenAI-compatible surface included. It shares the `error` wrapper with the
@@ -204,7 +214,7 @@ func classifyErrorBody(body []byte) string {
 	}
 	var lc llamaCppErrorBody
 	if err := json.Unmarshal(body, &lc); err == nil {
-		if lc.Error.Type == "exceed_context_size_error" {
+		if lc.Error.Type == "exceed_context_size_error" || llamaCppInputTooLargePattern.MatchString(lc.Error.Message) {
 			return ErrCodeContextLengthExceeded
 		}
 	}
