@@ -214,7 +214,8 @@ func classifyErrorBody(body []byte) string {
 	}
 	var lc llamaCppErrorBody
 	if err := json.Unmarshal(body, &lc); err == nil {
-		if lc.Error.Type == "exceed_context_size_error" || llamaCppInputTooLargePattern.MatchString(lc.Error.Message) {
+		if lc.Error.Type == "exceed_context_size_error" ||
+			(lc.Error.Type == "server_error" && llamaCppInputTooLargePattern.MatchString(lc.Error.Message)) {
 			return ErrCodeContextLengthExceeded
 		}
 	}

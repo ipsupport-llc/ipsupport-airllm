@@ -50,4 +50,16 @@ func TestEmbeddingInputTooLargeIsAClientError(t *testing.T) {
 	if _, skip := s.unavail.Check(context.Background(), unavail.Key{Provider: "llama", UpstreamModel: "bge-m3"}); skip {
 		t.Error("target marked unavailable after an input-too-large error")
 	}
+
+	// With another tier behind it, the request moves on and is served there.
+	s2 := newRunChatTestServer(t, providers.NewOpenAICompat("llama", "openai", up.URL, ""), providers.NewMock("mock"))
+	s2.unavail = unavail.New(nil).WithClock(clk.Now)
+	plan2 := &routing.Plan{Alias: "bge-m3", Tiers: [][]routing.Target{
+		{{Provider: "llama", UpstreamModel: "bge-m3"}},
+		{{Provider: "mock", UpstreamModel: "mock-embed"}},
+	}}
+	_, res, err := s2.runEmbeddings(context.Background(), plan2, llm.EmbeddingsRequest{Model: "bge-m3", Input: []string{"long"}})
+	if err != nil || res.Provider != "mock" {
+		t.Errorf("two tiers: served by %q (%v), want the second tier", res.Provider, err)
+	}
 }
