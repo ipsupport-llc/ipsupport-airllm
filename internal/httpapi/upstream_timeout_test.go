@@ -92,14 +92,8 @@ func wantTimeout(t *testing.T, s *Server, err error, code string) {
 	if m := clientErrorMessage(err, false); m != "upstream did not answer within its time budget" {
 		t.Errorf("client message = %q", m)
 	}
-	// The client status for a ceiling cut-off is 504; a tier_timeout keeps
-	// the 502 it always answered.
-	wantStatus := http.StatusBadGateway
-	if code == providers.ErrCodeUpstreamTimeout {
-		wantStatus = http.StatusGatewayTimeout
-	}
-	if got, _ := classifyUpstreamErr(err); got != wantStatus {
-		t.Errorf("client status = %d, want %d", got, wantStatus)
+	if got, _ := classifyUpstreamErr(err); got != http.StatusGatewayTimeout {
+		t.Errorf("client status = %d, want 504", got)
 	}
 	if _, skip := s.unavail.Check(context.Background(), slowKey); skip {
 		t.Error("a timed-out target was marked unavailable")

@@ -35,10 +35,11 @@ const (
 // on; every tier quarantined by its breaker, or every target marked
 // unavailable, is a 503; any other non-retryable 4xx the upstream itself
 // reported passes through as that same status (see
-// nonRetryableClientStatus); a call cut off by the provider's own
-// UPSTREAM_CHAT_TIMEOUT ceiling is a 504; anything else — a transport
-// failure, a 5xx, an upstream 429 that exhausted every tier — is a 502
-// upstream error.
+// nonRetryableClientStatus); an attempt that ran out of time — its
+// target's timeout_ms (tier_timeout) or the provider's own
+// UPSTREAM_CHAT_TIMEOUT ceiling (upstream_timeout) — is a 504; anything
+// else — a transport failure, a 5xx, an upstream 429 that exhausted every
+// tier — is a 502 upstream error.
 func classifyUpstreamErr(err error) (int, string) {
 	if errors.Is(err, errAllBusy) {
 		return http.StatusTooManyRequests, "rate_limit_error"
@@ -46,8 +47,7 @@ func classifyUpstreamErr(err error) (int, string) {
 	if errors.Is(err, errAllQuarantined) || errors.Is(err, errAllUnavailable) {
 		return http.StatusServiceUnavailable, "upstream_error"
 	}
-	var pe *providers.Error
-	if errors.As(err, &pe) && pe.Code == providers.ErrCodeUpstreamTimeout {
+	if isTimeout(err) {
 		return http.StatusGatewayTimeout, "upstream_error"
 	}
 	if providers.IsTargetMismatch(err) {
