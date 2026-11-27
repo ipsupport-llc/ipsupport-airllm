@@ -396,11 +396,51 @@ func TestDecodeSSEStreamKeepsReasoningBesideUsage(t *testing.T) {
 	)
 	for _, coalesce := range []bool{true, false} {
 		var thinking string
-		for _, c := range decodeAll(t, body, streamDecodeOptions{provider: "vertex", coalesceUsage: coalesce}) {
+		for _, c := range decodeAll(t, body, streamDecodeOptions{provider: "vertex", coalesceUsage: coalesce, requireEnd: true}) {
 			thinking += c.Reasoning
 		}
 		if thinking != "hmm" {
-			t.Errorf("coalesce=%v: thinking = %q, want hmm", coalesce, thinking)
+			t.Errorf("assembled, coalesce=%v: thinking = %q, want hmm", coalesce, thinking)
+		}
+	}
+
+	// A client stream gets the chunks it always got: a thinking-only
+	// remainder of a usage chunk is dropped, not sent as an empty delta.
+	role := llm.StreamChunk{Role: "assistant", Reasoning: "hm"}
+	for coalesce, want := range map[bool][]llm.StreamChunk{
+		true: {role, {Content: "ok"}, {FinishReason: "stop"}, {Usage: usage(7, 3, 10)}},
+		false: {role, {FinishReason: "stop"}, {Usage: usage(7, 1, 8)}, {Usage: usage(7, 2, 9)},
+			{Content: "ok"}, {FinishReason: "stop"}, {Usage: usage(7, 3, 10)}},
+	} {
+		got := decodeAll(t, body, streamDecodeOptions{provider: "vertex", coalesceUsage: coalesce})
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("client stream, coalesce=%v:\n got: %+v\nwant: %+v", coalesce, got, want)
+		}
+	}
+}
+
+// A second choice's chunk whose only payload is usage keeps its mark for an
+// assembled stream, which must refuse it; a client stream drops it as before.
+func TestDecodeSSEStreamKeepsTheOtherChoiceMark(t *testing.T) {
+	body := sseBody(
+		`{"choices":[{"index":0,"delta":{"content":"a"},"finish_reason":"stop"}]}`,
+		`{"choices":[{"index":1,"delta":{},"finish_reason":null}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+		"[DONE]",
+	)
+	for _, coalesce := range []bool{true, false} {
+		marked := func(opts streamDecodeOptions) bool {
+			for _, c := range decodeAll(t, body, opts) {
+				if c.OtherChoice {
+					return true
+				}
+			}
+			return false
+		}
+		if !marked(streamDecodeOptions{provider: "up", coalesceUsage: coalesce, requireEnd: true}) {
+			t.Errorf("assembled, coalesce=%v: the second choice's mark was dropped", coalesce)
+		}
+		if marked(streamDecodeOptions{provider: "up", coalesceUsage: coalesce}) {
+			t.Errorf("client stream, coalesce=%v: gained a chunk it did not get before", coalesce)
 		}
 	}
 }

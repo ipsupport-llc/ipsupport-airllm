@@ -11,6 +11,8 @@ package breaker
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -119,6 +121,8 @@ type Admission struct {
 	// OpenUntil is when the cooldown of a skipped open tier runs out; zero
 	// for a tier skipped because another request holds its probe.
 	OpenUntil time.Time
+	// ProbeID names this probe, for ExtendProbe; empty when not a probe.
+	ProbeID string
 }
 
 // Status is a tier's breaker as an operator sees it.
@@ -160,6 +164,7 @@ type record struct {
 	CooldownMS  int64  `json:"cd,omitempty"`
 	OpenUntil   int64  `json:"ou,omitempty"`
 	ProbeUntil  int64  `json:"pu,omitempty"`
+	ProbeID     string `json:"pi,omitempty"`
 	ClosedAt    int64  `json:"ca,omitempty"`
 }
 
@@ -251,6 +256,7 @@ func (b *Breaker) admit(ctx context.Context, k Key, set Settings, force bool) Ad
 	// forced: race the other requests for the single probe.
 	var adm Admission
 	var tr *Transition
+	probeID := newProbeID()
 	err = b.update(ctx, k, set, func(r *record) bool {
 		adm, tr = Admission{}, nil
 		if r.state() == Closed {
@@ -268,7 +274,8 @@ func (b *Breaker) admit(ctx context.Context, k Key, set Settings, force bool) Ad
 		// tier for the rest of its cooldown.
 		r.State = HalfOpen
 		r.ProbeUntil = now.Add(set.probeLease()).UnixMilli()
-		adm.Probe = true
+		r.ProbeID = probeID
+		adm.Probe, adm.ProbeID = true, probeID
 		return true
 	})
 	if errors.Is(err, errContended) {
@@ -359,23 +366,30 @@ func (b *Breaker) Record(ctx context.Context, k Key, set Settings, failed, probe
 // its ProbeLease, or the floor below which it is never shorter.
 func ProbeLeaseFor(set Settings) time.Duration { return set.probeLease() }
 
-// ExtendProbe renews the lease of the probe running on the tier, to a full
-// lease from now, for an attempt that is still making progress and so may
-// run longer than its lease was sized for. A tier no longer probing (the
-// probe's outcome was recorded) is left alone, and a lease is never
-// shortened.
-func (b *Breaker) ExtendProbe(ctx context.Context, k Key, set Settings) {
-	if b == nil || !set.Enabled {
+// ExtendProbe renews the lease of probe id (Admission.ProbeID), to a full
+// lease from now, while its attempt is still running and so may outlast the
+// lease it was admitted with. Only that probe's lease is renewed: once its
+// outcome is recorded, or its lease ran out and another probe took the
+// tier, nothing changes. A lease is never shortened.
+func (b *Breaker) ExtendProbe(ctx context.Context, k Key, set Settings, id string) {
+	if b == nil || !set.Enabled || id == "" {
 		return
 	}
 	until := b.now().Add(set.probeLease()).UnixMilli()
 	_ = b.update(ctx, k, set, func(r *record) bool {
-		if r.state() != HalfOpen || r.ProbeUntil >= until {
+		if r.state() != HalfOpen || r.ProbeID != id || r.ProbeUntil >= until {
 			return false
 		}
 		r.ProbeUntil = until
 		return true
 	})
+}
+
+// newProbeID names one admitted probe.
+func newProbeID() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }
 
 // AbandonProbe hands back a probe that made no call (the tier was busy, or
@@ -391,7 +405,7 @@ func (b *Breaker) AbandonProbe(ctx context.Context, k Key, set Settings) {
 		if r.state() != HalfOpen {
 			return false
 		}
-		r.ProbeUntil = 0
+		r.ProbeUntil, r.ProbeID = 0, ""
 		if now.UnixMilli() < r.OpenUntil {
 			r.State = Open
 		}

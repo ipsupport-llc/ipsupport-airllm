@@ -533,19 +533,29 @@ func TestStreamUpstreamCeilingBeatsLateOutput(t *testing.T) {
 	}
 }
 
-// TestStreamUpstreamProbeHoldsTheTier: a breaker probe that is assembling
-// a stream keeps the tier to itself past the lease it was admitted with, so
-// no second probe is let in while it runs.
-func TestStreamUpstreamProbeHoldsTheTier(t *testing.T) {
-	up := newScriptedUpstream(t, okUnary, []sseStep{roleStep(), contentStep(300*time.Millisecond, "Hel"),
-		contentStep(600*time.Millisecond, "lo"), finishStep("stop"), usageStep()})
-	clk := newFakeClock()
-	s := newBreakerTestServer(t, clk, providers.NewOpenAICompat("slow", "openai", up.URL, ""), providers.NewMock("mock-ok"))
-	opts := routing.TargetOptions{StreamUpstream: boolp(true), Breaker: &routing.BreakerOptions{Enabled: boolp(true), Failures: ms(1), CooldownMS: ms(1000)}}
+// openTierForProbe builds a breaker test server whose tier 0 ("slow") is
+// open with its cooldown over, so the next request at it is the probe, and
+// whose probes renew their lease every 10ms of real time.
+func openTierForProbe(t *testing.T, clk *fakeClock, slow providers.Provider, opts routing.TargetOptions) (*Server, *routing.Plan, breaker.Key, breaker.Settings) {
+	t.Helper()
+	s := newBreakerTestServer(t, clk, slow, providers.NewMock("mock-ok"))
+	s.probeRenewEvery = 10 * time.Millisecond
+	opts.Breaker = &routing.BreakerOptions{Enabled: boolp(true), Failures: ms(1), CooldownMS: ms(1000)}
 	plan := guardedPlan("frog", "slow", opts)
 	key, set := breaker.Key{Alias: "frog", Tier: 0}, s.breakerSettings(plan, 0)
 	s.breaker.Record(context.Background(), key, set, true, false) // open the tier
-	clk.Advance(2 * time.Second)                                  // past its cooldown: the next attempt probes
+	clk.Advance(2 * time.Second)                                  // past its cooldown
+	return s, plan, key, set
+}
+
+// TestStreamUpstreamProbeHoldsTheTier: a breaker probe keeps the tier to
+// itself for as long as its attempt runs — an assembling stream may run far
+// past the lease it was admitted with — so no second probe is let in.
+func TestStreamUpstreamProbeHoldsTheTier(t *testing.T) {
+	up := newScriptedUpstream(t, okUnary, []sseStep{roleStep(), contentStep(300*time.Millisecond, "Hel"),
+		contentStep(300*time.Millisecond, "lo"), finishStep("stop"), usageStep()})
+	clk := newFakeClock()
+	s, plan, key, set := openTierForProbe(t, clk, providers.NewOpenAICompat("slow", "openai", up.URL, ""), streamUpstreamOpts())
 
 	done := make(chan execResult, 1)
 	go func() {
@@ -554,13 +564,72 @@ func TestStreamUpstreamProbeHoldsTheTier(t *testing.T) {
 	}()
 	time.Sleep(100 * time.Millisecond) // the probe is admitted, no output yet
 	clk.Advance(20 * time.Second)
-	time.Sleep(400 * time.Millisecond) // its first output came, the rest has not
+	time.Sleep(100 * time.Millisecond) // renewals run
 	clk.Advance(20 * time.Second)      // 40s past admission: beyond the 30s lease it started with
 	if adm := s.breaker.Admit(context.Background(), key, set); !adm.Skip {
-		t.Errorf("admission = %+v while the probe is still assembling, want a skip", adm)
+		t.Errorf("admission = %+v while the probe is still running, want a skip", adm)
 	}
 	if res := <-done; res.Provider != "slow" {
 		t.Errorf("probe served by %q, want slow", res.Provider)
+	}
+}
+
+// panicProvider panics in its call.
+type panicProvider struct{ *providers.Mock }
+
+func (panicProvider) Chat(context.Context, llm.ChatRequest) (llm.ChatResponse, error) {
+	panic("provider bug")
+}
+
+// TestProbeHoldEndsWhenTheCallPanics: the lease renewal stops however the
+// attempt ends, so a panicking call cannot keep its tier held.
+func TestProbeHoldEndsWhenTheCallPanics(t *testing.T) {
+	clk := newFakeClock()
+	s, plan, key, set := openTierForProbe(t, clk, panicProvider{providers.NewMock("slow")}, routing.TargetOptions{})
+	func() {
+		defer func() { _ = recover() }()
+		_, _, _ = s.runChat(context.Background(), plan, hiRequest())
+		t.Error("runChat returned; want the provider's panic")
+	}()
+	clk.Advance(time.Minute) // past the probe's lease
+	time.Sleep(50 * time.Millisecond)
+	if adm := s.breaker.Admit(context.Background(), key, set); !adm.Probe {
+		t.Errorf("admission = %+v after the panicked probe's lease, want a new probe: renewal outlived the call", adm)
+	}
+}
+
+// TestStreamUpstreamEmptyAnswerFallsThrough: a stream that only thinks and
+// finishes has no answer to give; the next tier serves.
+func TestStreamUpstreamEmptyAnswerFallsThrough(t *testing.T) {
+	up := newScriptedUpstream(t, okUnary, []sseStep{roleStep(), reasoningStep(0, "hmm"), finishStep("stop"), usageStep()})
+	s := newUnavailTestServer(t, newFakeClock(), providers.NewOpenAICompat("slow", "openai", up.URL, ""), providers.NewMock("mock-ok"))
+	plan := budgetPlan(routing.Target{Provider: "slow", UpstreamModel: "m", Options: streamUpstreamOpts()})
+	_, res, err := s.runChat(context.Background(), plan, hiRequest())
+	s.bg.Wait()
+	if err != nil || res.Provider != "mock-ok" || up.streamCalls.Load() != 1 {
+		t.Fatalf("served by %q after %d stream calls, err %v; want the next tier", res.Provider, up.streamCalls.Load(), err)
+	}
+}
+
+// TestStreamUpstreamKeepsAReportedTotal: a report whose total holds more than
+// its parts (no prompt count) is billed as the unary answer would be — the
+// total, never an estimate on top of it.
+func TestStreamUpstreamKeepsAReportedTotal(t *testing.T) {
+	const report = `{"prompt_tokens":0,"completion_tokens":5,"total_tokens":12}`
+	unary := strings.Replace(okUnary, `{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}`, report, 1)
+	up := newScriptedUpstream(t, unary, []sseStep{roleStep(), contentStep(0, "Hel"), contentStep(0, "lo"), finishStep("stop"),
+		{data: `{"choices":[],"usage":` + report + `}`}})
+	s := newRunChatTestServer(t, providers.NewOpenAICompat("slow", "openai", up.URL, ""))
+	want, _, err := s.runChat(context.Background(), soloPlan(routing.TargetOptions{}), hiRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := s.runChat(context.Background(), soloPlan(streamUpstreamOpts()), hiRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Usage != want.Usage || got.Usage.TotalTokens != 12 || got.Usage.BilledTokens() != 12 {
+		t.Errorf("usage = %+v, want the unary answer's %+v (12 billed)", got.Usage, want.Usage)
 	}
 }
 

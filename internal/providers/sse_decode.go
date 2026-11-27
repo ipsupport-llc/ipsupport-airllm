@@ -104,6 +104,8 @@ type streamDecodeOptions struct {
 	// an end is indistinguishable from a connection cut short. Set from the
 	// call's context (WithRequireStreamEnd) by a caller that assembles the
 	// stream before anything reaches the client and can still fall through.
+	// Such a stream also keeps the chunks no client would see but the
+	// assembler needs (see hasDelta).
 	requireEnd bool
 }
 
@@ -187,7 +189,7 @@ func decodeSSEStream(body io.Reader, opts streamDecodeOptions, yield func(llm.St
 			sawToolCalls = true
 		}
 		if chunk.Usage == nil {
-			if err := yieldSplittingFinish(chunk, yield); err != nil {
+			if err := yieldSplittingFinish(chunk, opts, yield); err != nil {
 				return err
 			}
 			continue
@@ -214,8 +216,8 @@ func decodeSSEStream(body io.Reader, opts streamDecodeOptions, yield func(llm.St
 			chunk.FinishReason = synthesizedFinishReason(sawToolCalls)
 			sawFinish = true
 		}
-		if hasPayload(chunk) {
-			if err := yieldSplittingFinish(chunk, yield); err != nil {
+		if hasPayload(chunk, opts) {
+			if err := yieldSplittingFinish(chunk, opts, yield); err != nil {
 				return err
 			}
 		}
@@ -260,8 +262,8 @@ func decodeSSEStream(body io.Reader, opts streamDecodeOptions, yield func(llm.St
 // alone, on a chunk with an empty delta, so nothing here fires for them. Vertex
 // AI bundles it onto the last content chunk (observed live), and Groq needs it
 // synthesized onto a chunk that may already carry a delta.
-func yieldSplittingFinish(c llm.StreamChunk, yield func(llm.StreamChunk) error) error {
-	if c.FinishReason == "" || !hasDelta(c) {
+func yieldSplittingFinish(c llm.StreamChunk, opts streamDecodeOptions, yield func(llm.StreamChunk) error) error {
+	if c.FinishReason == "" || !hasDelta(c, opts) {
 		return yield(c)
 	}
 	finish := c.FinishReason
@@ -273,17 +275,23 @@ func yieldSplittingFinish(c llm.StreamChunk, yield func(llm.StreamChunk) error) 
 }
 
 // hasDelta reports whether a chunk carries incremental output of its own —
-// something a client renders, or thinking, which no egress sends but which
-// shows the model is working — as opposed to being a bare signal chunk.
-func hasDelta(c llm.StreamChunk) bool {
-	return c.Role != "" || c.HasOutput()
+// something a client renders — as opposed to being a bare signal chunk. For
+// a stream being assembled (requireEnd) thinking counts too, and so does the
+// mark of a second choice: no client sees either, but the assembler needs
+// the first to tell a thinking model from a hung one and the second to
+// refuse the answer. A client stream keeps exactly the chunks it always got.
+func hasDelta(c llm.StreamChunk, opts streamDecodeOptions) bool {
+	if opts.requireEnd && (c.Reasoning != "" || c.OtherChoice) {
+		return true
+	}
+	return c.Role != "" || c.Content != "" || len(c.ToolCalls) > 0
 }
 
 // hasPayload reports whether a chunk still carries something a client needs
 // once usage has been split off it — an all-zero remainder is dropped rather
 // than yielded as an empty chunk.
-func hasPayload(c llm.StreamChunk) bool {
-	return hasDelta(c) || c.FinishReason != ""
+func hasPayload(c llm.StreamChunk, opts streamDecodeOptions) bool {
+	return hasDelta(c, opts) || c.FinishReason != ""
 }
 
 // synthesizedFinishReason picks the finish reason to fabricate for an

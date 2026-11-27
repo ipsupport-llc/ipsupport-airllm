@@ -185,6 +185,12 @@ func streamChat(ctx context.Context, p providers.Provider, t routing.Target, req
 	if len(resp.Choices) == 0 {
 		return resp, nil // runChat fails it as an answer with no choices
 	}
+	if m := resp.Choices[0].Message; m.Content == "" && len(m.ToolCalls) == 0 {
+		// Thinking and a finish reason, or nothing at all: no answer to
+		// give, so another tier is asked, as for one with no choices.
+		return llm.ChatResponse{}, &providers.Error{Status: http.StatusBadGateway, Retryable: true,
+			Message: fmt.Sprintf("upstream %s returned an empty answer", t.Provider)}
+	}
 	reported, _ := acc.Usage()
 	if u, estimated := estimateMissingUsage(reported, req, &acc, outputs > 0); estimated {
 		slog.Warn("upstream stream reported no usage (or none for one side); the response carries an estimate",
@@ -207,15 +213,23 @@ func isProviderError(err error) bool {
 }
 
 // estimateMissingUsage fills in the usage a stream did not report, by the
-// gateway's rune/4 estimate (llm.EstimateTokens): a prompt reported as 0 (or
-// not at all) is estimated over the whole request — messages, earlier tool
-// calls and the tool schemas (llm.EstimatePromptTokens) — and a completion
-// reported as 0 when output was seen is estimated over everything the model
-// produced: text, thinking (also the reasoning share) and tool calls' names
-// and arguments. A side the upstream did count is kept. estimated is whether
-// anything was filled in.
+// gateway's rune/4 estimate (llm.EstimateTokens), one side at a time and
+// only where the report does not already account for it:
+//
+//   - The prompt is estimated over the whole request — messages, earlier tool
+//     calls and the tool schemas (llm.EstimatePromptTokens) — only when the
+//     report has no total either. Decoding (llm.Usage.Normalize, the same for
+//     a unary answer) already folds whatever a total holds beyond its parts
+//     into the completion, so a report with a total accounts for every token
+//     it covers, and an estimate on top of it would bill twice.
+//   - The completion is estimated over everything the model produced — text,
+//     thinking (also the reasoning share) and tool calls' names and
+//     arguments — when it is reported as 0 although output was seen.
+//
+// A reported total is never shrunk. estimated is whether anything was
+// filled in.
 func estimateMissingUsage(u llm.Usage, req llm.ChatRequest, acc *llm.StreamAccumulator, sawOutput bool) (_ llm.Usage, estimated bool) {
-	if u.PromptTokens == 0 {
+	if u.PromptTokens == 0 && u.TotalTokens == 0 {
 		u.PromptTokens = llm.EstimatePromptTokens(req)
 		estimated = true
 	}
@@ -226,7 +240,7 @@ func estimateMissingUsage(u llm.Usage, req llm.ChatRequest, acc *llm.StreamAccum
 		estimated = true
 	}
 	if estimated {
-		u.TotalTokens = u.PromptTokens + u.CompletionTokens
+		u.TotalTokens = max(u.TotalTokens, u.PromptTokens+u.CompletionTokens)
 		u.Normalize()
 	}
 	return u, estimated

@@ -564,35 +564,35 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 						}
 					}
 				}
-				// A probe that makes progress without an answer yet (an
-				// assembled stream) may run far past the lease it was
-				// admitted with; it holds the tier until its outcome.
-				var releaseProbe func()
-				committed, callErr := runAttempt(ctx, t.Provider, pol.budget, func(actx context.Context, gate attemptGate) error {
-					// Only a commit is the tier's answer: output that has
-					// not reached the client (gate.progress) can still end
-					// in a failure that counts against the tier.
-					return call(actx, e.Provider, t, attemptGate{
-						commit: func() bool {
-							ok := gate.commit()
-							if ok {
-								recordSuccess()
-								live.streaming()
-							}
-							return ok
-						},
-						progress: func() bool {
-							ok := gate.progress()
-							if ok && adm.Probe && releaseProbe == nil {
-								releaseProbe = s.holdProbe(ctx, key, set)
-							}
-							return ok
-						},
+				var committed bool
+				var callErr error
+				func() {
+					// A probe holds the tier for as long as its attempt
+					// runs, which may be far past the lease it was
+					// admitted with (an assembled stream has no overall
+					// bound). Deferred, so even a panicking call stops
+					// renewing.
+					if adm.Probe {
+						defer s.holdProbe(ctx, key, set, adm.ProbeID)()
+					}
+					committed, callErr = runAttempt(ctx, t.Provider, pol.budget, func(actx context.Context, gate attemptGate) error {
+						// Only a commit is the tier's answer: output that
+						// has not reached the client (gate.progress) can
+						// still end in a failure that counts against the
+						// tier.
+						return call(actx, e.Provider, t, attemptGate{
+							commit: func() bool {
+								ok := gate.commit()
+								if ok {
+									recordSuccess()
+									live.streaming()
+								}
+								return ok
+							},
+							progress: gate.progress,
+						})
 					})
-				})
-				if releaseProbe != nil {
-					releaseProbe()
-				}
+				}()
 				e.Release()
 
 				if errors.Is(callErr, errServedWithoutCall) {
@@ -689,25 +689,28 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 	return res, false, lastErr
 }
 
-// holdProbe keeps the breaker probe on key held while an attempt that has
-// made progress runs: it renews the probe's lease at once and then every
-// half lease, until the returned release is called. A replica that dies
-// mid-attempt stops renewing, so the lease still runs out for the others.
-func (s *Server) holdProbe(ctx context.Context, key breaker.Key, set breaker.Settings) (release func()) {
+// holdProbe keeps probe id on key held while its attempt runs: it renews the
+// probe's lease every probeRenewEvery (half a lease by default) until the
+// returned release is called. A replica that dies mid-attempt stops
+// renewing, so the lease still runs out for the others.
+func (s *Server) holdProbe(ctx context.Context, key breaker.Key, set breaker.Settings, id string) (release func()) {
 	bctx := context.WithoutCancel(ctx)
-	s.breaker.ExtendProbe(bctx, key, set)
+	every := s.probeRenewEvery
+	if every <= 0 {
+		every = breaker.ProbeLeaseFor(set) / 2
+	}
 	done := make(chan struct{})
 	exited := make(chan struct{})
 	go func() {
 		defer close(exited)
-		tick := time.NewTicker(breaker.ProbeLeaseFor(set) / 2)
+		tick := time.NewTicker(every)
 		defer tick.Stop()
 		for {
 			select {
 			case <-done:
 				return
 			case <-tick.C:
-				s.breaker.ExtendProbe(bctx, key, set)
+				s.breaker.ExtendProbe(bctx, key, set, id)
 			}
 		}
 	}()
