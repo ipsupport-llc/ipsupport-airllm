@@ -317,11 +317,16 @@ treated as slow rather than down: it logs `tier attempt failed` with reason
 `timeout`, counts against the breaker and moves the request on to the next
 tier, but marks the target only when it is the **third timeout in a row**
 for that `(provider, upstream_model)`, counted across every alias and
-replica. Any answer from the target in between, or any other failure
-(which marks it at once), starts the count again; while the run goes on,
-each further timeout marks it again. One slow request therefore never
-takes a target out of rotation, but one that hangs on every call does,
-breaker or no breaker. The rest of that request is
+replica. Any answer from the target in between — a success, an error the
+request itself caused, or any other failure (which marks it at once) —
+starts the count again; while the run goes on, each further timeout marks
+it again. A run is forgotten 25 hours after its last timeout. One slow
+request therefore never takes a target out of rotation, but one that hangs
+on every call does, breaker or no breaker. The reset is best effort: it is
+written after the answer, off the response path, so a success that races
+a third timeout on another replica may still leave the target marked
+briefly, and while Redis is unreachable each replica counts on its own.
+The rest of that request is
 unaffected — it still tries every other target as normal — but the next
 request that resolves to that exact target skips it without a call, until
 the mark expires. There is no separate background prober: the next real
@@ -340,9 +345,9 @@ How long a mark lasts:
   mark against a target uses `unavailable_initial_ms`; each further mark
   against the SAME target (its previous mark having already expired)
   doubles from the last one, capped at `unavailable_max_ms`. A target that
-  goes on to succeed resets this memory, so its next failure (if any)
-  starts again at `unavailable_initial_ms` rather than wherever the
-  doubling had climbed to.
+  goes on to succeed resets this memory (best effort, as above), so its
+  next failure (if any) starts again at `unavailable_initial_ms` rather
+  than wherever the doubling had climbed to.
 
 State is shared by every replica through Redis, the same as the breaker;
 Redis unreachable fails open (nothing is treated as unavailable, same as

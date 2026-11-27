@@ -56,6 +56,18 @@ type record struct {
 // that a target nobody ever retries doesn't linger forever.
 const recordTTL = time.Hour
 
+// timeoutsTTL is how long a run of timeouts is remembered after its last
+// one: past the longest time budget a target can have (24 hours), so two
+// timeouts of a target that slow still count as a run.
+const timeoutsTTL = 25 * time.Hour
+
+// timeoutRun is the local copy of a target's consecutive-timeout count,
+// forgotten after until like the Redis key it mirrors.
+type timeoutRun struct {
+	n     int
+	until time.Time
+}
+
 // Store holds every tracked target's mark. The zero value is not ready to
 // use — construct with New.
 type Store struct {
@@ -65,14 +77,14 @@ type Store struct {
 	local map[Key]record
 	// timeouts is the local copy of each target's consecutive-timeout
 	// count, used when there is no Redis or it is unreachable.
-	timeouts map[Key]int
+	timeouts map[Key]timeoutRun
 }
 
 // New returns a Store backed by rdb. A nil rdb keeps all state in process
 // (every replica sees only its own marks — acceptable for a single-replica
 // deployment, and still strictly better than no tracking at all).
 func New(rdb *redis.Client) *Store {
-	return &Store{rdb: rdb, now: time.Now, local: map[Key]record{}, timeouts: map[Key]int{}}
+	return &Store{rdb: rdb, now: time.Now, local: map[Key]record{}, timeouts: map[Key]timeoutRun{}}
 }
 
 // WithClock replaces time.Now, for tests. Returns s for chaining at
@@ -159,18 +171,26 @@ func (s *Store) AddTimeout(ctx context.Context, k Key) int {
 	if s == nil {
 		return 0
 	}
-	s.mu.Lock()
-	s.timeouts[k]++
-	n := s.timeouts[k]
-	s.mu.Unlock()
+	n := 0
 	if s.rdb != nil {
 		pipe := s.rdb.TxPipeline()
 		incr := pipe.Incr(ctx, k.timeoutsKey())
-		pipe.Expire(ctx, k.timeoutsKey(), recordTTL)
+		pipe.Expire(ctx, k.timeoutsKey(), timeoutsTTL)
 		if _, err := pipe.Exec(ctx); err == nil {
-			return int(incr.Val())
+			n = int(incr.Val())
 		}
 	}
+	now := s.now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if n == 0 {
+		// No Redis, or it is unreachable: count locally.
+		n = 1
+		if run := s.timeouts[k]; now.Before(run.until) {
+			n = run.n + 1
+		}
+	}
+	s.timeouts[k] = timeoutRun{n: n, until: now.Add(timeoutsTTL)}
 	return n
 }
 

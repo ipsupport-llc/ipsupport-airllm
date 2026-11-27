@@ -152,3 +152,27 @@ func TestCeilingErrorOnlyReplacesTheDeadline(t *testing.T) {
 	transport := transportError(&url.Error{Op: "Post", URL: "http://x", Err: context.DeadlineExceeded})
 	wantCeilingTimeout(t, ceilingError(parent, cctx, "up", time.Second, transport))
 }
+
+func TestIsUpstreamAnswer(t *testing.T) {
+	parent := context.Background()
+	cctx, cancel := context.WithTimeout(parent, time.Nanosecond)
+	defer cancel()
+	<-cctx.Done()
+	transport := transportError(&url.Error{Op: "Post", URL: "http://x", Err: context.DeadlineExceeded})
+
+	for name, c := range map[string]struct {
+		err  error
+		want bool
+	}{
+		"503 answer":         {httpError("up", http.StatusServiceUnavailable, []byte(`{}`), nil), true},
+		"400 answer":         {httpError("up", http.StatusBadRequest, []byte(`{}`), nil), true},
+		"transport deadline": {transport, false},
+		"transport cancel":   {transportError(context.Canceled), false},
+		"ceiling timeout":    {ceilingError(parent, cctx, "up", time.Second, transport), false},
+		"plain error":        {errors.New("decode"), false},
+	} {
+		if got := IsUpstreamAnswer(c.err); got != c.want {
+			t.Errorf("%s: IsUpstreamAnswer = %v, want %v", name, got, c.want)
+		}
+	}
+}

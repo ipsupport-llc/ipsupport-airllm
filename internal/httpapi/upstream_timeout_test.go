@@ -79,8 +79,11 @@ func soloPlan(opts routing.TargetOptions) *routing.Plan {
 	}
 }
 
+// unaryChat runs one unary chat and waits for the store writes it left in
+// the background, so the next request sees them.
 func unaryChat(s *Server, plan *routing.Plan) (execResult, error) {
 	_, res, err := s.runChat(context.Background(), plan, llm.ChatRequest{Messages: []llm.Message{{Role: "user", Content: "hi"}}})
+	s.bg.Wait()
 	return res, err
 }
 
@@ -318,20 +321,26 @@ func TestFailedTargetIsNotRetriedOnABusyPass(t *testing.T) {
 	}
 }
 
-// TestRunAttemptKeepsAnUpstreamRefusalPastTheBudget: a non-retryable
-// upstream answer that comes back as the budget runs out is that answer,
-// not a timeout; the budget's own cancellation still is one.
+// TestRunAttemptKeepsAnUpstreamRefusalPastTheBudget: an upstream answer
+// that comes back as the budget runs out — a 400, or a retryable 503 with
+// its own Retry-After — is that answer, not a timeout; the budget's own
+// cancellation still is one.
 func TestRunAttemptKeepsAnUpstreamRefusalPastTheBudget(t *testing.T) {
-	refusal := &providers.Error{Status: http.StatusBadRequest, Message: "upstream slow returned 400: bad request"}
-	_, err := runAttempt(context.Background(), "slow", 10*time.Millisecond, func(ctx context.Context, _ func() bool) error {
-		<-ctx.Done()
-		return refusal
-	})
-	if err != refusal {
-		t.Errorf("err = %v, want the upstream's 400 kept", err)
+	retryAfter := time.Minute
+	for _, answer := range []*providers.Error{
+		{Status: http.StatusBadRequest, Message: "upstream slow returned 400: bad request"},
+		{Status: http.StatusServiceUnavailable, Retryable: true, RetryAfter: &retryAfter, Message: "upstream slow returned 503: overloaded"},
+	} {
+		_, err := runAttempt(context.Background(), "slow", 10*time.Millisecond, func(ctx context.Context, _ func() bool) error {
+			<-ctx.Done()
+			return answer
+		})
+		if err != answer {
+			t.Errorf("err = %v, want the upstream's %d kept", err, answer.Status)
+		}
 	}
 
-	_, err = runAttempt(context.Background(), "slow", 10*time.Millisecond, func(ctx context.Context, _ func() bool) error {
+	_, err := runAttempt(context.Background(), "slow", 10*time.Millisecond, func(ctx context.Context, _ func() bool) error {
 		<-ctx.Done()
 		return ctx.Err()
 	})
@@ -369,4 +378,91 @@ func TestSuccessResetsTheBackoffDoubling(t *testing.T) {
 	}
 	up.failing.Store(true)
 	failWithMark(200 * time.Millisecond) // from the start again, not 800ms
+}
+
+// TestRequestErrorEndsTheTimeoutRun: an answer the request itself caused
+// (here a plain 400) says nothing about the tier, but the target did
+// answer, so a run of timeouts starts again after it.
+func TestRequestErrorEndsTheTimeoutRun(t *testing.T) {
+	var badRequest atomic.Bool
+	var calls atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		if badRequest.Load() {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":{"message":"bad request"}}`)
+			return
+		}
+		select {
+		case <-r.Context().Done():
+		case <-time.After(150 * time.Millisecond):
+		}
+	}))
+	t.Cleanup(up.Close)
+	s := newUnavailTestServer(t, newFakeClock(), slowProvider(up))
+	plan := soloPlan(routing.TargetOptions{})
+	timeouts := func(n int) {
+		t.Helper()
+		for i := 0; i < n; i++ {
+			_, err := unaryChat(s, plan)
+			wantTimeout(t, s, err, providers.ErrCodeUpstreamTimeout) // also: still unmarked
+		}
+	}
+
+	timeouts(2)
+	badRequest.Store(true)
+	if _, err := unaryChat(s, plan); attemptFailureReason(err) != "http_400" {
+		t.Fatalf("err = %v, want the upstream's 400", err)
+	}
+	if _, skip := s.unavail.Check(context.Background(), slowKey); skip {
+		t.Fatal("a request error marked the target unavailable")
+	}
+	badRequest.Store(false)
+	timeouts(2)
+	if calls.Load() != 5 {
+		t.Errorf("upstream called %d times, want 5", calls.Load())
+	}
+}
+
+// TestFailedModelIsNotCalledAgainFromAnotherTier: the skip set is per
+// (provider, upstream_model), so the same model on a later tier is not
+// called again in the same request.
+func TestFailedModelIsNotCalledAgainFromAnotherTier(t *testing.T) {
+	up, calls := slowUpstream(t, time.Second)
+	s := newUnavailTestServer(t, newFakeClock(), providers.NewOpenAICompat("slow", "openai", up.URL, ""), providers.NewMock("mock-ok"))
+	opts := routing.TargetOptions{TimeoutMS: ms(50)}
+	plan := &routing.Plan{Alias: "frog", Strategy: "round_robin", Tiers: [][]routing.Target{
+		{{Provider: "slow", UpstreamModel: "m", Options: opts, Tier: 0}},
+		{{Provider: "slow", UpstreamModel: "m", Options: opts, Tier: 1}},
+		{{Provider: "mock-ok", UpstreamModel: "mock-ok-model", Tier: 2}},
+	}}
+
+	res, err := unaryChat(s, plan)
+	if err != nil || res.Provider != "mock-ok" {
+		t.Fatalf("served by %q, err %v; want mock-ok", res.Provider, err)
+	}
+	if calls.Load() != 1 {
+		t.Errorf("slow/m called %d times, want 1", calls.Load())
+	}
+}
+
+// TestInBackgroundOutlivesTheRequest: a background store write still runs
+// after the request's context is gone, under its own short deadline.
+func TestInBackgroundOutlivesTheRequest(t *testing.T) {
+	s := &Server{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var ran atomic.Bool
+	s.inBackground(ctx, func(bctx context.Context) {
+		dl, ok := bctx.Deadline()
+		if bctx.Err() == nil && ok && time.Until(dl) <= bgStoreTimeout {
+			ran.Store(true)
+		}
+	})
+	s.bg.Wait()
+	if !ran.Load() {
+		t.Error("the background write did not get a live context bounded by bgStoreTimeout")
+	}
 }

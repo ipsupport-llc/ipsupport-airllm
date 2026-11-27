@@ -91,6 +91,7 @@ func guardedPlan(alias, provider string, opts routing.TargetOptions) *routing.Pl
 func chat(t *testing.T, s *Server, plan *routing.Plan) execResult {
 	t.Helper()
 	_, res, err := s.runChat(context.Background(), plan, llm.ChatRequest{Messages: []llm.Message{{Role: "user", Content: "hi"}}})
+	s.bg.Wait() // the store writes it left in the background
 	if err != nil {
 		t.Fatalf("runChat: %v", err)
 	}

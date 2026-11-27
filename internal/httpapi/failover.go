@@ -172,12 +172,9 @@ const errCodeTierTimeout = "tier_timeout"
 // default nothing else would stop every request from waiting on it.
 const timeoutsBeforeUnavailable = 3
 
-// attemptID names one target of a plan, to remember within a request
-// which targets already failed.
-type attemptID struct {
-	tier                    int
-	provider, upstreamModel string
-}
+// bgStoreTimeout bounds a store write executePlan does in the background,
+// off the response path.
+const bgStoreTimeout = time.Second
 
 // Attempt states for runAttempt's budget race. Whichever of the timer, a
 // first chunk and the call's return moves the state off pending first wins.
@@ -194,7 +191,9 @@ const (
 // the budget ran out first commit reports false and the call must not emit
 // anything. A unary call never commits, so the budget bounds all of it. An
 // error from a call whose budget ran out is replaced by a tier_timeout
-// error; a cancellation of the caller's own context is left as it is. A
+// error, unless it is the upstream's own answer (providers.IsUpstreamAnswer:
+// a 503 with Retry-After that raced the budget is that 503); a
+// cancellation of the caller's own context is left as it is. A
 // positive budget is also recorded on the call's context
 // (providers.WithCallBudget), so a non-streaming provider call skips its
 // own UPSTREAM_CHAT_TIMEOUT ceiling: the budget replaces it.
@@ -218,7 +217,7 @@ func runAttempt(ctx context.Context, provider string, budget time.Duration, call
 	// Claim the outcome before looking at it: a budget that runs out after
 	// the call already returned must not relabel that call's own error.
 	returnedFirst := state.CompareAndSwap(attemptPending, attemptReturned)
-	if err != nil && !returnedFirst && state.Load() == attemptExpired && ctx.Err() == nil && !isFinalAnswer(err) {
+	if err != nil && !returnedFirst && state.Load() == attemptExpired && ctx.Err() == nil && !providers.IsUpstreamAnswer(err) {
 		err = &providers.Error{
 			Status:    http.StatusGatewayTimeout,
 			Retryable: true,
@@ -227,15 +226,6 @@ func runAttempt(ctx context.Context, provider string, budget time.Duration, call
 		}
 	}
 	return state.Load() == attemptCommitted, err
-}
-
-// isFinalAnswer reports whether err is a non-retryable provider error that
-// is not the budget's own cancellation: an upstream's real refusal that
-// arrived as the budget ran out, which runAttempt keeps rather than
-// relabelling as a timeout.
-func isFinalAnswer(err error) bool {
-	var pe *providers.Error
-	return errors.As(err, &pe) && !pe.Retryable && !errors.Is(err, context.Canceled)
 }
 
 // execResult is what executing a plan did: the target that served the
@@ -387,9 +377,10 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 	}()
 
 	sawBusy := false
-	// failed is every target that already failed in this request: a later
-	// pass over the plan (after a busy target) does not call it again.
-	failed := map[attemptID]bool{}
+	// failed is every (provider, upstream_model) that already failed in
+	// this request: a later pass over the plan (after a busy target) does
+	// not call it again, from any tier.
+	failed := map[unavail.Key]bool{}
 	// forced is the tier the last-resort pass forces a probe on, -1 on the
 	// first pass; forcedCall is whether that pass made its one call.
 	forced, forcedCall := -1, false
@@ -415,8 +406,7 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 				if forced >= 0 && (t.Tier != forced || forcedCall) {
 					continue
 				}
-				id := attemptID{tier: t.Tier, provider: t.Provider, upstreamModel: t.UpstreamModel}
-				if failed[id] {
+				if failed[unavail.Key{Provider: t.Provider, UpstreamModel: t.UpstreamModel}] {
 					continue
 				}
 				res.Target = t
@@ -493,8 +483,9 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 					if recorded.CompareAndSwap(false, true) {
 						s.breaker.Record(ctx, key, set, false, adm.Probe)
 						// An answer ends any run of timeouts and the
-						// backoff doubling, in one Redis call.
-						s.unavail.Clear(ctx, unavailKey)
+						// backoff doubling, in one Redis call made off
+						// the response path.
+						s.inBackground(ctx, func(bctx context.Context) { s.unavail.Clear(bctx, unavailKey) })
 						s.metrics.TierAttempt(plan.Alias, tierLabel, "success", time.Since(began))
 						if plan.Strategy == "lcr" {
 							s.lcr.Record(ctx, lcr.Key{Provider: t.Provider, UpstreamModel: t.UpstreamModel}, true)
@@ -549,10 +540,14 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 						s.lcr.Record(ctx, lcr.Key{Provider: unavailKey.Provider, UpstreamModel: unavailKey.UpstreamModel}, false)
 					}
 				default:
-					// The request itself was the problem: no verdict on the tier.
+					// The request itself was the problem: no verdict on the
+					// tier. But the target did answer (the client's own
+					// cancellation returned above), which ends a run of
+					// timeouts.
 					if adm.Probe {
 						s.breaker.AbandonProbe(ctx, key, set)
 					}
+					s.inBackground(ctx, func(bctx context.Context) { s.unavail.ResetTimeouts(bctx, unavailKey) })
 					s.metrics.TierAttempt(plan.Alias, tierLabel, "request_error", time.Since(began))
 				}
 
@@ -563,7 +558,7 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 					return res, true, callErr
 				}
 				lastErr = callErr
-				failed[id] = true
+				failed[unavailKey] = true
 				logAttemptFailure(plan.Alias, t, callErr, time.Since(began), session)
 				if !pol.fallsThrough(callErr) {
 					return res, false, callErr
@@ -598,6 +593,19 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 		s.metrics.IncRateLimited("provider_busy")
 	}
 	return res, false, lastErr
+}
+
+// inBackground runs a store write off the response path: detached from the
+// request's cancellation, bounded by bgStoreTimeout. Tests wait for it on
+// s.bg.
+func (s *Server) inBackground(ctx context.Context, f func(context.Context)) {
+	s.bg.Add(1)
+	go func() {
+		defer s.bg.Done()
+		bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bgStoreTimeout)
+		defer cancel()
+		f(bctx)
+	}()
 }
 
 // soonestOpen picks the open tier whose cooldown runs out first, the lowest

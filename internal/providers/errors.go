@@ -68,6 +68,15 @@ func (e *Error) Error() string { return e.Message }
 // Unwrap is the transport failure underneath e, or nil.
 func (e *Error) Unwrap() error { return e.cause }
 
+// IsUpstreamAnswer reports whether err is an Error the upstream itself
+// answered with — a status and body, retryable or not — rather than a
+// transport failure (a deadline, a cancellation, a refused connection) or
+// the ceiling's own timeout.
+func IsUpstreamAnswer(err error) bool {
+	var pe *Error
+	return errors.As(err, &pe) && pe.cause == nil && pe.Code != ErrCodeUpstreamTimeout
+}
+
 // IsRetryable reports whether err is a retryable provider Error.
 func IsRetryable(err error) bool {
 	var pe *Error

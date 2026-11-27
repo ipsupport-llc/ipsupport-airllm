@@ -207,6 +207,25 @@ func TestTimeoutRunCountsUntilReset(t *testing.T) {
 	}
 }
 
+// TestLocalTimeoutRunExpires: the local count is forgotten after
+// timeoutsTTL like the Redis key, and not before: a run of timeouts 24
+// hours apart (the longest budget) still counts.
+func TestLocalTimeoutRunExpires(t *testing.T) {
+	clk := newFakeClock()
+	s := New(nil).WithClock(clk.Now)
+	ctx, k := context.Background(), testKey()
+
+	s.AddTimeout(ctx, k)
+	clk.Advance(24 * time.Hour)
+	if n := s.AddTimeout(ctx, k); n != 2 {
+		t.Fatalf("24h later: AddTimeout = %d, want 2", n)
+	}
+	clk.Advance(timeoutsTTL + time.Second)
+	if n := s.AddTimeout(ctx, k); n != 1 {
+		t.Errorf("past timeoutsTTL: AddTimeout = %d, want 1", n)
+	}
+}
+
 // TestTimeoutRunIsSharedThroughRedis: every replica's timeouts add up, and
 // a reset on one replica ends the run for all.
 func TestTimeoutRunIsSharedThroughRedis(t *testing.T) {
@@ -231,6 +250,13 @@ func TestTimeoutRunIsSharedThroughRedis(t *testing.T) {
 	a.AddTimeout(ctx, k)
 	if n := b.AddTimeout(ctx, k); n != 2 {
 		t.Errorf("second replica's AddTimeout = %d, want 2", n)
+	}
+	if ttl := rdb.TTL(ctx, k.timeoutsKey()).Val(); ttl <= 24*time.Hour {
+		t.Errorf("count TTL = %v, want past the 24h budget cap", ttl)
+	}
+	// Each replica's local copy is the shared count, not its own tally.
+	if a.timeouts[k].n != 1 || b.timeouts[k].n != 2 {
+		t.Errorf("local copies a=%d b=%d, want 1 and 2 as Redis returned them", a.timeouts[k].n, b.timeouts[k].n)
 	}
 	a.ResetTimeouts(ctx, k)
 	if n := b.AddTimeout(ctx, k); n != 1 {
