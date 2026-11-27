@@ -75,9 +75,12 @@ test("parseSecondsToMs: empty is unset, seconds become whole milliseconds", () =
 });
 
 test("parseSecondsToMs: bad input is refused with the field's name", () => {
-  for (const bad of ["abc", "-1", "1,5", "Infinity", "1.5s"]) {
+  for (const bad of ["abc", "-1", "1,5", "Infinity", "1.5s", "0x10", "1e3", "+5", ".5", "5.", "1 2"]) {
     assert.throws(() => parseSecondsToMs(bad, "timeout"), /^Error: timeout must be a number of seconds/, `accepted ${bad}`);
   }
+  assert.equal(parseSecondsToMs("86400", "timeout"), 86400000);
+  assert.throws(() => parseSecondsToMs("86400.5", "timeout"), /^Error: timeout must be at most 86400 seconds \(24 hours\)/);
+  assert.throws(() => parseSecondsToMs("100000", "breaker cooldown", true), /breaker cooldown must be at most 86400 seconds/);
   assert.throws(() => parseSecondsToMs("0.0001", "timeout"), /at least 0.001/);
   assert.throws(() => parseSecondsToMs("0", "breaker cooldown", true), /breaker cooldown must be a number of seconds above 0/);
 });
@@ -138,12 +141,45 @@ test("targetOptionsFromForm: tri-state selects map to unset / true / false", () 
   assert.deepEqual(plain(targetOptionsFromForm({ ...blank, breaker_enabled: "yes" })), { breaker: { enabled: true } });
 });
 
-test("targetOptionsFromForm: fields win over Advanced, which keeps its other keys", () => {
+test("targetOptionsFromForm: fields merge with Advanced, which keeps its other keys", () => {
   const o = targetOptionsFromForm({
     ...blank, timeout: "2.5", breaker_failures: "4",
-    advanced: '{"timeout_ms":9000,"breaker":{"failures":1,"error_rate":0.5},"voices":{"x":{"voice":"y"}}}',
+    advanced: '{"breaker":{"error_rate":0.5},"voices":{"x":{"voice":"y"}}}',
   });
   assert.deepEqual(plain(o), { timeout_ms: 2500, breaker: { failures: 4, error_rate: 0.5 }, voices: { x: { voice: "y" } } });
+});
+
+test("targetOptionsFromForm: a key in Advanced with its field empty is kept", () => {
+  const o = targetOptionsFromForm({ ...blank, advanced: '{"timeout_ms":9000,"thinking":"off","breaker":{"failures":2}}' });
+  assert.deepEqual(plain(o), { timeout_ms: 9000, thinking: "off", breaker: { failures: 2 } });
+});
+
+test("targetOptionsFromForm: a key set in its field and in Advanced is refused, naming the key", () => {
+  const cases = [
+    [{ timeout: "2" }, '{"timeout_ms":9000}', "timeout_ms"],
+    [{ fallback_on_auth: "no" }, '{"fallback_on_auth":true}', "fallback_on_auth"],
+    [{ thinking: "off" }, '{"thinking":"off"}', "thinking"],
+    [{ breaker_enabled: "yes" }, '{"breaker":{"enabled":false}}', "breaker.enabled"],
+    [{ breaker_failures: "4" }, '{"breaker":{"failures":1}}', "breaker.failures"],
+    [{ breaker_cooldown: "30" }, '{"breaker":{"cooldown_ms":1000}}', "breaker.cooldown_ms"],
+  ];
+  for (const [fields, advanced, key] of cases) {
+    assert.throws(() => targetOptionsFromForm({ ...blank, ...fields, advanced }),
+      new RegExp(`^Error: ${key.replace(".", "\\.")} is set both in its field and in Advanced \\(JSON\\)`), key);
+  }
+});
+
+test("targetOptionsForm: a stored value its field would refuse stays in Advanced", () => {
+  const stored = { timeout_ms: 90000000, breaker: { failures: 0, cooldown_ms: 0, enabled: true } };
+  const f = targetOptionsForm(stored);
+  assert.equal(f.timeout, "");
+  assert.equal(f.breaker_failures, "");
+  assert.equal(f.breaker_cooldown, "");
+  assert.equal(f.breaker_enabled, "yes");
+  assert.deepEqual(JSON.parse(f.advanced), { timeout_ms: 90000000, breaker: { failures: 0, cooldown_ms: 0 } });
+  // An unrelated edit still saves, and the stored values go back untouched
+  // for the server to judge.
+  assert.deepEqual(plain(targetOptionsFromForm({ ...f, fallback_on_auth: "yes" })), { ...stored, fallback_on_auth: true });
 });
 
 test("targetOptionsFromForm: bad input names the field", () => {
