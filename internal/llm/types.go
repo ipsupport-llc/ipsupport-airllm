@@ -218,9 +218,26 @@ type ChatResponse struct {
 // a finish-reason chunk, and finally a usage chunk (Usage set, all else
 // zero). Egress codecs translate these into the client's stream format.
 type StreamChunk struct {
-	Role         string          // set on the first chunk only
-	Content      string          // incremental text
+	Role    string // set on the first chunk only
+	Content string // incremental text
+	// Reasoning is incremental thinking text (reasoning_content). No egress
+	// sends it and no response carries it — the gateway has never passed
+	// reasoning text to clients — but it is output: it tells a model that is
+	// thinking from one that hangs.
+	Reasoning    string
 	ToolCalls    []ToolCallDelta // incremental tool calls; Index per OpenAI accumulation semantics
 	FinishReason string          // "stop" | "tool_calls" on the final delta chunk
 	Usage        *Usage          // set on the terminal usage chunk only
+	// OtherChoice marks a chunk whose upstream message carried a choice
+	// other than the first (a several-choice answer). The IR holds one
+	// choice; a caller assembling a response from the stream refuses it
+	// rather than merge two choices into one.
+	OtherChoice bool
+}
+
+// HasOutput reports whether the chunk carries model output — text, thinking
+// or a tool call — rather than only a role, a finish reason, usage or
+// nothing at all.
+func (c StreamChunk) HasOutput() bool {
+	return c.Content != "" || c.Reasoning != "" || len(c.ToolCalls) > 0
 }

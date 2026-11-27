@@ -61,6 +61,9 @@ func NewVertex(name, baseURL string, tokens TokenSource) *Vertex {
 // rationale (same knob, same default, same relationship to timeout_ms).
 func (p *Vertex) SetChatTimeout(d time.Duration) { p.chatTimeout = d }
 
+// ChatCeiling is the ceiling Chat applies to a call without a budget.
+func (p *Vertex) ChatCeiling() time.Duration { return p.chatTimeout }
+
 func (p *Vertex) Name() string     { return p.name }
 func (p *Vertex) Kind() string     { return "vertex" }
 func (p *Vertex) Protocol() string { return "openai" }
@@ -218,5 +221,5 @@ func (p *Vertex) ChatStream(ctx context.Context, in llm.ChatRequest, yield func(
 	}
 	defer resp.Body.Close()
 
-	return decodeSSEStream(resp.Body, streamDecodeOptions{provider: p.name, coalesceUsage: true}, yield)
+	return decodeSSEStream(resp.Body, streamDecodeOptions{provider: p.name, coalesceUsage: true, requireEnd: requiresStreamEnd(ctx)}, yield)
 }

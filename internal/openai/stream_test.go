@@ -37,6 +37,47 @@ func TestStreamChunkFinish(t *testing.T) {
 	}
 }
 
+// TestParseStreamChunkOtherChoice: a chunk of any choice but the first is
+// marked, so a caller assembling one choice can refuse it.
+func TestParseStreamChunkOtherChoice(t *testing.T) {
+	for data, want := range map[string]bool{
+		`{"choices":[{"index":0,"delta":{"content":"a"}}]}`:                                     false,
+		`{"choices":[{"delta":{"content":"a"}}]}`:                                               false,
+		`{"choices":[{"index":1,"delta":{"content":"b"}}]}`:                                     true,
+		`{"choices":[{"index":0,"delta":{"content":"a"}},{"index":1,"delta":{"content":"b"}}]}`: true,
+	} {
+		c, err := ParseStreamChunk([]byte(data))
+		if err != nil || c.OtherChoice != want {
+			t.Errorf("%s: OtherChoice = %v (%v), want %v", data, c.OtherChoice, err, want)
+		}
+	}
+}
+
+// TestParseStreamChunkReasoning: thinking text is read from either key a
+// vendor uses, never sent back out, and a reasoning value that is not a
+// string does not cost the chunk its content.
+func TestParseStreamChunkReasoning(t *testing.T) {
+	for data, want := range map[string]string{
+		`{"choices":[{"index":0,"delta":{"reasoning_content":"llama"}}]}`:       "llama",
+		`{"choices":[{"index":0,"delta":{"reasoning":"router"}}]}`:              "router",
+		`{"choices":[{"index":0,"delta":{"reasoning":{"x":1},"content":"c"}}]}`: "",
+	} {
+		c, err := ParseStreamChunk([]byte(data))
+		if err != nil {
+			t.Fatalf("%s: %v", data, err)
+		}
+		if c.Reasoning != want {
+			t.Errorf("%s: reasoning = %q, want %q", data, c.Reasoning, want)
+		}
+		if want == "" && c.Content != "c" {
+			t.Errorf("%s: content = %q, want c", data, c.Content)
+		}
+		if out := mustMarshal(t, c); strings.Contains(out, "reasoning") {
+			t.Errorf("%s: reasoning reached the client chunk: %s", data, out)
+		}
+	}
+}
+
 func TestStreamChunkUsageOnly(t *testing.T) {
 	s := mustMarshal(t, llm.StreamChunk{Usage: &llm.Usage{PromptTokens: 1, CompletionTokens: 2, TotalTokens: 3}})
 	if !strings.Contains(s, `"choices":[]`) {

@@ -980,9 +980,13 @@ function userLabelHTML(id, label) {
 // liveOutputHTML renders a live request's Output cell. A unary request
 // learns its tokens and bytes only when the response completes, so with
 // nothing out yet it reads as waiting rather than as zeros; a stream shows
-// its running counts.
+// its running counts. A unary request served from an upstream stream
+// (stream_upstream) counts tokens as they arrive but writes nothing until
+// the answer is whole, so it shows its tokens as still being received.
 function liveOutputHTML(r) {
-  if (!r.stream && !Number(r.output_tokens) && !Number(r.bytes_out)) return `<span class="muted waiting">waiting for response</span>`;
+  const tokens = Number(r.output_tokens), bytes = Number(r.bytes_out);
+  if (!r.stream && !tokens && !bytes) return `<span class="muted waiting">waiting for response</span>`;
+  if (!r.stream && !bytes) return `${fmtNum(r.output_tokens)} tok<div class="sub muted">receiving</div>`;
   return `${fmtNum(r.output_tokens)} tok<div class="sub">${fmtBytes(r.bytes_out)}</div>`;
 }
 
@@ -1814,10 +1818,12 @@ function parseSecondsToMs(text, what, positive, maxSeconds) {
 function targetOptionsForm(o) {
   const rest = o && typeof o === "object" && !Array.isArray(o) ? { ...o } : {};
   const tri = (v) => (v === true ? "yes" : "no");
-  const f = { timeout: "", fallback_on_auth: "", thinking: "", breaker_enabled: "", breaker_failures: "", breaker_cooldown: "" };
+  const f = { timeout: "", fallback_on_auth: "", thinking: "", stream_upstream: "", stall: "", breaker_enabled: "", breaker_failures: "", breaker_cooldown: "" };
   if (Number.isInteger(rest.timeout_ms) && rest.timeout_ms >= 0 && rest.timeout_ms <= 86400000) { f.timeout = msToSecondsText(rest.timeout_ms); delete rest.timeout_ms; }
   if (typeof rest.fallback_on_auth === "boolean") { f.fallback_on_auth = tri(rest.fallback_on_auth); delete rest.fallback_on_auth; }
   if (rest.thinking === "off") { f.thinking = "off"; delete rest.thinking; }
+  if (typeof rest.stream_upstream === "boolean") { f.stream_upstream = tri(rest.stream_upstream); delete rest.stream_upstream; }
+  if (Number.isInteger(rest.stall_timeout_ms) && rest.stall_timeout_ms > 0 && rest.stall_timeout_ms <= 86400000) { f.stall = msToSecondsText(rest.stall_timeout_ms); delete rest.stall_timeout_ms; }
   const b = rest.breaker;
   if (b && typeof b === "object" && !Array.isArray(b)) {
     const br = { ...b };
@@ -1849,6 +1855,8 @@ function targetOptionsFromForm(f) {
   put(o, "timeout_ms", parseSecondsToMs(f.timeout, "timeout", false, 86400));
   put(o, "fallback_on_auth", tri(f.fallback_on_auth));
   put(o, "thinking", f.thinking || undefined);
+  put(o, "stream_upstream", tri(f.stream_upstream));
+  put(o, "stall_timeout_ms", parseSecondsToMs(f.stall, "stall timeout", true, 86400));
   const br = {};
   const enabled = tri(f.breaker_enabled);
   if (enabled !== undefined) br.enabled = enabled;
@@ -1997,6 +2005,9 @@ async function failoverPanel(el) {
         <label class="field"><span class="lab">Time budget per target, seconds (0 = none)</span>
           <input id="fo-timeout" type="text" inputmode="decimal" value="${esc(msToSecondsText(Number(f.timeout_ms) || 0))}" /></label>
         <label class="field check"><input type="checkbox" id="fo-auth" ${f.fallback_on_auth ? "checked" : ""} /><span class="lab">Try the next tier on upstream auth/billing errors</span></label>
+        <label class="field check"><input type="checkbox" id="fo-stream-up" ${f.stream_upstream ? "checked" : ""} /><span class="lab">Stream from upstream for non-streaming chats (the time budget then bounds the first output)</span></label>
+        <label class="field"><span class="lab">Stall timeout when streaming from upstream, seconds</span>
+          <input id="fo-stall" type="text" inputmode="decimal" value="${esc(Number(f.stall_timeout_ms) > 0 ? msToSecondsText(Number(f.stall_timeout_ms)) : "")}" placeholder="60" /></label>
         <label class="field"><span class="lab">Unavailable backoff start, ms</span>
           <input id="fo-uinit" type="number" min="0" value="${Number(f.unavailable_initial_ms) || 0}" /></label>
         <label class="field"><span class="lab">Unavailable backoff ceiling, ms</span>
@@ -2007,14 +2018,18 @@ async function failoverPanel(el) {
       <div class="panel-actions"><button class="btn" id="fo-save">Save failover defaults</button></div>
     </div></div>`;
   $("#fo-save", el).addEventListener("click", async () => {
-    let breaker, timeoutMS;
+    let breaker, timeoutMS, stallMS;
     try { timeoutMS = parseSecondsToMs($("#fo-timeout", el).value, "Time budget", false, 86400) ?? 0; } catch (e) { toast(e.message, "err"); return; }
+    // Empty saves 0, which the server reads as its built-in default.
+    try { stallMS = parseSecondsToMs($("#fo-stall", el).value, "Stall timeout", true, 86400) ?? 0; } catch (e) { toast(e.message, "err"); return; }
     try { breaker = parseTargetOptions($("#fo-breaker", el).value); } catch (e) { toast("breaker: " + e.message, "err"); return; }
     const x = await api("PUT", "/api/admin/failover", {
       timeout_ms: timeoutMS,
       fallback_on_auth: $("#fo-auth", el).checked,
       unavailable_initial_ms: Number($("#fo-uinit", el).value) || 0,
       unavailable_max_ms: Number($("#fo-umax", el).value) || 0,
+      stream_upstream: $("#fo-stream-up", el).checked,
+      stall_timeout_ms: stallMS,
       breaker,
     });
     if (x.ok) toast("Failover defaults saved"); else toast(apiError(x), "err");
@@ -2038,6 +2053,8 @@ async function editAlias(c, a) {
   const dflt = {
     timeout: !fo ? "default" : Number(fo.timeout_ms) > 0 ? `default ${msToSecondsText(Number(fo.timeout_ms))}` : "default: none",
     auth: "default" + (fo ? yesNo(!!fo.fallback_on_auth) : ""),
+    streamUp: "default" + (fo ? yesNo(!!fo.stream_upstream) : ""),
+    stall: fo && Number(fo.stall_timeout_ms) > 0 ? `default ${msToSecondsText(Number(fo.stall_timeout_ms))}` : "default",
     brEnabled: "default" + yesNo(fob.enabled),
     brFailures: Number.isInteger(fob.failures) ? `default ${fob.failures}` : "default",
     brCooldown: typeof fob.cooldown_ms === "number" ? `default ${msToSecondsText(fob.cooldown_ms)}` : "default",
@@ -2080,7 +2097,7 @@ async function editAlias(c, a) {
     <div id="al-targets"></div>
     <button type="button" class="btn ghost sm" id="al-add">+ Add target</button>
     <details class="hint opts-ref"><summary>Advanced (JSON) keys reference</summary>
-      Timeout, auth/billing fallback, thinking and the breaker's on/failures/cooldown have their own fields; an empty field uses the failover default. Advanced holds the rest: <span class="mono">breaker</span> — further circuit breaker keys for the tier, e.g. <span class="mono">{"error_rate":0.5,"window_ms":60000,"min_requests":10,"max_cooldown_ms":600000,"stable_ms":300000}</span>; <span class="mono">recognition_models</span> — recognition model per BCP-47 language, e.g. <span class="mono">{"en-US":"telephony"}</span> (google-speech); <span class="mono">voices</span> — canonical voice → <span class="mono">{"voice","model"}</span> this target speaks it with; <span class="mono">default_voices</span> — voice per BCP-47 language for unmapped voices, e.g. <span class="mono">{"en":{"voice":"onyx"}}</span>; <span class="mono">send_language</span> — <span class="mono">true</span> sends an OpenAI-compatible speech target the request language (multilingual models with one voice); <span class="mono">stream_speech</span> — <span class="mono">true</span> streams this speech target's audio as it arrives.
+      Timeout, auth/billing fallback, thinking, streaming from upstream, stall timeout and the breaker's on/failures/cooldown have their own fields; an empty field uses the failover default. With streaming from upstream a non-streaming chat is served from a stream: the timeout then bounds the wait for the first output, the stall timeout every silence after it. Advanced holds the rest: <span class="mono">breaker</span> — further circuit breaker keys for the tier, e.g. <span class="mono">{"error_rate":0.5,"window_ms":60000,"min_requests":10,"max_cooldown_ms":600000,"stable_ms":300000}</span>; <span class="mono">recognition_models</span> — recognition model per BCP-47 language, e.g. <span class="mono">{"en-US":"telephony"}</span> (google-speech); <span class="mono">voices</span> — canonical voice → <span class="mono">{"voice","model"}</span> this target speaks it with; <span class="mono">default_voices</span> — voice per BCP-47 language for unmapped voices, e.g. <span class="mono">{"en":{"voice":"onyx"}}</span>; <span class="mono">send_language</span> — <span class="mono">true</span> sends an OpenAI-compatible speech target the request language (multilingual models with one voice); <span class="mono">stream_speech</span> — <span class="mono">true</span> streams this speech target's audio as it arrives.
     </details>
     <div class="form-sect">Behaviour</div>
     <div class="form-grid">
@@ -2181,6 +2198,10 @@ async function editAlias(c, a) {
       <div class="t-more" hidden>
         <label class="t-fld"><span class="t-lab">Thinking</span>
           <select class="t-thinking"><option value="">default (as the client asks)</option><option value="off" ${f.thinking === "off" ? "selected" : ""}>off</option></select></label>
+        <label class="t-fld"><span class="t-lab" title="Serve a non-streaming chat by streaming from this target and assembling the answer, so a hung model is caught by the stall timeout instead of the whole time budget">Stream from upstream (unary)</span>
+          <select class="t-stream-up">${triOpts(f.stream_upstream, dflt.streamUp)}</select></label>
+        <label class="t-fld"><span class="t-lab">Stall timeout, s</span>
+          <input class="t-stall" type="text" inputmode="decimal" placeholder="${esc(dflt.stall)}" value="${esc(f.stall)}" title="with streaming from upstream: the longest silence once output started, in seconds; empty = failover default" /></label>
         <div class="t-breaker"><span class="t-lab t-sub" title="The breaker is per tier: each key comes from the first target of the tier that sets it.">Breaker (tier)</span>
           <label class="t-fld"><span class="t-lab">On</span><select class="t-br-enabled">${triOpts(f.breaker_enabled, dflt.brEnabled)}</select></label>
           <label class="t-fld"><span class="t-lab">Failures</span><input class="t-br-failures" type="text" inputmode="numeric" placeholder="${esc(dflt.brFailures)}" value="${esc(f.breaker_failures)}" /></label>
@@ -2196,6 +2217,8 @@ async function editAlias(c, a) {
     const markMore = () => {
       const set = [];
       if (row.querySelector(".t-thinking").value) set.push("thinking");
+      if (row.querySelector(".t-stream-up").value) set.push("stream_upstream");
+      if (row.querySelector(".t-stall").value.trim()) set.push("stall_timeout");
       if ([".t-br-enabled", ".t-br-failures", ".t-br-cooldown"].some((q) => row.querySelector(q).value.trim())) set.push("breaker");
       try {
         for (const k of Object.keys(parseTargetOptions(row.querySelector(".t-advanced").value))) if (!set.includes(k)) set.push(k);
@@ -2264,6 +2287,7 @@ async function editAlias(c, a) {
         try {
           options = targetOptionsFromForm({
             timeout: v(".t-timeout"), fallback_on_auth: v(".t-auth"), thinking: v(".t-thinking"),
+            stream_upstream: v(".t-stream-up"), stall: v(".t-stall"),
             breaker_enabled: v(".t-br-enabled"), breaker_failures: v(".t-br-failures"),
             breaker_cooldown: v(".t-br-cooldown"), advanced: v(".t-advanced"),
           });

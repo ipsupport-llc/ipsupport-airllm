@@ -151,10 +151,69 @@ nothing changes until an operator opts in.
 
 | Field | Default | Meaning |
 |-------|---------|---------|
-| `timeout_ms` | `0` | Time budget per target attempt; `0` means none. For a **streamed** chat it bounds the wait for the **first chunk carrying text or a tool call** — the role-only and empty deltas a model sends while it thinks do not count, so a tier that thinks past its budget falls through instead of holding the client silent (a slow stream that has started is never cut); for a unary chat, a transcription or a speech request it bounds the **whole call**, and for a non-streaming chat or embeddings call it replaces `UPSTREAM_CHAT_TIMEOUT`, so it may be longer than that ceiling. A breach abandons the attempt and moves to the next target, exactly like a retryable error; the client sees one clean response from whichever target answers, or `504` when no target does. A breach counts against the tier's breaker; it marks the target unavailable only as the third timeout in a row (see "Target unavailability" below). A target that failed is not called again within the same request. At most `86400000` (24 hours). |
+| `timeout_ms` | `0` | Time budget per target attempt; `0` means none. For a **streamed** chat it bounds the wait for the **first chunk carrying text or a tool call** — the role-only and empty deltas a model sends while it thinks do not count, so a tier that thinks past its budget falls through instead of holding the client silent (a slow stream that has started is never cut); for a unary chat, a transcription or a speech request it bounds the **whole call** — except a unary chat on a target with `stream_upstream`, where it bounds the time to the **first output** (see below) — and for a non-streaming chat or embeddings call it replaces `UPSTREAM_CHAT_TIMEOUT`, so it may be longer than that ceiling. A breach abandons the attempt and moves to the next target, exactly like a retryable error; the client sees one clean response from whichever target answers, or `504` when no target does. A breach counts against the tier's breaker; it marks the target unavailable only as the third timeout in a row (see "Target unavailability" below). A target that failed is not called again within the same request. At most `86400000` (24 hours). |
 | `fallback_on_auth` | `false` | Also move on when the upstream refuses the gateway's own credentials or account: HTTP `401`/`403`, and Google `PERMISSION_DENIED`, `UNAUTHENTICATED`, `FAILED_PRECONDITION` or a `BILLING_DISABLED` reason. Off, such an error fails the request as before. |
+| `stream_upstream` | `false` | Serve a **unary** (non-streaming) chat by streaming from the target and assembling the chunks into one ordinary response — content, tool calls, finish reason and usage as the unary call would have returned them; the client sees no difference. See "Streaming from upstream" below. Client streams are unaffected. |
+| `stall_timeout_ms` | `60000` | With `stream_upstream`: the longest silence between two pieces of output once the target started answering; a longer one abandons the attempt as a timeout. Must be positive (per target); `0` or unset in the gateway-wide defaults is the built-in 60 s. At most `86400000` (24 hours). |
 | `unavailable_initial_ms` | `200` | Gateway-wide only (no per-target override) — see "Target unavailability" below. |
 | `unavailable_max_ms` | `25600` | Gateway-wide only — see "Target unavailability" below. |
+
+#### Streaming from upstream
+
+A unary call shows nothing until the whole answer is there, so a model that
+hangs cannot be told from one that is slow until `timeout_ms` has run out —
+for a local model whose answers take minutes, that budget has to be long,
+and a hung model holds every request for all of it. With `stream_upstream`
+the gateway asks the target for a stream (with `stream_options.include_usage`)
+and watches it arrive:
+
+- `timeout_ms` bounds the wait for the **first output**: the first chunk that
+  carries text, thinking (`reasoning_content`) or a tool call. The role chunk
+  and empty deltas an upstream sends while it reads a long prompt do not
+  count, so a slow prefill is not a stall. Without a budget the provider's
+  `UPSTREAM_CHAT_TIMEOUT` bounds that wait, as it would bound the unary call.
+- After the first output, a gap longer than `stall_timeout_ms` between two
+  pieces of output abandons the attempt. A stall is a timeout: reason
+  `timeout` in the `tier attempt failed` log line, counted against the
+  breaker and towards the three-in-a-row run that marks the target
+  unavailable (see "Target unavailability" below), `504` if no tier answers.
+- Once output flows, **nothing bounds the whole answer** except
+  `stall_timeout_ms` between two pieces of output: a model that keeps
+  producing is never cut off, however long it takes. That is intended — the
+  point is to stop waiting on a model that hangs, not on one that is slow.
+- Nothing is sent to the client until the stream has ended, so any failure
+  on the way — a stall, an error event in the stream, a dropped connection,
+  a stream that just stops without `[DONE]` or a finish reason of the
+  upstream's own, a chunk of a second choice, an answer with neither text
+  nor a tool call (only thinking, or nothing) — falls through to the next
+  tier exactly like a failed unary call.
+- A stream that reports no usage is billed an estimate rather than zero, and
+  a warning is logged: about four characters a token, over the whole request
+  (messages, earlier tool calls and the tool schemas) for the prompt and over
+  everything the model produced (text, thinking, tool call names and
+  arguments) for the completion. A report that counts a total is trusted for
+  the prompt side — tokens a total holds beyond its parts are billed as
+  completion, as for a unary answer, never with an estimate on top — and
+  only a completion reported as `0` although output came is estimated. The
+  response carries the same numbers.
+- A request whose answer a stream would not carry the same way — one that
+  asks for `logprobs` or `top_logprobs` — is served by the plain unary call.
+- The response is the assembled one: its `model` is the target's upstream
+  model (the client-facing handlers then put the requested alias there, as
+  for any unary answer) and its `id` is generated by the gateway, since the
+  stream's own id is not kept.
+- A breaker probe holds its tier for as long as its attempt runs, renewing
+  its lease from admission until the attempt ends, so no second probe is let
+  in while an assembled stream keeps going. A replica that dies stops
+  renewing, and the lease runs out as before.
+
+While it assembles, the request's running output tokens show in **Live**
+(one per chunk of output, thinking included).
+
+For a **client** stream, thinking does not count as the first chunk: the
+gateway does not forward thinking text, so a tier that only thinks past its
+`timeout_ms` still falls through instead of holding the client on empty
+chunks.
 
 Per-target `options` is a free-form JSON object: the keys above are the ones
 the gateway reads today, plus one that only makes sense per target and so has
@@ -169,7 +228,7 @@ no gateway-wide default:
 | `recognition_models` | The recognition model per language, keyed by BCP-47 tag, for a provider that chooses its model by language (today `google-speech`): `{"en-US": "telephony", "es-ES": "telephony"}`. An exact tag wins over a bare language, so `"en"` covers every English region unless `"en-GB"` is listed too. A language with no entry is recognised with the target's `upstream_model`. The ledger records the model that actually ran, so price each one. |
 
 Any other key is stored and returned untouched. A known key with the wrong
-type, a negative `timeout_ms`, a `recognition_models` entry with an empty
+type, a negative `timeout_ms`, a `stall_timeout_ms` that is not positive, a `recognition_models` entry with an empty
 language or model or one language listed twice (in any case), a `voices`
 entry with an unknown gender, a `default_voices` entry without a voice or
 one language listed twice, or a non-object is rejected on save with `400`. For example, a voice alias whose first tier must
@@ -312,7 +371,8 @@ to the exact same target.
 A tier-attributable failure (the same ones the breaker counts — see "Only
 failures that say something about the tier count" above) marks its
 `(provider, upstream_model)` unavailable. A timeout — a target that ran
-past its `timeout_ms` or, without one, past `UPSTREAM_CHAT_TIMEOUT` — is
+past its `timeout_ms` or, without one, past `UPSTREAM_CHAT_TIMEOUT`, or a
+`stream_upstream` target that stalled past its `stall_timeout_ms` — is
 treated as slow rather than down: it logs `tier attempt failed` with reason
 `timeout`, counts against the breaker and moves the request on to the next
 tier, but marks the target only when it is the **third timeout in a row**

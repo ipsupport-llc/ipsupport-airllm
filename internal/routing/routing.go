@@ -61,10 +61,24 @@ type Target struct {
 type TargetOptions struct {
 	// TimeoutMS is the target's time budget. For a streamed chat it bounds
 	// the wait for the first chunk; for a unary chat or an audio request it
-	// bounds the whole call. 0 means no budget. A positive budget replaces
-	// the provider's own non-streaming ceiling (UPSTREAM_CHAT_TIMEOUT) for
-	// the call, so it can be longer than that ceiling as well as shorter.
+	// bounds the whole call — unless StreamUpstream serves the unary chat
+	// from a stream, when it bounds the wait for the first output. 0 means
+	// no budget. A positive budget replaces the provider's own
+	// non-streaming ceiling (UPSTREAM_CHAT_TIMEOUT) for the call, so it can
+	// be longer than that ceiling as well as shorter.
 	TimeoutMS *int `json:"timeout_ms,omitempty"`
+	// StreamUpstream serves a unary chat by streaming from the target and
+	// assembling the chunks into one ordinary response, so a model that
+	// hangs is told from a slow one long before the whole budget runs out:
+	// TimeoutMS bounds the wait for the first output, and StallTimeoutMS
+	// any later silence. The client sees no difference. Unset takes the
+	// gateway-wide default.
+	StreamUpstream *bool `json:"stream_upstream,omitempty"`
+	// StallTimeoutMS is the longest gap between two pieces of output a
+	// StreamUpstream call may have once its output started; a longer one
+	// abandons the attempt as a timeout. Positive; unset takes the
+	// gateway-wide default.
+	StallTimeoutMS *int `json:"stall_timeout_ms,omitempty"`
 	// FallbackOnAuth makes an upstream authorisation or billing failure a
 	// reason to try the next target instead of failing the request.
 	FallbackOnAuth *bool `json:"fallback_on_auth,omitempty"`
@@ -175,8 +189,8 @@ type VoiceChoice struct {
 // voiceGenders are the genders a voice may be described with.
 var voiceGenders = map[string]bool{"": true, "male": true, "female": true, "neutral": true}
 
-// MaxTimeoutMS is the largest timeout_ms a target or the gateway-wide
-// default may have: 24 hours, far past any real call and far short of
+// MaxTimeoutMS is the largest timeout_ms (and stall_timeout_ms) a target or
+// the gateway-wide default may have: 24 hours, far past any real call and far short of
 // overflowing a time.Duration.
 const MaxTimeoutMS = 86_400_000
 
@@ -200,6 +214,12 @@ func ParseTargetOptions(raw []byte) (TargetOptions, error) {
 	}
 	if o.TimeoutMS != nil && *o.TimeoutMS > MaxTimeoutMS {
 		return o, fmt.Errorf("invalid options: timeout_ms must be at most %d (24 hours)", MaxTimeoutMS)
+	}
+	if o.StallTimeoutMS != nil && *o.StallTimeoutMS <= 0 {
+		return o, fmt.Errorf("invalid options: stall_timeout_ms must be positive")
+	}
+	if o.StallTimeoutMS != nil && *o.StallTimeoutMS > MaxTimeoutMS {
+		return o, fmt.Errorf("invalid options: stall_timeout_ms must be at most %d (24 hours)", MaxTimeoutMS)
 	}
 	if err := o.Breaker.Validate(); err != nil {
 		return o, fmt.Errorf("invalid options: %w", err)

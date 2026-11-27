@@ -397,7 +397,7 @@ details.hint[open] summary { margin-bottom: 0.4rem; }
 .t-fld { display: inline-flex; align-items: center; gap: 0.4rem; min-width: 0; }
 .t-lab { color: var(--muted); font-family: var(--font-mono); font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.08em; white-space: nowrap; }
 .t-fld input, .t-fld select { width: auto; padding: 0.3rem 0.5rem; font-size: 0.84rem; }
-.t-fld .t-timeout, .t-fld .t-br-cooldown { width: 6.5rem; }
+.t-fld .t-timeout, .t-fld .t-stall, .t-fld .t-br-cooldown { width: 6.5rem; }
 .t-fld .t-br-failures { width: 5.5rem; }
 .tgt .t-more-btn { margin-left: auto; white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .t-breaker { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem 0.9rem; }

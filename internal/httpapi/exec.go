@@ -303,11 +303,18 @@ func (s *Server) finalizeAudioUsage(ctx context.Context, entry ledger.Entry, key
 // so the ledger/log can still attribute the failure to a real provider —
 // this matters most for the fallback-worthy-error case, where every tier
 // gave a real (non-busy) answer.
+//
+// A target with stream_upstream is called through streamChat instead of
+// Chat, decided per target: tier 1 may stream while tier 2 does not.
 func (s *Server) runChat(ctx context.Context, plan *routing.Plan, req llm.ChatRequest) (llm.ChatResponse, execResult, error) {
 	var resp llm.ChatResponse
-	res, _, err := s.executePlan(ctx, plan, nil, func(ctx context.Context, p providers.Provider, t routing.Target, _ func() bool) error {
+	res, _, err := s.executePlan(ctx, plan, nil, func(ctx context.Context, p providers.Provider, t routing.Target, gate attemptGate) error {
 		var err error
-		resp, err = p.Chat(ctx, upstreamRequest(req, t))
+		if pol := s.policyFor(t); streamsUpstream(pol, req) {
+			resp, err = streamChat(ctx, p, t, upstreamRequest(req, t), pol.stall, gate)
+		} else {
+			resp, err = p.Chat(ctx, upstreamRequest(req, t))
+		}
 		if err == nil && len(resp.Choices) == 0 {
 			// A 2xx with no choices is no answer — often an error envelope
 			// sent with a success status. Fail it like any upstream error so
@@ -354,12 +361,15 @@ var errFirstChunkLate = errors.New("first chunk arrived after the time budget")
 // Under a budget, only a chunk carrying text or a tool call counts as the
 // first: the role-only and empty deltas a model sends while it thinks are
 // held back until real content follows, so a tier that thinks past its budget
-// falls through instead of holding the caller silent. Without a budget the
+// falls through instead of holding the caller silent. Thinking chunks
+// (StreamChunk.Reasoning) are held too, unlike in streamChat where they are
+// progress: no egress sends thinking text, so committing on one would send
+// the client empty deltas and give up the fall-through. Without a budget the
 // first chunk of any kind starts the response, as it always has.
 func (s *Server) runStream(ctx context.Context, plan *routing.Plan, req llm.ChatRequest, sink streamSink) (served execResult, usage llm.Usage, started bool, err error) {
 	live := liveFrom(ctx)
 	live.setStream()
-	served, started, err = s.executePlan(ctx, plan, nil, func(ctx context.Context, p providers.Provider, t routing.Target, commit func() bool) error {
+	served, started, err = s.executePlan(ctx, plan, nil, func(ctx context.Context, p providers.Provider, t routing.Target, gate attemptGate) error {
 		attemptStarted := false
 		var attemptUsage llm.Usage
 		var held []llm.StreamChunk
@@ -370,7 +380,7 @@ func (s *Server) runStream(ctx context.Context, plan *routing.Plan, req llm.Chat
 		}
 		emit := func(c llm.StreamChunk) error {
 			if !attemptStarted {
-				if !commit() {
+				if !gate.commit() {
 					return errFirstChunkLate
 				}
 				sink.begin(t)

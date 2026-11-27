@@ -32,6 +32,25 @@ func CallBudget(ctx context.Context) (time.Duration, bool) {
 	return d, ok && d > 0
 }
 
+// chatCeilinger is a provider whose non-streaming Chat has a ceiling of its
+// own (SetChatTimeout).
+type chatCeilinger interface {
+	ChatCeiling() time.Duration
+}
+
+// ChatCeiling is the ceiling p's non-streaming Chat applies to a call that
+// carries no budget: its own (UPSTREAM_CHAT_TIMEOUT), or the built-in
+// default for a provider that has none. A caller that serves a unary
+// request some other way uses it to stay as bounded as Chat would be.
+func ChatCeiling(p Provider) time.Duration {
+	if c, ok := p.(chatCeilinger); ok {
+		if d := c.ChatCeiling(); d > 0 {
+			return d
+		}
+	}
+	return defaultChatTimeout
+}
+
 // withCeiling bounds a non-streaming call by ceiling (defaultChatTimeout
 // when <= 0), unless ctx carries a caller-enforced budget (CallBudget), in
 // which case ctx is used as it is. The returned duration is the ceiling

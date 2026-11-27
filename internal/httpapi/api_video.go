@@ -128,7 +128,7 @@ func (s *Server) runVideoTo(ctx context.Context, plan *routing.Plan, req audio.S
 		}
 		return nil
 	}
-	res, started, err := s.executePlan(ctx, plan, supports, func(ctx context.Context, p providers.Provider, t routing.Target, commit func() bool) error {
+	res, started, err := s.executePlan(ctx, plan, supports, func(ctx context.Context, p providers.Provider, t routing.Target, gate attemptGate) error {
 		choice, ok := t.Options.SpeakAs(req.Voice, req.Language)
 		if !ok {
 			return &providers.Error{Status: http.StatusBadRequest, Code: providers.ErrCodeVoiceNotSupported,
@@ -150,7 +150,7 @@ func (s *Server) runVideoTo(ctx context.Context, plan *routing.Plan, req audio.S
 		if st.ContentType == "" {
 			st.ContentType = "video/mp4"
 		}
-		_, _, err = streamSpeech(st, in, p, t, sink, commit, false)
+		_, _, err = streamSpeech(st, in, p, t, sink, gate.commit, false)
 		served, label = in.Model, t.DisplayLabel
 		return err
 	})

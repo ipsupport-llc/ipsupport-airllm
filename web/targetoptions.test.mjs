@@ -87,7 +87,7 @@ test("parseSecondsToMs: bad input is refused with the field's name", () => {
   assert.throws(() => parseSecondsToMs("0", "breaker cooldown", true), /breaker cooldown must be a number of seconds above 0/);
 });
 
-const blank = { timeout: "", fallback_on_auth: "", thinking: "", breaker_enabled: "", breaker_failures: "", breaker_cooldown: "", advanced: "" };
+const blank = { timeout: "", fallback_on_auth: "", thinking: "", stream_upstream: "", stall: "", breaker_enabled: "", breaker_failures: "", breaker_cooldown: "", advanced: "" };
 
 test("targetOptionsForm: known keys go to fields, the rest stays in Advanced", () => {
   const f = targetOptionsForm({
@@ -118,6 +118,8 @@ test("round trip: form and back loses or changes no key", () => {
     { timeout_ms: 1234, fallback_on_auth: true },
     { fallback_on_auth: false, breaker: { enabled: false } },
     { thinking: "off", breaker: { failures: 5, cooldown_ms: 1500, window_ms: 60000, min_requests: 10, max_cooldown_ms: 600000, stable_ms: 300000 } },
+    { stream_upstream: true, stall_timeout_ms: 45000, timeout_ms: 600000 },
+    { stream_upstream: false },
     {
       timeout_ms: 2000, recognition_models: { "en-US": "telephony" },
       voices: { a: { voice: "onyx", model: "tts-1", language: "en-US", gender: "male" } },
@@ -216,4 +218,37 @@ test("targetOptionsFromForm: bad input names the field", () => {
   assert.throws(() => targetOptionsFromForm({ ...blank, breaker_cooldown: "0" }), /breaker cooldown must be/);
   assert.throws(() => targetOptionsFromForm({ ...blank, advanced: "{oops" }), /^Error: Advanced \(JSON\): options must be valid JSON/);
   assert.throws(() => targetOptionsFromForm({ ...blank, breaker_failures: "3", advanced: '{"breaker":5}' }), /Advanced \(JSON\): breaker must be a JSON object/);
+});
+
+test("stream from upstream and stall timeout: fields, tri-state and seconds", () => {
+  const f = targetOptionsForm({ stream_upstream: true, stall_timeout_ms: 30000 });
+  assert.equal(f.stream_upstream, "yes");
+  assert.equal(f.stall, "30");
+  assert.equal(f.advanced, "");
+  assert.equal(targetOptionsForm({ stream_upstream: false }).stream_upstream, "no");
+  assert.equal("stream_upstream" in targetOptionsFromForm({ ...blank, stream_upstream: "" }), false);
+  assert.equal(targetOptionsFromForm({ ...blank, stream_upstream: "yes" }).stream_upstream, true);
+  assert.equal(targetOptionsFromForm({ ...blank, stream_upstream: "no" }).stream_upstream, false);
+  assert.deepEqual(plain(targetOptionsFromForm({ ...blank, stall: "1.5" })), { stall_timeout_ms: 1500 });
+  // A row saved by a caller that predates the fields leaves them unset.
+  const { stream_upstream: _a, stall: _b, ...old } = blank;
+  assert.equal(JSON.stringify(targetOptionsFromForm(old)), "{}");
+});
+
+test("stall timeout: positive, at most 24 h, and refused next to the same key in Advanced", () => {
+  for (const bad of ["0", "-1", "x", "1.5s"]) {
+    assert.throws(() => targetOptionsFromForm({ ...blank, stall: bad }), /^Error: stall timeout must be a number of seconds above 0/, `accepted ${bad}`);
+  }
+  assert.throws(() => targetOptionsFromForm({ ...blank, stall: "86401" }), /^Error: stall timeout must be at most 86400 seconds \(24 hours\)/);
+  assert.throws(() => targetOptionsFromForm({ ...blank, stall: "5", advanced: '{"stall_timeout_ms":1000}' }),
+    /^Error: stall_timeout_ms is set both in its field and in Advanced \(JSON\)/);
+  assert.throws(() => targetOptionsFromForm({ ...blank, stream_upstream: "yes", advanced: '{"stream_upstream":false}' }),
+    /^Error: stream_upstream is set both in its field and in Advanced \(JSON\)/);
+  // A stored value the field would refuse stays in Advanced and goes back as is.
+  const stored = { stall_timeout_ms: 0, stream_upstream: "yes" };
+  const f = targetOptionsForm(stored);
+  assert.equal(f.stall, "");
+  assert.equal(f.stream_upstream, "");
+  assert.deepEqual(JSON.parse(f.advanced), stored);
+  assert.deepEqual(plain(targetOptionsFromForm(f)), stored);
 });

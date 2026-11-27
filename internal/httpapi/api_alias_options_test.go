@@ -27,26 +27,31 @@ func putAlias(s *Server, alias, body string) *httptest.ResponseRecorder {
 func TestPutAliasRejectsInvalidTargetOptions(t *testing.T) {
 	s := &Server{}
 	cases := map[string]string{
-		"not an object":           `"fast"`,
-		"array":                   `[1]`,
-		"negative budget":         `{"timeout_ms":-1}`,
-		"budget over 24 hours":    `{"timeout_ms":86400001}`,
-		"budget of wrong type":    `{"timeout_ms":"2s"}`,
-		"flag of wrong type":      `{"fallback_on_auth":"yes"}`,
-		"breaker not an object":   `{"breaker":"on"}`,
-		"breaker zero failures":   `{"breaker":{"failures":0}}`,
-		"breaker rate over one":   `{"breaker":{"error_rate":1.5}}`,
-		"breaker zero cooldown":   `{"breaker":{"cooldown_ms":0}}`,
-		"thinking other than off": `{"thinking":"on"}`,
-		"thinking of wrong type":  `{"thinking":false}`,
-		"models not a map":        `{"recognition_models":["long"]}`,
-		"model left empty":        `{"recognition_models":{"en-US":""}}`,
-		"one language twice":      `{"recognition_models":{"en-US":"long","EN_us":"telephony"}}`,
-		"voices not a map":        `{"voices":["en-US-Neural2-F"]}`,
-		"voice of wrong shape":    `{"voices":{"en-US-Neural2-F":"onyx"}}`,
-		"unknown gender":          `{"voices":{"en-US-Neural2-F":{"voice":"onyx","gender":"f"}}}`,
-		"default without voice":   `{"default_voices":{"en":{"model":"tts-1"}}}`,
-		"default twice":           `{"default_voices":{"en":{"voice":"a"},"EN":{"voice":"b"}}}`,
+		"not an object":             `"fast"`,
+		"array":                     `[1]`,
+		"negative budget":           `{"timeout_ms":-1}`,
+		"budget over 24 hours":      `{"timeout_ms":86400001}`,
+		"budget of wrong type":      `{"timeout_ms":"2s"}`,
+		"flag of wrong type":        `{"fallback_on_auth":"yes"}`,
+		"stream flag of wrong type": `{"stream_upstream":"yes"}`,
+		"zero stall timeout":        `{"stall_timeout_ms":0}`,
+		"negative stall timeout":    `{"stall_timeout_ms":-1}`,
+		"stall over 24 hours":       `{"stall_timeout_ms":86400001}`,
+		"stall of wrong type":       `{"stall_timeout_ms":"60s"}`,
+		"breaker not an object":     `{"breaker":"on"}`,
+		"breaker zero failures":     `{"breaker":{"failures":0}}`,
+		"breaker rate over one":     `{"breaker":{"error_rate":1.5}}`,
+		"breaker zero cooldown":     `{"breaker":{"cooldown_ms":0}}`,
+		"thinking other than off":   `{"thinking":"on"}`,
+		"thinking of wrong type":    `{"thinking":false}`,
+		"models not a map":          `{"recognition_models":["long"]}`,
+		"model left empty":          `{"recognition_models":{"en-US":""}}`,
+		"one language twice":        `{"recognition_models":{"en-US":"long","EN_us":"telephony"}}`,
+		"voices not a map":          `{"voices":["en-US-Neural2-F"]}`,
+		"voice of wrong shape":      `{"voices":{"en-US-Neural2-F":"onyx"}}`,
+		"unknown gender":            `{"voices":{"en-US-Neural2-F":{"voice":"onyx","gender":"f"}}}`,
+		"default without voice":     `{"default_voices":{"en":{"model":"tts-1"}}}`,
+		"default twice":             `{"default_voices":{"en":{"voice":"a"},"EN":{"voice":"b"}}}`,
 	}
 	for name, opts := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -288,6 +293,13 @@ func TestFailoverDefaultsRoundTrip(t *testing.T) {
 	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "at most 86400000") {
 		t.Errorf("default budget over 24h: status = %d (%s), want 400 naming the cap", rec.Code, rec.Body.String())
 	}
+	for _, body := range []string{`{"stall_timeout_ms":-1}`, `{"stall_timeout_ms":86400001}`} {
+		rec = httptest.NewRecorder()
+		s.handleAdminPutFailover(rec, httptest.NewRequest(http.MethodPut, "/api/admin/failover", strings.NewReader(body)))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400 before anything is saved", body, rec.Code)
+		}
+	}
 	rec = httptest.NewRecorder()
 	s.handleAdminPutFailover(rec, httptest.NewRequest(http.MethodPut, "/api/admin/failover", strings.NewReader(`{"breaker":{"min_requests":-1}}`)))
 	if rec.Code != http.StatusBadRequest {
@@ -308,7 +320,7 @@ func TestFailoverDefaultsRoundTrip(t *testing.T) {
 	s.st = &store.Store{PG: pool}
 
 	rec = httptest.NewRecorder()
-	s.handleAdminPutFailover(rec, httptest.NewRequest(http.MethodPut, "/api/admin/failover", strings.NewReader(`{"timeout_ms":2500,"fallback_on_auth":true,"breaker":{"enabled":true,"cooldown_ms":5000}}`)))
+	s.handleAdminPutFailover(rec, httptest.NewRequest(http.MethodPut, "/api/admin/failover", strings.NewReader(`{"timeout_ms":2500,"fallback_on_auth":true,"breaker":{"enabled":true,"cooldown_ms":5000},"stream_upstream":true,"stall_timeout_ms":45000}`)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("put: %d %s", rec.Code, rec.Body.String())
 	}
@@ -321,8 +333,18 @@ func TestFailoverDefaultsRoundTrip(t *testing.T) {
 	// unavailable_initial_ms/unavailable_max_ms are always present: unlike
 	// the breaker, that mechanism has no enable flag and loadFailover fills
 	// in its built-in default whenever a save didn't set them.
-	if got := strings.TrimSpace(rec.Body.String()); got != `{"timeout_ms":2500,"fallback_on_auth":true,"breaker":{"enabled":true,"cooldown_ms":5000},"unavailable_initial_ms":200,"unavailable_max_ms":25600}` {
+	if got := strings.TrimSpace(rec.Body.String()); got != `{"timeout_ms":2500,"fallback_on_auth":true,"breaker":{"enabled":true,"cooldown_ms":5000},"unavailable_initial_ms":200,"unavailable_max_ms":25600,"stream_upstream":true,"stall_timeout_ms":45000}` {
 		t.Errorf("get = %s, want the saved defaults", got)
+	}
+
+	// A save without a stall timeout reads back the built-in one.
+	rec = httptest.NewRecorder()
+	s.handleAdminPutFailover(rec, httptest.NewRequest(http.MethodPut, "/api/admin/failover", strings.NewReader(`{"timeout_ms":2500}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put: %d %s", rec.Code, rec.Body.String())
+	}
+	if cfg := s.failoverCfg(); cfg.StallTimeoutMS != defaultStallTimeoutMS || cfg.StreamUpstream {
+		t.Errorf("stall_timeout_ms = %d stream_upstream = %v, want the built-in %d and off", cfg.StallTimeoutMS, cfg.StreamUpstream, defaultStallTimeoutMS)
 	}
 }
 
