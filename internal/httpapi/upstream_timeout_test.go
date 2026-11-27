@@ -340,3 +340,33 @@ func TestRunAttemptKeepsAnUpstreamRefusalPastTheBudget(t *testing.T) {
 		t.Errorf("err = %v, want the budget's cancellation relabelled tier_timeout", err)
 	}
 }
+
+// TestSuccessResetsTheBackoffDoubling: marks against a failing target
+// double, but once it has answered again its next failure starts from the
+// initial backoff.
+func TestSuccessResetsTheBackoffDoubling(t *testing.T) {
+	up := newSwitchableUpstream(t, true)
+	clk := newFakeClock()
+	s := newUnavailTestServer(t, clk, providers.NewOpenAICompat("slow", "openai", up.URL, ""))
+	plan := soloPlan(routing.TargetOptions{})
+	failWithMark := func(want time.Duration) {
+		t.Helper()
+		if _, err := unaryChat(s, plan); attemptFailureReason(err) != "http_503" {
+			t.Fatalf("err = %v, want the upstream's 503", err)
+		}
+		if remaining, _ := s.unavail.Check(context.Background(), slowKey); remaining != want {
+			t.Fatalf("marked for %v, want %v", remaining, want)
+		}
+	}
+
+	failWithMark(200 * time.Millisecond)
+	clk.Advance(250 * time.Millisecond)
+	failWithMark(400 * time.Millisecond) // doubled
+	clk.Advance(450 * time.Millisecond)
+	up.failing.Store(false)
+	if _, err := unaryChat(s, plan); err != nil {
+		t.Fatalf("recovered target: %v", err)
+	}
+	up.failing.Store(true)
+	failWithMark(200 * time.Millisecond) // from the start again, not 800ms
+}

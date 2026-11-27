@@ -236,4 +236,17 @@ func TestTimeoutRunIsSharedThroughRedis(t *testing.T) {
 	if n := b.AddTimeout(ctx, k); n != 1 {
 		t.Errorf("after a reset on the other replica: AddTimeout = %d, want 1", n)
 	}
+
+	// Clear, what a success calls, ends both the run and the backoff
+	// doubling for every replica.
+	t.Cleanup(func() { _ = rdb.Del(context.Background(), k.redisKey()).Err() })
+	a.Mark(ctx, k, nil, time.Second, time.Minute)
+	b.AddTimeout(ctx, k)
+	b.Clear(ctx, k)
+	if n, _ := rdb.Exists(ctx, k.redisKey(), k.timeoutsKey()).Result(); n != 0 {
+		t.Errorf("%d keys left after Clear, want 0", n)
+	}
+	if dur := a.Mark(ctx, k, nil, time.Second, time.Minute); dur != time.Second {
+		t.Errorf("Mark after Clear = %v, want the initial 1s", dur)
+	}
 }

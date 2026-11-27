@@ -136,7 +136,8 @@ func (s *Store) Mark(ctx context.Context, k Key, retryAfter *time.Duration, init
 }
 
 // Clear removes k's mark, so the next failure starts fresh at initial
-// rather than doubling from stale history, and its timeout count.
+// rather than doubling from stale history, and its timeout count: what a
+// success calls, so both go in one Redis DEL.
 func (s *Store) Clear(ctx context.Context, k Key) {
 	if s == nil {
 		return

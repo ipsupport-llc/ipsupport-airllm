@@ -492,7 +492,9 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 				recordSuccess := func() {
 					if recorded.CompareAndSwap(false, true) {
 						s.breaker.Record(ctx, key, set, false, adm.Probe)
-						s.unavail.ResetTimeouts(ctx, unavailKey)
+						// An answer ends any run of timeouts and the
+						// backoff doubling, in one Redis call.
+						s.unavail.Clear(ctx, unavailKey)
 						s.metrics.TierAttempt(plan.Alias, tierLabel, "success", time.Since(began))
 						if plan.Strategy == "lcr" {
 							s.lcr.Record(ctx, lcr.Key{Provider: t.Provider, UpstreamModel: t.UpstreamModel}, true)
