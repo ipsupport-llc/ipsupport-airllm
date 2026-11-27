@@ -227,6 +227,9 @@ func run() error {
 	apiSrvPtr.Store(apiSrv)
 	apiSrv.Ledger().Start()
 	defer apiSrv.Ledger().Stop()
+	// Runs after serve returns (the HTTP server has drained) and before
+	// st.Close: let the last requests' background store writes finish.
+	defer apiSrv.WaitBackground(2 * time.Second)
 	apiSrv.Metrics().RegisterCaptureDropped(func() float64 { return float64(capturePipeline.Dropped()) })
 	apiSrv.Metrics().RegisterLedgerDropped(func() float64 { return float64(apiSrv.Ledger().Dropped()) })
 	apiSrv.Metrics().RegisterWebhookDropped(func() float64 { return float64(webhook.Dropped()) })

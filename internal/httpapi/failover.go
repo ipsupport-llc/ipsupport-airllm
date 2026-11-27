@@ -608,6 +608,22 @@ func (s *Server) inBackground(ctx context.Context, f func(context.Context)) {
 	}()
 }
 
+// WaitBackground waits up to d for the store writes inBackground started,
+// so a graceful shutdown doesn't close Redis under the last request's
+// reset. Call it after the HTTP server has stopped taking requests.
+func (s *Server) WaitBackground(d time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		s.bg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(d):
+		slog.Warn("shutdown: background store writes still running; not waiting longer", "waited", d)
+	}
+}
+
 // soonestOpen picks the open tier whose cooldown runs out first, the lowest
 // priority on a tie.
 func soonestOpen(openUntil map[int]time.Time) (int, bool) {
