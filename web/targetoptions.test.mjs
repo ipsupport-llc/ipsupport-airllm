@@ -78,9 +78,11 @@ test("parseSecondsToMs: bad input is refused with the field's name", () => {
   for (const bad of ["abc", "-1", "1,5", "Infinity", "1.5s", "0x10", "1e3", "+5", ".5", "5.", "1 2"]) {
     assert.throws(() => parseSecondsToMs(bad, "timeout"), /^Error: timeout must be a number of seconds/, `accepted ${bad}`);
   }
-  assert.equal(parseSecondsToMs("86400", "timeout"), 86400000);
-  assert.throws(() => parseSecondsToMs("86400.5", "timeout"), /^Error: timeout must be at most 86400 seconds \(24 hours\)/);
-  assert.throws(() => parseSecondsToMs("100000", "breaker cooldown", true), /breaker cooldown must be at most 86400 seconds/);
+  assert.equal(parseSecondsToMs("86400", "timeout", false, 86400), 86400000);
+  assert.throws(() => parseSecondsToMs("86400.5", "timeout", false, 86400), /^Error: timeout must be at most 86400 seconds \(24 hours\)/);
+  // Without a cap (breaker cooldown) a long value is fine.
+  assert.equal(parseSecondsToMs("100000", "breaker cooldown", true), 100000000);
+  assert.throws(() => parseSecondsToMs("1" + "0".repeat(20), "breaker cooldown", true), /breaker cooldown is too large/);
   assert.throws(() => parseSecondsToMs("0.0001", "timeout"), /at least 0.001/);
   assert.throws(() => parseSecondsToMs("0", "breaker cooldown", true), /breaker cooldown must be a number of seconds above 0/);
 });
@@ -167,6 +169,30 @@ test("targetOptionsFromForm: a key set in its field and in Advanced is refused, 
     assert.throws(() => targetOptionsFromForm({ ...blank, ...fields, advanced }),
       new RegExp(`^Error: ${key.replace(".", "\\.")} is set both in its field and in Advanced \\(JSON\\)`), key);
   }
+});
+
+test("targetOptionsFromForm: the 24 h cap is for the timeout, not the breaker cooldown", () => {
+  assert.throws(() => targetOptionsFromForm({ ...blank, timeout: "86401" }), /^Error: timeout must be at most 86400 seconds/);
+  assert.deepEqual(plain(targetOptionsFromForm({ ...blank, breaker_cooldown: "172800" })), { breaker: { cooldown_ms: 172800000 } });
+  // A stored cooldown above 24 h is shown in its field and goes back as is.
+  const stored = { breaker: { cooldown_ms: 172800000 } };
+  const f = targetOptionsForm(stored);
+  assert.equal(f.breaker_cooldown, "172800");
+  assert.deepEqual(plain(targetOptionsFromForm(f)), stored);
+});
+
+test("targetOptionsFromForm: a null in Advanced is unset, so its field fills it", () => {
+  const o = targetOptionsFromForm({
+    ...blank, timeout: "2", fallback_on_auth: "yes", thinking: "off", breaker_enabled: "no", breaker_failures: "3", breaker_cooldown: "10",
+    advanced: '{"timeout_ms":null,"fallback_on_auth":null,"thinking":null,"breaker":{"enabled":null,"failures":null,"cooldown_ms":null,"error_rate":0.5}}',
+  });
+  assert.deepEqual(plain(o), {
+    timeout_ms: 2000, fallback_on_auth: true, thinking: "off",
+    breaker: { enabled: false, failures: 3, cooldown_ms: 10000, error_rate: 0.5 },
+  });
+  assert.deepEqual(plain(targetOptionsFromForm({ ...blank, breaker_failures: "3", advanced: '{"breaker":null}' })), { breaker: { failures: 3 } });
+  // With the field empty, the null stays as Advanced has it.
+  assert.deepEqual(plain(targetOptionsFromForm({ ...blank, advanced: '{"timeout_ms":null}' })), { timeout_ms: null });
 });
 
 test("targetOptionsForm: a stored value its field would refuse stays in Advanced", () => {
