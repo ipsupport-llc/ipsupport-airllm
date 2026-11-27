@@ -174,12 +174,16 @@ const (
 // the budget ran out first commit reports false and the call must not emit
 // anything. A unary call never commits, so the budget bounds all of it. An
 // error from a call whose budget ran out is replaced by a tier_timeout
-// error; a cancellation of the caller's own context is left as it is.
+// error; a cancellation of the caller's own context is left as it is. A
+// positive budget is also recorded on the call's context
+// (providers.WithCallBudget), so a non-streaming provider call skips its
+// own UPSTREAM_CHAT_TIMEOUT ceiling: the budget replaces it.
 func runAttempt(ctx context.Context, provider string, budget time.Duration, call func(ctx context.Context, commit func() bool) error) (committed bool, err error) {
 	actx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var state atomic.Int32
 	if budget > 0 {
+		actx = providers.WithCallBudget(actx, budget)
 		timer := time.AfterFunc(budget, func() {
 			if state.CompareAndSwap(attemptPending, attemptExpired) {
 				cancel()
@@ -490,7 +494,13 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 				case countsAgainstTier(pol, callErr):
 					s.breaker.Record(ctx, key, set, true, adm.Probe)
 					s.metrics.TierAttempt(plan.Alias, tierLabel, "failure", time.Since(began))
-					s.markUnavailable(ctx, unavailKey, callErr)
+					// A timeout is a slow answer, not a down target: the
+					// breaker still counts it, so one that really hangs
+					// trips by failure rate, but it does not shut the
+					// target off for every other client.
+					if !isTimeout(callErr) {
+						s.markUnavailable(ctx, unavailKey, callErr)
+					}
 					if plan.Strategy == "lcr" {
 						s.lcr.Record(ctx, lcr.Key{Provider: unavailKey.Provider, UpstreamModel: unavailKey.UpstreamModel}, false)
 					}
@@ -570,7 +580,8 @@ func logAttemptFailure(alias string, t routing.Target, err error, latency time.D
 	slog.Warn("tier attempt failed", attrs...)
 }
 
-// markUnavailable marks k unavailable after a tier-attributable failure:
+// markUnavailable marks k unavailable after a tier-attributable failure
+// other than a timeout (see isTimeout):
 // the upstream's own Retry-After when callErr carries one, else the
 // gateway's configured default backoff (doubling from this target's own
 // last mark, capped). Logs the duration actually used, so an operator sees
@@ -613,6 +624,14 @@ func unavailSource(retryAfter *time.Duration) string {
 	return "default_backoff"
 }
 
+// isTimeout reports whether err is an attempt that failed by running out of
+// time: its target's budget (tier_timeout) or the provider's own
+// non-streaming ceiling (providers.ErrCodeUpstreamTimeout).
+func isTimeout(err error) bool {
+	var pe *providers.Error
+	return errors.As(err, &pe) && (pe.Code == errCodeTierTimeout || pe.Code == providers.ErrCodeUpstreamTimeout)
+}
+
 // attemptFailureReason is a short, stable label for why an attempt failed:
 // the provider error code when there is one, else the upstream status class.
 func attemptFailureReason(err error) string {
@@ -621,7 +640,7 @@ func attemptFailureReason(err error) string {
 		return "error"
 	}
 	switch {
-	case pe.Code == errCodeTierTimeout:
+	case isTimeout(err):
 		return "timeout"
 	case pe.Code != "":
 		return pe.Code

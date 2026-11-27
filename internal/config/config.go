@@ -73,11 +73,11 @@ type Config struct {
 
 	// UpstreamChatTimeout bounds a single non-streaming call to an
 	// OpenAI-compatible or Vertex upstream (chat completions and
-	// embeddings). It has nothing to do with a target's own per-attempt
-	// timeout_ms (routing.TargetOptions): that one can be set to 0 for an
-	// unbounded wait and is enforced by cancelling the attempt's context;
-	// this one is a hard ceiling the provider itself applies underneath
-	// that context, regardless of timeout_ms.
+	// embeddings) that has no time budget of its own. A target with a
+	// positive timeout_ms (routing.TargetOptions, or the gateway-wide
+	// default from the failover settings) is bounded by that budget
+	// instead, in either direction; one without (timeout_ms set to 0, or
+	// unset while the default is 0) gets this ceiling.
 	UpstreamChatTimeout time.Duration
 
 	// ForwardHeaders names request headers, from FORWARD_HEADERS
