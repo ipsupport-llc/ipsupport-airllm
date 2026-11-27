@@ -564,6 +564,10 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 						}
 					}
 				}
+				// A probe that makes progress without an answer yet (an
+				// assembled stream) may run far past the lease it was
+				// admitted with; it holds the tier until its outcome.
+				var releaseProbe func()
 				committed, callErr := runAttempt(ctx, t.Provider, pol.budget, func(actx context.Context, gate attemptGate) error {
 					// Only a commit is the tier's answer: output that has
 					// not reached the client (gate.progress) can still end
@@ -577,9 +581,18 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 							}
 							return ok
 						},
-						progress: gate.progress,
+						progress: func() bool {
+							ok := gate.progress()
+							if ok && adm.Probe && releaseProbe == nil {
+								releaseProbe = s.holdProbe(ctx, key, set)
+							}
+							return ok
+						},
 					})
 				})
+				if releaseProbe != nil {
+					releaseProbe()
+				}
 				e.Release()
 
 				if errors.Is(callErr, errServedWithoutCall) {
@@ -674,6 +687,34 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 		s.metrics.IncRateLimited("provider_busy")
 	}
 	return res, false, lastErr
+}
+
+// holdProbe keeps the breaker probe on key held while an attempt that has
+// made progress runs: it renews the probe's lease at once and then every
+// half lease, until the returned release is called. A replica that dies
+// mid-attempt stops renewing, so the lease still runs out for the others.
+func (s *Server) holdProbe(ctx context.Context, key breaker.Key, set breaker.Settings) (release func()) {
+	bctx := context.WithoutCancel(ctx)
+	s.breaker.ExtendProbe(bctx, key, set)
+	done := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		tick := time.NewTicker(breaker.ProbeLeaseFor(set) / 2)
+		defer tick.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-tick.C:
+				s.breaker.ExtendProbe(bctx, key, set)
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		<-exited
+	}
 }
 
 // inBackground runs a store write off the response path: detached from the

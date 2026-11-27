@@ -228,6 +228,11 @@ type StreamChunk struct {
 	ToolCalls    []ToolCallDelta // incremental tool calls; Index per OpenAI accumulation semantics
 	FinishReason string          // "stop" | "tool_calls" on the final delta chunk
 	Usage        *Usage          // set on the terminal usage chunk only
+	// OtherChoice marks a chunk whose upstream message carried a choice
+	// other than the first (a several-choice answer). The IR holds one
+	// choice; a caller assembling a response from the stream refuses it
+	// rather than merge two choices into one.
+	OtherChoice bool
 }
 
 // HasOutput reports whether the chunk carries model output — text, thinking

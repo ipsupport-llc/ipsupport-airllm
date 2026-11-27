@@ -177,6 +177,7 @@ func DecodeChatResponse(r io.Reader) (llm.ChatResponse, error) {
 
 type upstreamChunk struct {
 	Choices []struct {
+		Index int `json:"index"`
 		Delta struct {
 			Role    string `json:"role"`
 			Content string `json:"content"`
@@ -214,6 +215,7 @@ func ParseStreamChunk(data []byte) (llm.StreamChunk, error) {
 	}
 	if len(w.Choices) > 0 {
 		d := w.Choices[0]
+		c.OtherChoice = len(w.Choices) > 1 || d.Index != 0
 		c.Role = d.Delta.Role
 		c.Content = d.Delta.Content
 		c.Reasoning = jsonText(d.Delta.ReasoningContent)

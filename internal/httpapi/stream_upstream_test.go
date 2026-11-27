@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/anthropic"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/breaker"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/openai"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
@@ -28,12 +30,14 @@ import (
 
 // sseStep is one step of a scripted upstream stream: wait, then send data.
 // hang holds the connection open without sending anything more until the
-// caller goes away; cut drops it mid-body.
+// caller goes away; cut drops it mid-body; end closes the body cleanly
+// without [DONE].
 type sseStep struct {
 	wait time.Duration
 	data string
 	hang bool
 	cut  bool
+	end  bool
 }
 
 // scriptedUpstream answers a non-streaming request with unary and a
@@ -80,6 +84,8 @@ func newScriptedUpstream(t *testing.T, unary string, steps []sseStep) *scriptedU
 				return
 			case st.cut:
 				panic(http.ErrAbortHandler)
+			case st.end:
+				return
 			}
 			_, _ = fmt.Fprintf(w, "data: %s\n\n", st.data)
 			flush()
@@ -368,26 +374,193 @@ func TestStreamUpstreamMidStreamFailureFallsThrough(t *testing.T) {
 	}
 }
 
-// TestStreamUpstreamMissingUsageIsEstimated: a stream that ends without
-// usage is billed an estimate — the prompt at rune/4 and one token per chunk
-// with output, thinking-only chunks as the reasoning share — never zero.
+// TestStreamUpstreamMissingUsageIsEstimated: a stream that reports no usage
+// is billed an estimate, never zero — the prompt over the whole request,
+// tool schemas and earlier tool calls included, and the completion over the
+// text, thinking and tool calls the model produced; a stream that reports
+// a prompt but no completion keeps the prompt and has the completion
+// estimated.
 func TestStreamUpstreamMissingUsageIsEstimated(t *testing.T) {
-	up := newScriptedUpstream(t, okUnary, []sseStep{roleStep(), reasoningStep(0, "a"), reasoningStep(0, "b"),
-		contentStep(0, "Hel"), contentStep(0, "lo"), finishStep("stop")})
-	s := newRunChatTestServer(t, providers.NewOpenAICompat("slow", "openai", up.URL, ""))
-	req := llm.ChatRequest{Messages: []llm.Message{{Role: "user", Content: strings.Repeat("word ", 40)}}}
+	const thinking, answer = "let me think about the weather first", "Here is the forecast for Paris."
+	const args = `{"city":"Paris","days":3}`
+	body := []sseStep{roleStep(), reasoningStep(0, thinking[:12]), reasoningStep(0, thinking[12:]),
+		contentStep(0, answer[:9]), contentStep(0, answer[9:]),
+		{data: `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"get_weather","arguments":` + strconv.Quote(args) + `}}]},"finish_reason":null}]}`},
+		finishStep("tool_calls")}
+	req := llm.ChatRequest{
+		Messages: []llm.Message{
+			{Role: "user", Content: strings.Repeat("word ", 40)},
+			{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "c0", Type: "function", Function: llm.FunctionCall{Name: "lookup", Arguments: strings.Repeat(`{"q":"x"}`, 20)}}}},
+			{Role: "tool", ToolCallID: "c0", Content: "result"},
+		},
+		Tools: []llm.Tool{{Type: "function", Function: llm.FunctionDef{Name: "get_weather", Description: "Weather for a city",
+			Parameters: json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"},"days":{"type":"integer"}}}`)}}},
+	}
+	completion := llm.EstimateTokens(answer + thinking + "get_weather" + args)
+	reasoning := llm.EstimateTokens(thinking)
 
+	up := newScriptedUpstream(t, okUnary, body)
+	s := newRunChatTestServer(t, providers.NewOpenAICompat("slow", "openai", up.URL, ""))
 	resp, _, err := s.runChat(context.Background(), soloPlan(streamUpstreamOpts()), req)
 	if err != nil {
 		t.Fatalf("runChat: %v", err)
 	}
-	prompt := anthropic.EstimateInputTokens(req)
-	want := llm.Usage{PromptTokens: prompt, CompletionTokens: 4, TotalTokens: prompt + 4, ReasoningTokens: 2}
+	prompt := llm.EstimatePromptTokens(req)
+	if prompt <= anthropic.EstimateInputTokens(req) {
+		t.Fatalf("prompt estimate %d does not count the tools and tool calls", prompt)
+	}
+	want := llm.Usage{PromptTokens: prompt, CompletionTokens: completion, TotalTokens: prompt + completion, ReasoningTokens: reasoning}
 	if resp.Usage != want {
 		t.Errorf("usage = %+v, want the estimate %+v", resp.Usage, want)
 	}
-	if resp.Choices[0].Message.Content != "Hello" {
-		t.Errorf("content = %q, want Hello", resp.Choices[0].Message.Content)
+	if resp.Choices[0].Message.Content != answer {
+		t.Errorf("content = %q, want %q", resp.Choices[0].Message.Content, answer)
+	}
+
+	// A prompt count with a zero completion keeps the prompt.
+	up = newScriptedUpstream(t, okUnary, append(body, sseStep{data: `{"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":0,"total_tokens":3}}`}))
+	s = newRunChatTestServer(t, providers.NewOpenAICompat("slow", "openai", up.URL, ""))
+	resp, _, err = s.runChat(context.Background(), soloPlan(streamUpstreamOpts()), req)
+	if err != nil {
+		t.Fatalf("runChat: %v", err)
+	}
+	want = llm.Usage{PromptTokens: 3, CompletionTokens: completion, TotalTokens: 3 + completion, ReasoningTokens: reasoning}
+	if resp.Usage != want {
+		t.Errorf("usage = %+v, want %+v", resp.Usage, want)
+	}
+}
+
+// TestStreamUpstreamNeedsAnEnd: an assembled answer is accepted only when
+// the upstream said it was complete. A stream that just stops falls through
+// to the next tier; one with a finish reason but no [DONE] is complete. A
+// client stream cut the same way is passed on as before.
+func TestStreamUpstreamNeedsAnEnd(t *testing.T) {
+	truncated := []sseStep{roleStep(), contentStep(0, "Hel"), {end: true}}
+	up := newScriptedUpstream(t, okUnary, truncated)
+	s := newUnavailTestServer(t, newFakeClock(), providers.NewOpenAICompat("slow", "openai", up.URL, ""), providers.NewMock("mock-ok"))
+	plan := budgetPlan(routing.Target{Provider: "slow", UpstreamModel: "m", Options: streamUpstreamOpts()})
+	_, res, err := s.runChat(context.Background(), plan, hiRequest())
+	s.bg.Wait()
+	if err != nil || res.Provider != "mock-ok" {
+		t.Fatalf("truncated stream: served by %q, err %v; want the next tier", res.Provider, err)
+	}
+
+	up = newScriptedUpstream(t, okUnary, []sseStep{roleStep(), contentStep(0, "Hel"), contentStep(0, "lo"), finishStep("stop"), usageStep(), {end: true}})
+	s = newRunChatTestServer(t, providers.NewOpenAICompat("slow", "openai", up.URL, ""))
+	resp, _, err := s.runChat(context.Background(), soloPlan(streamUpstreamOpts()), hiRequest())
+	if err != nil || resp.Choices[0].Message.Content != "Hello" {
+		t.Fatalf("finished stream without [DONE]: resp %+v err %v", resp, err)
+	}
+
+	up = newScriptedUpstream(t, okUnary, truncated)
+	s = newRunChatTestServer(t, providers.NewOpenAICompat("slow", "openai", up.URL, ""))
+	var content string
+	sink := &recordingSink{onChunk: func(c llm.StreamChunk) { content += c.Content }}
+	req := hiRequest()
+	req.Stream = true
+	if _, _, started, err := s.runStream(context.Background(), soloPlan(streamUpstreamOpts()), req, sink); err != nil || !started || content != "Hel" {
+		t.Errorf("client stream: started=%v err=%v content=%q, want it passed on as before", started, err, content)
+	}
+}
+
+// TestStreamUpstreamThinkingWithUsageIsProgress: thinking chunks that carry
+// a running usage report (as Vertex sends them) are output, through the
+// provider's own decoder: each one keeps the stall clock from running out,
+// so a model that thinks for longer than the stall timeout before its text
+// is not taken for a hung one.
+func TestStreamUpstreamThinkingWithUsageIsProgress(t *testing.T) {
+	thinkingWithUsage := func(n int) sseStep {
+		return sseStep{wait: 40 * time.Millisecond, data: fmt.Sprintf(`{"choices":[{"index":0,"delta":{"reasoning_content":"t%d"},"finish_reason":null}],"usage":{"prompt_tokens":3,"completion_tokens":%d,"total_tokens":%d}}`, n, n, n+3)}
+	}
+	up := newScriptedUpstream(t, okUnary, []sseStep{roleStep(), thinkingWithUsage(1), thinkingWithUsage(2), thinkingWithUsage(3),
+		thinkingWithUsage(4), thinkingWithUsage(5), contentStep(40*time.Millisecond, "Hello"), finishStep("stop"), usageStep()})
+	s := newRunChatTestServer(t, providers.NewOpenAICompat("slow", "openai", up.URL, ""))
+	opts := routing.TargetOptions{StreamUpstream: boolp(true), TimeoutMS: ms(5000), StallTimeoutMS: ms(150)}
+	resp, _, err := s.runChat(context.Background(), soloPlan(opts), hiRequest())
+	if err != nil {
+		t.Fatalf("runChat: %v (thinking with usage did not count as output)", err)
+	}
+	if got := resp.Choices[0].Message.Content; got != "Hello" || resp.Choices[0].FinishReason != "stop" {
+		t.Errorf("content %q finish %q, want Hello / stop", got, resp.Choices[0].FinishReason)
+	}
+}
+
+// TestStreamUpstreamRefusesUnassemblableStreams: a stream that carries a
+// second choice, or only usage, is no answer this path can assemble; the
+// next tier serves.
+func TestStreamUpstreamRefusesUnassemblableStreams(t *testing.T) {
+	cases := map[string][]sseStep{
+		"second choice": {roleStep(), contentStep(0, "a"),
+			{data: `{"choices":[{"index":1,"delta":{"content":"b"},"finish_reason":null}]}`}, finishStep("stop"), usageStep()},
+		"usage only": {usageStep()},
+	}
+	for name, steps := range cases {
+		t.Run(name, func(t *testing.T) {
+			up := newScriptedUpstream(t, okUnary, steps)
+			s := newUnavailTestServer(t, newFakeClock(), providers.NewOpenAICompat("slow", "openai", up.URL, ""), providers.NewMock("mock-ok"))
+			plan := budgetPlan(routing.Target{Provider: "slow", UpstreamModel: "m", Options: streamUpstreamOpts()})
+			_, res, err := s.runChat(context.Background(), plan, hiRequest())
+			s.bg.Wait()
+			if err != nil || res.Provider != "mock-ok" || up.streamCalls.Load() != 1 {
+				t.Fatalf("served by %q after %d stream calls, err %v; want the next tier", res.Provider, up.streamCalls.Load(), err)
+			}
+		})
+	}
+}
+
+// lateProvider streams its first output only after its ceiling has run out,
+// without looking at its context: the ceiling must still be what the
+// attempt failed on.
+type lateProvider struct{ *providers.Mock }
+
+func (lateProvider) ChatCeiling() time.Duration { return 20 * time.Millisecond }
+
+func (lateProvider) ChatStream(_ context.Context, _ llm.ChatRequest, yield func(llm.StreamChunk) error) error {
+	time.Sleep(60 * time.Millisecond)
+	if err := yield(llm.StreamChunk{Content: "late"}); err != nil {
+		return err
+	}
+	return yield(llm.StreamChunk{FinishReason: "stop"})
+}
+
+func TestStreamUpstreamCeilingBeatsLateOutput(t *testing.T) {
+	p := lateProvider{providers.NewMock("slow")}
+	_, err := streamChat(context.Background(), p, routing.Target{Provider: "slow"}, hiRequest(), time.Second,
+		attemptGate{commit: func() bool { return true }, progress: func() bool { return true }})
+	var pe *providers.Error
+	if !errors.As(err, &pe) || pe.Code != providers.ErrCodeUpstreamTimeout {
+		t.Errorf("err = %v, want the ceiling's upstream_timeout", err)
+	}
+}
+
+// TestStreamUpstreamProbeHoldsTheTier: a breaker probe that is assembling
+// a stream keeps the tier to itself past the lease it was admitted with, so
+// no second probe is let in while it runs.
+func TestStreamUpstreamProbeHoldsTheTier(t *testing.T) {
+	up := newScriptedUpstream(t, okUnary, []sseStep{roleStep(), contentStep(300*time.Millisecond, "Hel"),
+		contentStep(600*time.Millisecond, "lo"), finishStep("stop"), usageStep()})
+	clk := newFakeClock()
+	s := newBreakerTestServer(t, clk, providers.NewOpenAICompat("slow", "openai", up.URL, ""), providers.NewMock("mock-ok"))
+	opts := routing.TargetOptions{StreamUpstream: boolp(true), Breaker: &routing.BreakerOptions{Enabled: boolp(true), Failures: ms(1), CooldownMS: ms(1000)}}
+	plan := guardedPlan("frog", "slow", opts)
+	key, set := breaker.Key{Alias: "frog", Tier: 0}, s.breakerSettings(plan, 0)
+	s.breaker.Record(context.Background(), key, set, true, false) // open the tier
+	clk.Advance(2 * time.Second)                                  // past its cooldown: the next attempt probes
+
+	done := make(chan execResult, 1)
+	go func() {
+		_, res, _ := s.runChat(context.Background(), plan, hiRequest())
+		done <- res
+	}()
+	time.Sleep(100 * time.Millisecond) // the probe is admitted, no output yet
+	clk.Advance(20 * time.Second)
+	time.Sleep(400 * time.Millisecond) // its first output came, the rest has not
+	clk.Advance(20 * time.Second)      // 40s past admission: beyond the 30s lease it started with
+	if adm := s.breaker.Admit(context.Background(), key, set); !adm.Skip {
+		t.Errorf("admission = %+v while the probe is still assembling, want a skip", adm)
+	}
+	if res := <-done; res.Provider != "slow" {
+		t.Errorf("probe served by %q, want slow", res.Provider)
 	}
 }
 

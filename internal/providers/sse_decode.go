@@ -98,6 +98,28 @@ type streamDecodeOptions struct {
 	// chunk it sees, so forwarding each one would end that stream early and
 	// then repeatedly.
 	coalesceUsage bool
+
+	// requireEnd fails a stream that ends without [DONE] and without a
+	// finish reason of the upstream's own, instead of synthesizing one: such
+	// an end is indistinguishable from a connection cut short. Set from the
+	// call's context (WithRequireStreamEnd) by a caller that assembles the
+	// stream before anything reaches the client and can still fall through.
+	requireEnd bool
+}
+
+type requireStreamEndKey struct{}
+
+// WithRequireStreamEnd marks ctx so a streaming chat call on it fails, as a
+// retryable upstream error, when its stream ends with neither [DONE] nor a
+// finish reason from the upstream. A client stream never sets it, so what
+// reaches a client is unchanged.
+func WithRequireStreamEnd(ctx context.Context) context.Context {
+	return context.WithValue(ctx, requireStreamEndKey{}, true)
+}
+
+func requiresStreamEnd(ctx context.Context) bool {
+	v, _ := ctx.Value(requireStreamEndKey{}).(bool)
+	return v
 }
 
 // decodeSSEStream reads an OpenAI-shaped SSE chat-completions body and yields
@@ -118,11 +140,19 @@ type streamDecodeOptions struct {
 // error: nothing more is yielded, no finish reason is synthesized, and any
 // coalesced usage is dropped, exactly as for a stream that broke mid-flight.
 //
+// With requireEnd, a stream that ends cleanly but with neither [DONE] nor a
+// finish reason of the upstream's own fails with a retryable error instead
+// (see streamDecodeOptions.requireEnd), after everything it carried was
+// yielded and before anything is synthesized.
+//
 // If yield returns an error the stream stops and that error is returned.
 func decodeSSEStream(body io.Reader, opts streamDecodeOptions, yield func(llm.StreamChunk) error) error {
 	sc := bufio.NewScanner(body)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	var sawFinish, sawToolCalls bool
+	// ended is whether the upstream itself said the answer is complete:
+	// [DONE], or a finish reason it sent (not one synthesized here).
+	ended := false
 	var coalescedUsage *llm.Usage
 	for sc.Scan() {
 		line := sc.Text()
@@ -137,6 +167,7 @@ func decodeSSEStream(body io.Reader, opts streamDecodeOptions, yield func(llm.St
 			slog.Info("upstream sse", "provider", opts.provider, "data", data)
 		}
 		if data == "[DONE]" {
+			ended = true
 			break
 		}
 		if err := streamErrorEnvelope(opts.provider, []byte(data)); err != nil {
@@ -150,7 +181,7 @@ func decodeSSEStream(body io.Reader, opts streamDecodeOptions, yield func(llm.St
 			continue
 		}
 		if chunk.FinishReason != "" {
-			sawFinish = true
+			sawFinish, ended = true, true
 		}
 		if len(chunk.ToolCalls) > 0 {
 			sawToolCalls = true
@@ -204,6 +235,10 @@ func decodeSSEStream(body io.Reader, opts streamDecodeOptions, yield func(llm.St
 		// not sent it yet at this point.
 		return err
 	}
+	if opts.requireEnd && !ended {
+		return &Error{Status: http.StatusBadGateway, Retryable: true,
+			Message: "upstream " + opts.provider + " stream ended without [DONE] or a finish reason"}
+	}
 	if !sawFinish {
 		if err := yield(llm.StreamChunk{FinishReason: synthesizedFinishReason(sawToolCalls)}); err != nil {
 			return err
@@ -238,9 +273,10 @@ func yieldSplittingFinish(c llm.StreamChunk, yield func(llm.StreamChunk) error) 
 }
 
 // hasDelta reports whether a chunk carries incremental output of its own —
-// something a client renders — as opposed to being a bare signal chunk.
+// something a client renders, or thinking, which no egress sends but which
+// shows the model is working — as opposed to being a bare signal chunk.
 func hasDelta(c llm.StreamChunk) bool {
-	return c.Role != "" || c.Content != "" || len(c.ToolCalls) > 0
+	return c.Role != "" || c.HasOutput()
 }
 
 // hasPayload reports whether a chunk still carries something a client needs

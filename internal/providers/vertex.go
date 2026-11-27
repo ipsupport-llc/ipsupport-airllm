@@ -221,5 +221,5 @@ func (p *Vertex) ChatStream(ctx context.Context, in llm.ChatRequest, yield func(
 	}
 	defer resp.Body.Close()
 
-	return decodeSSEStream(resp.Body, streamDecodeOptions{provider: p.name, coalesceUsage: true}, yield)
+	return decodeSSEStream(resp.Body, streamDecodeOptions{provider: p.name, coalesceUsage: true, requireEnd: requiresStreamEnd(ctx)}, yield)
 }

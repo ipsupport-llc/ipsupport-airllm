@@ -355,6 +355,29 @@ func (b *Breaker) Record(ctx context.Context, k Key, set Settings, failed, probe
 	}
 }
 
+// ProbeLeaseFor is the lease an admitted probe holds the tier for under set:
+// its ProbeLease, or the floor below which it is never shorter.
+func ProbeLeaseFor(set Settings) time.Duration { return set.probeLease() }
+
+// ExtendProbe renews the lease of the probe running on the tier, to a full
+// lease from now, for an attempt that is still making progress and so may
+// run longer than its lease was sized for. A tier no longer probing (the
+// probe's outcome was recorded) is left alone, and a lease is never
+// shortened.
+func (b *Breaker) ExtendProbe(ctx context.Context, k Key, set Settings) {
+	if b == nil || !set.Enabled {
+		return
+	}
+	until := b.now().Add(set.probeLease()).UnixMilli()
+	_ = b.update(ctx, k, set, func(r *record) bool {
+		if r.state() != HalfOpen || r.ProbeUntil >= until {
+			return false
+		}
+		r.ProbeUntil = until
+		return true
+	})
+}
+
 // AbandonProbe hands back a probe that made no call (the tier was busy, or
 // the client went away first), so the next request can probe at once. A
 // forced probe handed back before the tier's cooldown ran out re-opens it

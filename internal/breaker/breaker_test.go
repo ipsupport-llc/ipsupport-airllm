@@ -81,6 +81,32 @@ func TestAnUnusedForcedProbeReopensTheTierForTheRestOfItsCooldown(t *testing.T) 
 	}
 }
 
+func TestExtendProbeHoldsTheTierPastItsLease(t *testing.T) {
+	b, c, _ := newTestBreaker(t)
+	tripTier(t, b)
+	c.t = c.t.Add(time.Minute)
+	if adm := b.Admit(context.Background(), key, on); !adm.Probe {
+		t.Fatalf("Admit = %+v, want the probe", adm)
+	}
+	lease := ProbeLeaseFor(on)
+	c.t = c.t.Add(lease - time.Second)
+	b.ExtendProbe(context.Background(), key, on)
+	c.t = c.t.Add(lease - time.Second) // well past the first lease
+	if adm := b.Admit(context.Background(), key, on); !adm.Skip {
+		t.Errorf("Admit while an extended probe runs = %+v, want a skip", adm)
+	}
+	c.t = c.t.Add(2 * time.Second) // past the extension too: a lost probe
+	if adm := b.Admit(context.Background(), key, on); !adm.Probe {
+		t.Errorf("Admit after the extended lease = %+v, want a new probe", adm)
+	}
+	// A recorded probe's tier is not touched.
+	b.Record(context.Background(), key, on, false, true)
+	b.ExtendProbe(context.Background(), key, on)
+	if st, _ := b.Status(context.Background(), key, on); st.State != Closed {
+		t.Errorf("state after ExtendProbe on a closed tier = %v, want closed", st.State)
+	}
+}
+
 func TestAnUnusedProbeAfterTheCooldownLetsTheNextRequestProbe(t *testing.T) {
 	b, c, _ := newTestBreaker(t)
 	tripTier(t, b)

@@ -361,7 +361,10 @@ var errFirstChunkLate = errors.New("first chunk arrived after the time budget")
 // Under a budget, only a chunk carrying text or a tool call counts as the
 // first: the role-only and empty deltas a model sends while it thinks are
 // held back until real content follows, so a tier that thinks past its budget
-// falls through instead of holding the caller silent. Without a budget the
+// falls through instead of holding the caller silent. Thinking chunks
+// (StreamChunk.Reasoning) are held too, unlike in streamChat where they are
+// progress: no egress sends thinking text, so committing on one would send
+// the client empty deltas and give up the fall-through. Without a budget the
 // first chunk of any kind starts the response, as it always has.
 func (s *Server) runStream(ctx context.Context, plan *routing.Plan, req llm.ChatRequest, sink streamSink) (served execResult, usage llm.Usage, started bool, err error) {
 	live := liveFrom(ctx)

@@ -113,7 +113,7 @@ func (p *OpenAICompat) ChatStream(ctx context.Context, in llm.ChatRequest, yield
 	}
 	defer resp.Body.Close()
 
-	return decodeSSEStream(resp.Body, streamDecodeOptions{provider: p.name}, yield)
+	return decodeSSEStream(resp.Body, streamDecodeOptions{provider: p.name, requireEnd: requiresStreamEnd(ctx)}, yield)
 }
 
 // Embeddings performs a non-streaming embeddings call, at base_url+

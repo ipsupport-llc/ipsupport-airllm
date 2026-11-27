@@ -37,6 +37,22 @@ func TestStreamChunkFinish(t *testing.T) {
 	}
 }
 
+// TestParseStreamChunkOtherChoice: a chunk of any choice but the first is
+// marked, so a caller assembling one choice can refuse it.
+func TestParseStreamChunkOtherChoice(t *testing.T) {
+	for data, want := range map[string]bool{
+		`{"choices":[{"index":0,"delta":{"content":"a"}}]}`:                                     false,
+		`{"choices":[{"delta":{"content":"a"}}]}`:                                               false,
+		`{"choices":[{"index":1,"delta":{"content":"b"}}]}`:                                     true,
+		`{"choices":[{"index":0,"delta":{"content":"a"}},{"index":1,"delta":{"content":"b"}}]}`: true,
+	} {
+		c, err := ParseStreamChunk([]byte(data))
+		if err != nil || c.OtherChoice != want {
+			t.Errorf("%s: OtherChoice = %v (%v), want %v", data, c.OtherChoice, err, want)
+		}
+	}
+}
+
 // TestParseStreamChunkReasoning: thinking text is read from either key a
 // vendor uses, never sent back out, and a reasoning value that is not a
 // string does not cost the chunk its content.

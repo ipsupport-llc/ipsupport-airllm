@@ -383,3 +383,61 @@ func TestDecodeSSEStreamReadsCompletionTokensDetails(t *testing.T) {
 		t.Errorf("stream wrong\n got: %+v\nwant: %+v", got, want)
 	}
 }
+
+// Thinking chunks that carry a running usage report (Vertex) keep their
+// thinking, in both usage modes: it is output, and a caller that watches for
+// progress must see it.
+func TestDecodeSSEStreamKeepsReasoningBesideUsage(t *testing.T) {
+	body := sseBody(
+		`{"choices":[{"delta":{"role":"assistant","reasoning_content":"hm"},"finish_reason":null}],"usage":{"prompt_tokens":7,"completion_tokens":1,"total_tokens":8}}`,
+		`{"choices":[{"delta":{"reasoning_content":"m"},"finish_reason":null}],"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}`,
+		`{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`,
+		"[DONE]",
+	)
+	for _, coalesce := range []bool{true, false} {
+		var thinking string
+		for _, c := range decodeAll(t, body, streamDecodeOptions{provider: "vertex", coalesceUsage: coalesce}) {
+			thinking += c.Reasoning
+		}
+		if thinking != "hmm" {
+			t.Errorf("coalesce=%v: thinking = %q, want hmm", coalesce, thinking)
+		}
+	}
+}
+
+// requireEnd fails a stream that just stops; [DONE] or the upstream's own
+// finish reason is an end. Without it such a stream is completed as before.
+func TestDecodeSSEStreamRequireEnd(t *testing.T) {
+	decode := func(body string, requireEnd bool) ([]llm.StreamChunk, error) {
+		var got []llm.StreamChunk
+		err := decodeSSEStream(strings.NewReader(body), streamDecodeOptions{provider: "up", requireEnd: requireEnd}, func(c llm.StreamChunk) error {
+			got = append(got, c)
+			return nil
+		})
+		return got, err
+	}
+	cut := sseBody(`{"choices":[{"delta":{"content":"he"},"finish_reason":null}]}`)
+	if _, err := decode(cut, true); !IsRetryable(err) {
+		t.Errorf("cut stream: err = %v, want a retryable failure", err)
+	}
+	// Usage alone (with the finish reason synthesized for it) is no end.
+	cutWithUsage := cut + sseBody(`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	if _, err := decode(cutWithUsage, true); !IsRetryable(err) {
+		t.Errorf("cut stream with usage: err = %v, want a retryable failure", err)
+	}
+	for name, body := range map[string]string{
+		"finish without [DONE]": sseBody(`{"choices":[{"delta":{"content":"he"},"finish_reason":"stop"}]}`),
+		"[DONE] without finish": cut + sseBody("[DONE]"),
+	} {
+		got, err := decode(body, true)
+		if err != nil || got[len(got)-1].FinishReason != "stop" {
+			t.Errorf("%s: %+v, %v; want a complete stream", name, got, err)
+		}
+	}
+	if got, err := decode(cut, false); err != nil || got[len(got)-1].FinishReason != "stop" {
+		t.Errorf("without requireEnd: %+v, %v; want the finish synthesized as before", got, err)
+	}
+	if !requiresStreamEnd(WithRequireStreamEnd(context.Background())) || requiresStreamEnd(context.Background()) {
+		t.Error("WithRequireStreamEnd is not what requiresStreamEnd reads")
+	}
+}

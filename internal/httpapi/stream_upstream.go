@@ -11,7 +11,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ipsupport-llc/ipsupport-airllm/internal/anthropic"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
@@ -24,10 +23,11 @@ import (
 // nothing until the whole answer is there, so a hung model cannot be told
 // from a slow one before the whole budget has run out; a stream shows every
 // token. The target's budget (timeout_ms) then bounds the wait for the first
-// output, and the stall timeout (stall_timeout_ms) every silence after it.
-// Nothing reaches the client until the stream has ended, so any failure
-// along the way — a stall, an error event, a broken connection — still
-// falls through to the next target, as a unary failure would.
+// output, and the stall timeout (stall_timeout_ms) every silence after it;
+// nothing else bounds the whole answer once output flows. Nothing reaches
+// the client until the stream has ended, so any failure along the way — a
+// stall, an error event, a broken or cut-short stream — still falls through
+// to the next target, as a unary failure would.
 
 // errCodeUpstreamStall marks a stream_upstream attempt abandoned because its
 // upstream, having started answering, went quiet for longer than its stall
@@ -82,15 +82,19 @@ const (
 // output on, a gap longer than stall between two chunks with output abandons
 // the attempt with an upstream_stall timeout.
 //
-// A raw error after the stream started (the connection broke mid-body) is
-// returned as a retryable upstream failure, so the next target is tried.
+// The answer is accepted only when the upstream said it is complete — [DONE]
+// or a finish reason of its own (providers.WithRequireStreamEnd); a stream
+// that just stops, a raw error after the stream started (the connection
+// broke mid-body) and a chunk of a second choice are retryable upstream
+// failures, so the next target is tried.
 //
-// When the stream ends without reporting usage the response carries an
-// estimate instead (see estimatedUsage), and a warning is logged: billing
-// zero would let the request past every token budget.
+// When the stream reports no usage, or none for a side that clearly had
+// some, the response carries an estimate for it (see estimateMissingUsage)
+// and a warning is logged: billing zero would let the request past every
+// token budget.
 func streamChat(ctx context.Context, p providers.Provider, t routing.Target, req llm.ChatRequest, stall time.Duration, gate attemptGate) (llm.ChatResponse, error) {
 	parent := ctx
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancel(providers.WithRequireStreamEnd(ctx))
 	defer cancel()
 	var why atomic.Int32
 	var timer *time.Timer
@@ -105,28 +109,37 @@ func streamChat(ctx context.Context, p providers.Provider, t routing.Target, req
 	}
 	live := liveFrom(ctx)
 	var acc llm.StreamAccumulator
-	var chunks, outputs, thinking int
+	var chunks, outputs int
 	err := p.ChatStream(ctx, req, func(c llm.StreamChunk) error {
 		chunks++
+		if c.OtherChoice {
+			return &providers.Error{Status: http.StatusBadGateway, Retryable: true,
+				Message: fmt.Sprintf("upstream %s answered with more than one choice", t.Provider)}
+		}
 		live.observeChunk(c)
 		acc.Add(c)
 		if !c.HasOutput() {
 			return nil
 		}
 		outputs++
-		if c.Reasoning != "" && c.Content == "" && len(c.ToolCalls) == 0 {
-			thinking++
-		}
 		if why.Load() != streamRunning {
 			return context.Canceled
 		}
 		if outputs > 1 {
-			timer.Reset(stall)
+			if timer != nil {
+				timer.Reset(stall)
+			}
 			return nil
 		}
 		if timer != nil && !timer.Stop() {
-			return context.Canceled // the ceiling ran out just now
+			// The ceiling ran out just now: claim it here, so the call is
+			// not left to look like a broken stream while the timer's own
+			// goroutine has yet to run.
+			why.CompareAndSwap(streamRunning, streamCeilingHit)
+			cancel()
+			return context.Canceled
 		}
+		timer = nil
 		if !gate.progress() {
 			return errFirstChunkLate
 		}
@@ -141,18 +154,18 @@ func streamChat(ctx context.Context, p providers.Provider, t routing.Target, req
 		timer.Stop()
 	}
 	if err != nil {
-		switch {
+		switch state := why.Load(); {
 		case parent.Err() != nil:
 			// The client went away or the budget ran out (runAttempt
 			// relabels the latter): either way not this call's verdict.
-		case why.Load() == streamStalled:
+		case state == streamStalled:
 			err = &providers.Error{
 				Status:    http.StatusGatewayTimeout,
 				Retryable: true,
 				Code:      errCodeUpstreamStall,
 				Message:   fmt.Sprintf("upstream %s stalled: no output for %s after it started answering", t.Provider, stall),
 			}
-		case why.Load() == streamCeilingHit:
+		case state == streamCeilingHit:
 			err = &providers.Error{
 				Status:    http.StatusGatewayTimeout,
 				Retryable: true,
@@ -172,11 +185,13 @@ func streamChat(ctx context.Context, p providers.Provider, t routing.Target, req
 	if len(resp.Choices) == 0 {
 		return resp, nil // runChat fails it as an answer with no choices
 	}
-	if _, ok := acc.Usage(); !ok {
-		resp.Usage = estimatedUsage(req, outputs, thinking)
-		slog.Warn("upstream stream ended without usage; the response carries an estimate",
+	reported, _ := acc.Usage()
+	if u, estimated := estimateMissingUsage(reported, req, &acc, outputs > 0); estimated {
+		slog.Warn("upstream stream reported no usage (or none for one side); the response carries an estimate",
 			"provider", t.Provider, "upstream_model", t.UpstreamModel,
-			"prompt_tokens", resp.Usage.PromptTokens, "completion_tokens", resp.Usage.CompletionTokens)
+			"reported_prompt_tokens", reported.PromptTokens, "reported_completion_tokens", reported.CompletionTokens,
+			"prompt_tokens", u.PromptTokens, "completion_tokens", u.CompletionTokens)
+		resp.Usage = u
 	}
 	resp.ID = "chatcmpl-" + newID()
 	resp.Model = req.Model
@@ -191,17 +206,28 @@ func isProviderError(err error) bool {
 	return errors.As(err, &pe)
 }
 
-// estimatedUsage is the usage billed for a stream that reported none: the
-// prompt at the gateway's rune/4 estimate (anthropic.EstimateInputTokens)
-// and one completion token per chunk with output — how llama.cpp and the
-// other OpenAI-compatible servers stream, and the same count the live view
-// shows — of which the thinking-only chunks are the reasoning share.
-func estimatedUsage(req llm.ChatRequest, outputs, thinking int) llm.Usage {
-	prompt := anthropic.EstimateInputTokens(req)
-	return llm.Usage{
-		PromptTokens:     prompt,
-		CompletionTokens: outputs,
-		TotalTokens:      prompt + outputs,
-		ReasoningTokens:  thinking,
+// estimateMissingUsage fills in the usage a stream did not report, by the
+// gateway's rune/4 estimate (llm.EstimateTokens): a prompt reported as 0 (or
+// not at all) is estimated over the whole request — messages, earlier tool
+// calls and the tool schemas (llm.EstimatePromptTokens) — and a completion
+// reported as 0 when output was seen is estimated over everything the model
+// produced: text, thinking (also the reasoning share) and tool calls' names
+// and arguments. A side the upstream did count is kept. estimated is whether
+// anything was filled in.
+func estimateMissingUsage(u llm.Usage, req llm.ChatRequest, acc *llm.StreamAccumulator, sawOutput bool) (_ llm.Usage, estimated bool) {
+	if u.PromptTokens == 0 {
+		u.PromptTokens = llm.EstimatePromptTokens(req)
+		estimated = true
 	}
+	if u.CompletionTokens == 0 && sawOutput {
+		all, reasoning := acc.OutputText()
+		u.CompletionTokens = max(llm.EstimateTokens(all), 1)
+		u.ReasoningTokens = llm.EstimateTokens(reasoning)
+		estimated = true
+	}
+	if estimated {
+		u.TotalTokens = u.PromptTokens + u.CompletionTokens
+		u.Normalize()
+	}
+	return u, estimated
 }
