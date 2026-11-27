@@ -57,6 +57,9 @@ func NewOpenAICompat(name, kind, baseURL, apiKey string) *OpenAICompat {
 // waits fails with ErrCodeUpstreamTimeout.
 func (p *OpenAICompat) SetChatTimeout(d time.Duration) { p.chatTimeout = d }
 
+// ChatCeiling is the ceiling Chat applies to a call without a budget.
+func (p *OpenAICompat) ChatCeiling() time.Duration { return p.chatTimeout }
+
 func (p *OpenAICompat) Name() string     { return p.name }
 func (p *OpenAICompat) Kind() string     { return p.kind }
 func (p *OpenAICompat) Protocol() string { return "openai" }

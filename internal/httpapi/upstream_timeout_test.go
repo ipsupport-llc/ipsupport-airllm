@@ -331,7 +331,7 @@ func TestRunAttemptKeepsAnUpstreamRefusalPastTheBudget(t *testing.T) {
 		{Status: http.StatusBadRequest, Message: "upstream slow returned 400: bad request"},
 		{Status: http.StatusServiceUnavailable, Retryable: true, RetryAfter: &retryAfter, Message: "upstream slow returned 503: overloaded"},
 	} {
-		_, err := runAttempt(context.Background(), "slow", 10*time.Millisecond, func(ctx context.Context, _ func() bool) error {
+		_, err := runAttempt(context.Background(), "slow", 10*time.Millisecond, func(ctx context.Context, _ attemptGate) error {
 			<-ctx.Done()
 			return answer
 		})
@@ -340,7 +340,7 @@ func TestRunAttemptKeepsAnUpstreamRefusalPastTheBudget(t *testing.T) {
 		}
 	}
 
-	_, err := runAttempt(context.Background(), "slow", 10*time.Millisecond, func(ctx context.Context, _ func() bool) error {
+	_, err := runAttempt(context.Background(), "slow", 10*time.Millisecond, func(ctx context.Context, _ attemptGate) error {
 		<-ctx.Done()
 		return ctx.Err()
 	})

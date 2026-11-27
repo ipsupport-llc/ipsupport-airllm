@@ -41,6 +41,11 @@ type failoverConfig struct {
 	// including a never-saved settings row) takes the built-in default.
 	UnavailableInitialMS int `json:"unavailable_initial_ms"`
 	UnavailableMaxMS     int `json:"unavailable_max_ms"`
+	// StreamUpstream is the default for routing.TargetOptions.StreamUpstream.
+	StreamUpstream bool `json:"stream_upstream"`
+	// StallTimeoutMS is the default for routing.TargetOptions.StallTimeoutMS;
+	// <= 0 (unset) takes defaultStallTimeoutMS.
+	StallTimeoutMS int `json:"stall_timeout_ms"`
 }
 
 // Built-in defaults for the fields above when unset: 200ms doubling to a
@@ -52,6 +57,11 @@ const (
 	defaultUnavailableInitialMS = 200
 	defaultUnavailableMaxMS     = 25600
 )
+
+// defaultStallTimeoutMS is the stall timeout of a stream_upstream call when
+// neither its target nor the gateway-wide defaults set one: a minute without
+// a single token from a model that had started answering is a hung one.
+const defaultStallTimeoutMS = 60_000
 
 // loadFailover reads the failover defaults from settings into the atomic
 // cache. A missing or unreadable row leaves the zero value in place.
@@ -77,6 +87,12 @@ func (s *Server) applyFailover(raw []byte) {
 	}
 	if cfg.UnavailableMaxMS <= 0 {
 		cfg.UnavailableMaxMS = defaultUnavailableMaxMS
+	}
+	if cfg.StallTimeoutMS <= 0 {
+		cfg.StallTimeoutMS = defaultStallTimeoutMS
+	}
+	if cfg.StallTimeoutMS > routing.MaxTimeoutMS {
+		cfg.StallTimeoutMS = routing.MaxTimeoutMS
 	}
 	s.failoverPtr.Store(&cfg)
 }
@@ -110,6 +126,14 @@ func (s *Server) handleAdminPutFailover(w http.ResponseWriter, r *http.Request) 
 		writeControlError(w, http.StatusBadRequest, fmt.Sprintf("timeout_ms must be at most %d (24 hours)", routing.MaxTimeoutMS))
 		return
 	}
+	if body.StallTimeoutMS < 0 {
+		writeControlError(w, http.StatusBadRequest, "stall_timeout_ms must not be negative")
+		return
+	}
+	if body.StallTimeoutMS > routing.MaxTimeoutMS {
+		writeControlError(w, http.StatusBadRequest, fmt.Sprintf("stall_timeout_ms must be at most %d (24 hours)", routing.MaxTimeoutMS))
+		return
+	}
 	if err := body.Breaker.Validate(); err != nil {
 		writeControlError(w, http.StatusBadRequest, err.Error())
 		return
@@ -129,6 +153,10 @@ func (s *Server) handleAdminPutFailover(w http.ResponseWriter, r *http.Request) 
 type attemptPolicy struct {
 	budget         time.Duration
 	fallbackOnAuth bool
+	// streamUpstream serves a unary chat from a stream (see streamChat),
+	// with stall as the longest silence once output started.
+	streamUpstream bool
+	stall          time.Duration
 }
 
 // policyFor resolves target t's policy key by key: a value set in its own
@@ -143,7 +171,24 @@ func (s *Server) policyFor(t routing.Target) attemptPolicy {
 	if t.Options.FallbackOnAuth != nil {
 		fallbackOnAuth = *t.Options.FallbackOnAuth
 	}
-	return attemptPolicy{budget: time.Duration(timeoutMS) * time.Millisecond, fallbackOnAuth: fallbackOnAuth}
+	streamUpstream := cfg.StreamUpstream
+	if t.Options.StreamUpstream != nil {
+		streamUpstream = *t.Options.StreamUpstream
+	}
+	stallMS := cfg.StallTimeoutMS
+	if t.Options.StallTimeoutMS != nil {
+		stallMS = *t.Options.StallTimeoutMS
+	}
+	if stallMS <= 0 {
+		// A Server a test builds directly never ran applyFailover.
+		stallMS = defaultStallTimeoutMS
+	}
+	return attemptPolicy{
+		budget:         time.Duration(timeoutMS) * time.Millisecond,
+		fallbackOnAuth: fallbackOnAuth,
+		streamUpstream: streamUpstream,
+		stall:          time.Duration(stallMS) * time.Millisecond,
+	}
 }
 
 // fallsThrough reports whether a failed attempt should move on to the next
@@ -178,18 +223,36 @@ const bgStoreTimeout = time.Second
 
 // Attempt states for runAttempt's budget race. Whichever of the timer, a
 // first chunk and the call's return moves the state off pending first wins.
+// A call that produced output without sending any of it to the client
+// (attemptProgressing) has stopped the timer but can still commit.
 const (
 	attemptPending int32 = iota
 	attemptCommitted
 	attemptExpired
 	attemptReturned
+	attemptProgressing
 )
 
+// attemptGate is how a call tells runAttempt how far it got, which decides
+// what the time budget still bounds.
+type attemptGate struct {
+	// commit is invoked by a streaming call before it sends its first
+	// chunk to the client. Once committed the budget no longer applies and
+	// no other target can take over; false means the budget ran out first
+	// and the call must not emit anything.
+	commit func() bool
+	// progress is invoked by a call that has its first output from the
+	// upstream but has sent the client nothing (streamChat): the budget
+	// stops, and a later failure still falls through to the next target.
+	// false means the budget ran out first.
+	progress func() bool
+}
+
 // runAttempt runs one upstream call under a time budget. call receives a
-// context the budget cancels and a commit function a streaming call invokes
-// on its first chunk: once committed, the budget no longer applies, and if
-// the budget ran out first commit reports false and the call must not emit
-// anything. A unary call never commits, so the budget bounds all of it. An
+// context the budget cancels and the attemptGate it reports its first
+// output through: once committed or progressing, the budget no longer
+// applies, and if the budget ran out first the gate reports false. A unary
+// call reports neither, so the budget bounds all of it. An
 // error from a call whose budget ran out is replaced by a tier_timeout
 // error, unless it is the upstream's own answer (providers.IsUpstreamAnswer:
 // a 503 with Retry-After that raced the budget is that 503); a
@@ -197,7 +260,7 @@ const (
 // positive budget is also recorded on the call's context
 // (providers.WithCallBudget), so a non-streaming provider call skips its
 // own UPSTREAM_CHAT_TIMEOUT ceiling: the budget replaces it.
-func runAttempt(ctx context.Context, provider string, budget time.Duration, call func(ctx context.Context, commit func() bool) error) (committed bool, err error) {
+func runAttempt(ctx context.Context, provider string, budget time.Duration, call func(ctx context.Context, gate attemptGate) error) (committed bool, err error) {
 	actx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var state atomic.Int32
@@ -211,9 +274,17 @@ func runAttempt(ctx context.Context, provider string, budget time.Duration, call
 		defer timer.Stop()
 	}
 	commit := func() bool {
-		return state.CompareAndSwap(attemptPending, attemptCommitted) || state.Load() == attemptCommitted
+		return state.CompareAndSwap(attemptPending, attemptCommitted) ||
+			state.CompareAndSwap(attemptProgressing, attemptCommitted) || state.Load() == attemptCommitted
 	}
-	err = call(actx, commit)
+	progress := func() bool {
+		if state.CompareAndSwap(attemptPending, attemptProgressing) {
+			return true
+		}
+		st := state.Load()
+		return st == attemptProgressing || st == attemptCommitted
+	}
+	err = call(actx, attemptGate{commit: commit, progress: progress})
 	// Claim the outcome before looking at it: a budget that runs out after
 	// the call already returned must not relabel that call's own error.
 	returnedFirst := state.CompareAndSwap(attemptPending, attemptReturned)
@@ -255,10 +326,11 @@ const (
 	cacheSkipped cacheOutcome = "skipped"
 )
 
-// attemptCall makes one upstream call to target t through provider p. commit
-// is runAttempt's: a streaming call invokes it before emitting its first
-// chunk and stops if it reports false.
-type attemptCall func(ctx context.Context, p providers.Provider, t routing.Target, commit func() bool) error
+// attemptCall makes one upstream call to target t through provider p. gate
+// is runAttempt's: a streaming call invokes gate.commit before emitting its
+// first chunk, an aggregating one gate.progress on its first output, and
+// each stops if it reports false.
+type attemptCall func(ctx context.Context, p providers.Provider, t routing.Target, gate attemptGate) error
 
 // buildLCRRank closes over a price lookup and a pre-fetched availability
 // snapshot to produce the pure routing.LCRRank function internal/routing
@@ -492,14 +564,20 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 						}
 					}
 				}
-				committed, callErr := runAttempt(ctx, t.Provider, pol.budget, func(actx context.Context, commit func() bool) error {
-					return call(actx, e.Provider, t, func() bool {
-						ok := commit()
-						if ok {
-							recordSuccess()
-							live.streaming()
-						}
-						return ok
+				committed, callErr := runAttempt(ctx, t.Provider, pol.budget, func(actx context.Context, gate attemptGate) error {
+					// Only a commit is the tier's answer: output that has
+					// not reached the client (gate.progress) can still end
+					// in a failure that counts against the tier.
+					return call(actx, e.Provider, t, attemptGate{
+						commit: func() bool {
+							ok := gate.commit()
+							if ok {
+								recordSuccess()
+								live.streaming()
+							}
+							return ok
+						},
+						progress: gate.progress,
 					})
 				})
 				e.Release()
@@ -701,11 +779,20 @@ func unavailSource(retryAfter *time.Duration, callErr error) string {
 }
 
 // isTimeout reports whether err is an attempt that failed by running out of
-// time: its target's budget (tier_timeout) or the provider's own
-// non-streaming ceiling (providers.ErrCodeUpstreamTimeout).
+// time: its target's budget (tier_timeout), the provider's own
+// non-streaming ceiling (providers.ErrCodeUpstreamTimeout), or its stall
+// timeout once a stream_upstream call had started answering
+// (upstream_stall).
 func isTimeout(err error) bool {
 	var pe *providers.Error
-	return errors.As(err, &pe) && (pe.Code == errCodeTierTimeout || pe.Code == providers.ErrCodeUpstreamTimeout)
+	if !errors.As(err, &pe) {
+		return false
+	}
+	switch pe.Code {
+	case errCodeTierTimeout, providers.ErrCodeUpstreamTimeout, errCodeUpstreamStall:
+		return true
+	}
+	return false
 }
 
 // attemptFailureReason is a short, stable label for why an attempt failed:

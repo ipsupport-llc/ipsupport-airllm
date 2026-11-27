@@ -90,3 +90,11 @@ test("liveOutputHTML: a unary request with nothing out yet waits; streams and ou
   // A unary response being written already has bytes out: show them.
   assert.equal(liveOutputHTML({ stream: false, output_tokens: 0, bytes_out: 812 }), '0 tok<div class="sub">812 B</div>');
 });
+
+test("liveOutputHTML: a unary request assembled from an upstream stream shows its tokens as still being received", () => {
+  const s = liveOutputHTML({ stream: false, output_tokens: 1234, bytes_out: 0 });
+  assert.equal(s, '1,234 tok<div class="sub muted">receiving</div>');
+  assert.doesNotMatch(s, /0 B|waiting/);
+  // Once the response is written its bytes show as for any unary answer.
+  assert.equal(liveOutputHTML({ stream: false, output_tokens: 1234, bytes_out: 812 }), '1,234 tok<div class="sub">812 B</div>');
+});

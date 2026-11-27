@@ -405,7 +405,7 @@ func (s *Server) runTranscribe(ctx context.Context, plan *routing.Plan, req audi
 		}
 		return nil
 	}
-	res, _, err := s.executePlan(ctx, plan, supports, func(ctx context.Context, p providers.Provider, t routing.Target, _ func() bool) error {
+	res, _, err := s.executePlan(ctx, plan, supports, func(ctx context.Context, p providers.Provider, t routing.Target, _ attemptGate) error {
 		in := req
 		in.Model = t.UpstreamModel
 		in.ModelByLanguage = t.Options.RecognitionModels
@@ -579,7 +579,7 @@ func (s *Server) runSynthesizeTo(ctx context.Context, plan *routing.Plan, req au
 		}
 		return nil
 	}
-	res, started, err := s.executePlan(ctx, plan, supports, func(ctx context.Context, p providers.Provider, t routing.Target, commit func() bool) error {
+	res, started, err := s.executePlan(ctx, plan, supports, func(ctx context.Context, p providers.Provider, t routing.Target, gate attemptGate) error {
 		choice, ok := t.Options.SpeakAs(req.Voice, req.Language)
 		if !ok {
 			return &providers.Error{Status: http.StatusBadRequest, Code: providers.ErrCodeVoiceNotSupported,
@@ -621,7 +621,7 @@ func (s *Server) runSynthesizeTo(ctx context.Context, plan *routing.Plan, req au
 				return err
 			}
 			defer st.Body.Close()
-			kept, contentType, err := streamSpeech(st, in, p, t, sink, commit, cache == cacheMiss)
+			kept, contentType, err := streamSpeech(st, in, p, t, sink, gate.commit, cache == cacheMiss)
 			streamed = sink.begun
 			resp, served, label = audio.SpeechResponse{Audio: kept, ContentType: contentType}, in.Model, t.DisplayLabel
 			if kept == nil && cache == cacheMiss {

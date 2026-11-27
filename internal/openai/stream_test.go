@@ -37,6 +37,31 @@ func TestStreamChunkFinish(t *testing.T) {
 	}
 }
 
+// TestParseStreamChunkReasoning: thinking text is read from either key a
+// vendor uses, never sent back out, and a reasoning value that is not a
+// string does not cost the chunk its content.
+func TestParseStreamChunkReasoning(t *testing.T) {
+	for data, want := range map[string]string{
+		`{"choices":[{"index":0,"delta":{"reasoning_content":"llama"}}]}`:       "llama",
+		`{"choices":[{"index":0,"delta":{"reasoning":"router"}}]}`:              "router",
+		`{"choices":[{"index":0,"delta":{"reasoning":{"x":1},"content":"c"}}]}`: "",
+	} {
+		c, err := ParseStreamChunk([]byte(data))
+		if err != nil {
+			t.Fatalf("%s: %v", data, err)
+		}
+		if c.Reasoning != want {
+			t.Errorf("%s: reasoning = %q, want %q", data, c.Reasoning, want)
+		}
+		if want == "" && c.Content != "c" {
+			t.Errorf("%s: content = %q, want c", data, c.Content)
+		}
+		if out := mustMarshal(t, c); strings.Contains(out, "reasoning") {
+			t.Errorf("%s: reasoning reached the client chunk: %s", data, out)
+		}
+	}
+}
+
 func TestStreamChunkUsageOnly(t *testing.T) {
 	s := mustMarshal(t, llm.StreamChunk{Usage: &llm.Usage{PromptTokens: 1, CompletionTokens: 2, TotalTokens: 3}})
 	if !strings.Contains(s, `"choices":[]`) {

@@ -176,3 +176,24 @@ func TestIsUpstreamAnswer(t *testing.T) {
 		}
 	}
 }
+
+// TestChatCeiling: the ceiling a unary call would have, for a caller that
+// serves the request another way.
+func TestChatCeiling(t *testing.T) {
+	oc := NewOpenAICompat("p", "openai", "http://127.0.0.1:1", "")
+	if got := ChatCeiling(oc); got != defaultChatTimeout {
+		t.Errorf("unset: %v, want the default %v", got, defaultChatTimeout)
+	}
+	oc.SetChatTimeout(5 * time.Second)
+	if got := ChatCeiling(oc); got != 5*time.Second {
+		t.Errorf("set: %v, want 5s", got)
+	}
+	v := &Vertex{}
+	v.SetChatTimeout(7 * time.Second)
+	if got := ChatCeiling(v); got != 7*time.Second {
+		t.Errorf("vertex: %v, want 7s", got)
+	}
+	if got := ChatCeiling(NewMock("m")); got != defaultChatTimeout {
+		t.Errorf("mock: %v, want the default %v", got, defaultChatTimeout)
+	}
+}

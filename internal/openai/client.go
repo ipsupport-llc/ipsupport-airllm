@@ -178,13 +178,28 @@ func DecodeChatResponse(r io.Reader) (llm.ChatResponse, error) {
 type upstreamChunk struct {
 	Choices []struct {
 		Delta struct {
-			Role      string              `json:"role"`
-			Content   string              `json:"content"`
-			ToolCalls []llm.ToolCallDelta `json:"tool_calls"`
+			Role    string `json:"role"`
+			Content string `json:"content"`
+			// Thinking text: reasoning_content (llama.cpp, DeepSeek,
+			// vLLM) or reasoning (OpenRouter, Ollama). Raw, so a vendor
+			// that sends something other than a string there cannot make
+			// the whole chunk fail to parse.
+			ReasoningContent json.RawMessage     `json:"reasoning_content"`
+			Reasoning        json.RawMessage     `json:"reasoning"`
+			ToolCalls        []llm.ToolCallDelta `json:"tool_calls"`
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *llm.Usage `json:"usage"`
+}
+
+// jsonText is raw when it is a JSON string, else "".
+func jsonText(raw json.RawMessage) string {
+	var s string
+	if len(raw) == 0 || json.Unmarshal(raw, &s) != nil {
+		return ""
+	}
+	return s
 }
 
 // ParseStreamChunk parses one OpenAI SSE data payload into an IR chunk.
@@ -201,6 +216,10 @@ func ParseStreamChunk(data []byte) (llm.StreamChunk, error) {
 		d := w.Choices[0]
 		c.Role = d.Delta.Role
 		c.Content = d.Delta.Content
+		c.Reasoning = jsonText(d.Delta.ReasoningContent)
+		if c.Reasoning == "" {
+			c.Reasoning = jsonText(d.Delta.Reasoning)
+		}
 		c.ToolCalls = d.Delta.ToolCalls
 		if d.FinishReason != nil {
 			c.FinishReason = *d.FinishReason

@@ -85,7 +85,7 @@ func (s *Server) runEmbeddings(ctx context.Context, plan *routing.Plan, req llm.
 		}
 		return nil
 	}
-	res, _, err := s.executePlan(ctx, plan, supports, func(ctx context.Context, p providers.Provider, t routing.Target, _ func() bool) error {
+	res, _, err := s.executePlan(ctx, plan, supports, func(ctx context.Context, p providers.Provider, t routing.Target, _ attemptGate) error {
 		in := req
 		in.Model = t.UpstreamModel
 		var err error

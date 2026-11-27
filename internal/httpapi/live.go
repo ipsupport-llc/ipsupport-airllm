@@ -133,7 +133,9 @@ func (l *liveRecord) streaming() {
 }
 
 // observeChunk keeps the best-effort output token count: one per chunk that
-// carries output, until the upstream reports its real count.
+// carries output (thinking included, as the upstream's own count does),
+// until the upstream reports its real count. A unary request served from a
+// stream (stream_upstream) counts too, while nothing has been sent yet.
 func (l *liveRecord) observeChunk(c llm.StreamChunk) {
 	if l == nil {
 		return
@@ -141,7 +143,7 @@ func (l *liveRecord) observeChunk(c llm.StreamChunk) {
 	switch {
 	case c.Usage != nil && c.Usage.CompletionTokens > 0:
 		l.outputTokens.Store(int64(c.Usage.CompletionTokens))
-	case c.Content != "" || len(c.ToolCalls) > 0:
+	case c.HasOutput():
 		l.outputTokens.Add(1)
 	}
 }
