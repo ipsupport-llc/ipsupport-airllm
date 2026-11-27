@@ -13,11 +13,20 @@ assert.ok(textMatch, "targetOptionsText function not found in app.js");
 const parseMatch = src.match(/function parseTargetOptions\(text\)[\s\S]*?\n}\n/);
 assert.ok(parseMatch, "parseTargetOptions function not found in app.js");
 
+const extra = ["msToSecondsText", "parseSecondsToMs", "targetOptionsForm", "targetOptionsFromForm"].map((name) => {
+  const m = src.match(new RegExp(`function ${name}\\([\\s\\S]*?\\n}\\n`));
+  assert.ok(m, `${name} function not found in app.js`);
+  return m[0] + `\nthis.${name} = ${name};\n`;
+});
+
 const ctx = {};
 vm.createContext(ctx);
 vm.runInContext(textMatch[0] + "\n" + parseMatch[0] +
-  "\nthis.targetOptionsText = targetOptionsText; this.parseTargetOptions = parseTargetOptions;", ctx);
-const { targetOptionsText, parseTargetOptions } = ctx;
+  "\nthis.targetOptionsText = targetOptionsText; this.parseTargetOptions = parseTargetOptions;\n" + extra.join("\n"), ctx);
+const { targetOptionsText, parseTargetOptions, msToSecondsText, parseSecondsToMs, targetOptionsForm, targetOptionsFromForm } = ctx;
+// Objects built inside the vm context have another realm's prototype; a JSON
+// round trip makes them comparable with deepEqual.
+const plain = (o) => JSON.parse(JSON.stringify(o));
 
 test("targetOptionsText: an empty or missing object shows an empty field", () => {
   assert.equal(targetOptionsText({}), "");
@@ -44,4 +53,105 @@ test("parseTargetOptions: anything but a JSON object is refused", () => {
   for (const bad of ["{oops", "[1]", "null", '"fast"', "42"]) {
     assert.throws(() => parseTargetOptions(bad), /options/, `accepted ${bad}`);
   }
+});
+
+test("msToSecondsText: unset is empty, 0 stays 0, decimals are kept", () => {
+  assert.equal(msToSecondsText(undefined), "");
+  assert.equal(msToSecondsText(null), "");
+  assert.equal(msToSecondsText(0), "0");
+  assert.equal(msToSecondsText(1500), "1.5");
+  assert.equal(msToSecondsText(60000), "60");
+  assert.equal(msToSecondsText(1234), "1.234");
+});
+
+test("parseSecondsToMs: empty is unset, seconds become whole milliseconds", () => {
+  assert.equal(parseSecondsToMs("", "timeout"), undefined);
+  assert.equal(parseSecondsToMs("  ", "timeout"), undefined);
+  assert.equal(parseSecondsToMs("0", "timeout"), 0);
+  assert.equal(parseSecondsToMs("1.5", "timeout"), 1500);
+  assert.equal(parseSecondsToMs("1.1", "timeout"), 1100);
+  assert.equal(parseSecondsToMs(" 30 ", "timeout"), 30000);
+  assert.equal(parseSecondsToMs("0.001", "timeout"), 1);
+});
+
+test("parseSecondsToMs: bad input is refused with the field's name", () => {
+  for (const bad of ["abc", "-1", "1,5", "Infinity", "1.5s"]) {
+    assert.throws(() => parseSecondsToMs(bad, "timeout"), /^Error: timeout must be a number of seconds/, `accepted ${bad}`);
+  }
+  assert.throws(() => parseSecondsToMs("0.0001", "timeout"), /at least 0.001/);
+  assert.throws(() => parseSecondsToMs("0", "breaker cooldown", true), /breaker cooldown must be a number of seconds above 0/);
+});
+
+const blank = { timeout: "", fallback_on_auth: "", thinking: "", breaker_enabled: "", breaker_failures: "", breaker_cooldown: "", advanced: "" };
+
+test("targetOptionsForm: known keys go to fields, the rest stays in Advanced", () => {
+  const f = targetOptionsForm({
+    timeout_ms: 1500, fallback_on_auth: false, thinking: "off",
+    breaker: { enabled: true, failures: 3, cooldown_ms: 60000, error_rate: 0.5 },
+    voices: { "en-US-Neural2-F": { voice: "nova" } }, later_key: [1, 2],
+  });
+  assert.equal(f.timeout, "1.5");
+  assert.equal(f.fallback_on_auth, "no");
+  assert.equal(f.thinking, "off");
+  assert.equal(f.breaker_enabled, "yes");
+  assert.equal(f.breaker_failures, "3");
+  assert.equal(f.breaker_cooldown, "60");
+  assert.deepEqual(JSON.parse(f.advanced), {
+    breaker: { error_rate: 0.5 }, voices: { "en-US-Neural2-F": { voice: "nova" } }, later_key: [1, 2],
+  });
+});
+
+test("targetOptionsForm: nothing set is all-empty fields", () => {
+  assert.deepEqual(plain(targetOptionsForm(undefined)), blank);
+  assert.deepEqual(plain(targetOptionsForm({})), blank);
+});
+
+test("round trip: form and back loses or changes no key", () => {
+  const cases = [
+    {},
+    { timeout_ms: 0 },
+    { timeout_ms: 1234, fallback_on_auth: true },
+    { fallback_on_auth: false, breaker: { enabled: false } },
+    { thinking: "off", breaker: { failures: 5, cooldown_ms: 1500, window_ms: 60000, min_requests: 10, max_cooldown_ms: 600000, stable_ms: 300000 } },
+    {
+      timeout_ms: 2000, recognition_models: { "en-US": "telephony" },
+      voices: { a: { voice: "onyx", model: "tts-1", language: "en-US", gender: "male" } },
+      default_voices: { en: { voice: "onyx" } }, send_language: true, stream_speech: false,
+      breaker: { error_rate: 0.25 }, some_future_key: { nested: [1, { x: null }] },
+    },
+  ];
+  for (const o of cases) {
+    assert.deepEqual(plain(targetOptionsFromForm(targetOptionsForm(o))), o, JSON.stringify(o));
+  }
+});
+
+test("targetOptionsFromForm: unset fields are omitted, not sent as null or 0", () => {
+  assert.equal(JSON.stringify(targetOptionsFromForm(blank)), "{}");
+});
+
+test("targetOptionsFromForm: tri-state selects map to unset / true / false", () => {
+  assert.equal("fallback_on_auth" in targetOptionsFromForm({ ...blank, fallback_on_auth: "" }), false);
+  assert.equal(targetOptionsFromForm({ ...blank, fallback_on_auth: "yes" }).fallback_on_auth, true);
+  assert.equal(targetOptionsFromForm({ ...blank, fallback_on_auth: "no" }).fallback_on_auth, false);
+  assert.equal("breaker" in targetOptionsFromForm({ ...blank, breaker_enabled: "" }), false);
+  assert.deepEqual(plain(targetOptionsFromForm({ ...blank, breaker_enabled: "no" })), { breaker: { enabled: false } });
+  assert.deepEqual(plain(targetOptionsFromForm({ ...blank, breaker_enabled: "yes" })), { breaker: { enabled: true } });
+});
+
+test("targetOptionsFromForm: fields win over Advanced, which keeps its other keys", () => {
+  const o = targetOptionsFromForm({
+    ...blank, timeout: "2.5", breaker_failures: "4",
+    advanced: '{"timeout_ms":9000,"breaker":{"failures":1,"error_rate":0.5},"voices":{"x":{"voice":"y"}}}',
+  });
+  assert.deepEqual(plain(o), { timeout_ms: 2500, breaker: { failures: 4, error_rate: 0.5 }, voices: { x: { voice: "y" } } });
+});
+
+test("targetOptionsFromForm: bad input names the field", () => {
+  assert.throws(() => targetOptionsFromForm({ ...blank, timeout: "fast" }), /timeout must be a number of seconds/);
+  for (const bad of ["0", "-2", "2.5", "x"]) {
+    assert.throws(() => targetOptionsFromForm({ ...blank, breaker_failures: bad }), /breaker failures must be a whole number above 0/, `accepted ${bad}`);
+  }
+  assert.throws(() => targetOptionsFromForm({ ...blank, breaker_cooldown: "0" }), /breaker cooldown must be/);
+  assert.throws(() => targetOptionsFromForm({ ...blank, advanced: "{oops" }), /^Error: Advanced \(JSON\): options must be valid JSON/);
+  assert.throws(() => targetOptionsFromForm({ ...blank, breaker_failures: "3", advanced: '{"breaker":5}' }), /Advanced \(JSON\): breaker must be a JSON object/);
 });

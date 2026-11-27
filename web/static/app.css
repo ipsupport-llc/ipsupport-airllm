@@ -391,7 +391,19 @@ details.hint[open] summary { margin-bottom: 0.4rem; }
 .tgt-head span { color: var(--muted); font-family: var(--font-mono); font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.1em; }
 .tgt { padding: 0.5rem 0; border-bottom: 1px dashed var(--rule-soft); margin-bottom: 0.3rem; }
 .tgt .t-model-slot { display: block; min-width: 0; }
-.tgt .t-opts { grid-column: 2 / -1; font-size: 0.82rem; }
+.tgt .t-opts, .tgt .t-more { grid-column: 2 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem 0.9rem; }
+.tgt .t-more[hidden] { display: none; }
+.tgt .t-more { align-items: flex-start; padding: 0.45rem 0.6rem; border-left: 2px solid var(--rule); }
+.t-fld { display: inline-flex; align-items: center; gap: 0.4rem; min-width: 0; }
+.t-lab { color: var(--muted); font-family: var(--font-mono); font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.08em; white-space: nowrap; }
+.t-fld input, .t-fld select { width: auto; padding: 0.3rem 0.5rem; font-size: 0.84rem; }
+.t-fld .t-timeout, .t-fld .t-br-cooldown { width: 6.5rem; }
+.t-fld .t-br-failures { width: 5.5rem; }
+.tgt .t-more-btn { margin-left: auto; white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.t-breaker { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem 0.9rem; }
+.t-sub { color: var(--fg); }
+.t-fld.t-adv { flex: 1 1 100%; flex-direction: column; align-items: stretch; gap: 0.25rem; }
+.t-adv textarea { min-height: 0; padding: 0.35rem 0.5rem; font-size: 0.8rem; resize: vertical; }
 .tgt .t-del { justify-content: center; padding: 0.3rem 0; }
 
 /* Live page. */
@@ -618,7 +630,9 @@ td.email-cell { overflow-wrap: anywhere; min-width: 9rem; }
   .form-grid { grid-template-columns: minmax(0, 1fr); }
   .tgt-head { display: none; }
   .tgt { grid-template-columns: 56px minmax(0, 1fr) 2rem; }
-  .tgt .t-model-slot, .tgt .t-label, .tgt .t-opts { grid-column: 1 / -1; }
+  .tgt .t-model-slot, .tgt .t-label, .tgt .t-opts, .tgt .t-more { grid-column: 1 / -1; }
+  /* Timeout and More share the first line; the fallback select wraps below. */
+  .tgt .t-auth-fld { order: 1; }
   .tgt .t-del { grid-column: 3; grid-row: 1; }
   .custom-row { grid-template-columns: minmax(0, 1fr) auto auto; }
   .custom-row .cp-regex { grid-column: 1 / -1; grid-row: 2; }
