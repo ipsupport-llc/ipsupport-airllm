@@ -173,15 +173,13 @@ func withThoughtSignature(extra json.RawMessage, sig string) json.RawMessage {
 }
 
 // Chat performs a non-streaming upstream call. The default two-minute
-// ceiling (see SetChatTimeout) is parity with OpenAICompat; a large model
-// with a generous thinking budget can approach it.
-func (p *Vertex) Chat(ctx context.Context, in llm.ChatRequest) (llm.ChatResponse, error) {
-	timeout := p.chatTimeout
-	if timeout <= 0 {
-		timeout = defaultChatTimeout
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+// ceiling (see SetChatTimeout) is parity with OpenAICompat, including its
+// being skipped for a call that carries its own budget (WithCallBudget); a
+// large model with a generous thinking budget can approach it.
+func (p *Vertex) Chat(parent context.Context, in llm.ChatRequest) (_ llm.ChatResponse, err error) {
+	ctx, cancel, ceiling := withCeiling(parent, p.chatTimeout)
 	defer cancel()
+	defer func() { err = ceilingError(parent, ctx, p.name, ceiling, err) }()
 
 	body, err := openai.EncodeChatRequest(vertexRequest(withThinkingOff(p.Kind(), in)), false)
 	if err != nil {

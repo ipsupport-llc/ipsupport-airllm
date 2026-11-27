@@ -30,7 +30,7 @@ Read by `internal/config` at startup. Invalid values fail fast.
 | `SHUTDOWN_DRAIN` | `0s` | no | How long the server keeps accepting requests after `SIGTERM`, with `/readyz` answering `503 draining`, while the load balancer stops routing to it (Go duration). The Helm chart sets `5s`. |
 | `SHUTDOWN_TIMEOUT` | `10s` | no | How long in-flight requests, streams included, may then take to finish before the process exits (Go duration, positive). The Helm chart sets `20s`. |
 | `CAPTURE_BLOB_DIR` | `capture-blobs` | no | Filesystem directory for the capture blob store (relative to the working directory by default). The process runs as a non-root user, so point this at a writable path (compose uses `/tmp/airllm-captures`). Back it with a volume or object store on deploy. |
-| `UPSTREAM_CHAT_TIMEOUT` | `120s` | no | Ceiling on a single non-streaming call to an OpenAI-compatible or Vertex upstream — chat completions and embeddings (Go duration, positive). Independent of a target's own `timeout_ms` (see [Circuit breaker](#circuit-breaker)): that one can be set to `0` for an unbounded wait and is enforced by cancelling the attempt; this one is a hard ceiling the provider applies underneath it, regardless of `timeout_ms`. Raise it for a local upstream with a long time-to-first-token on non-streaming requests. |
+| `UPSTREAM_CHAT_TIMEOUT` | `120s` | no | Ceiling on a single non-streaming call to an OpenAI-compatible or Vertex upstream — chat completions and embeddings (Go duration, positive) — for a target **without a time budget**: its `timeout_ms` is set to `0`, or unset while the gateway-wide default `timeout_ms` is `0` (see [Failover policy](#failover-policy-getput-apiadminfailover)). A target with a positive `timeout_ms` (its own or the default) is bounded by that budget instead, whether longer or shorter than this ceiling. A call the ceiling cuts off fails over like a [timeout](#target-unavailability-retry-after) (reason `timeout`); if no other tier answers, the client gets `504`. Raise it, or give the target a `timeout_ms`, for a local upstream that takes long on non-streaming requests. |
 | `LIMITS_TZ` | `UTC` | no | IANA time zone (e.g. `Europe/Berlin`) the [per-user budget](#per-user-budgets-and-groups) periods follow: a day starts at 00:00, a week on Monday 00:00 (ISO week), a month on the 1st at 00:00 there. An unknown zone fails startup. |
 | `TRUSTED_PROXY_CIDRS` | loopback, private and link-local ranges | no | Comma-separated CIDRs whose `X-Forwarded-For` is believed when working out a client's IP (login lockout, live view). Set it to your ingress controller's pod CIDR; see [Operations → Security posture](operations.md#security-posture). |
 | `FORWARD_HEADERS` | — | no | Comma-separated request header names to copy onto the outbound upstream request for `/v1/chat/completions` and `/v1/embeddings` (OpenAI-compatible and Vertex providers; audio and the Google Speech/TTS kinds don't forward headers). Forwarding can never override `Content-Type`, `Authorization`, or (on a streaming call, the only one that sets it) `Accept`. A name matching `Authorization`, `X-Api-Key`, or another header the gateway needs for itself (see the full denylist in `internal/config`) is rejected at startup. Empty by default: no client header reaches an upstream unless named here. |
@@ -151,7 +151,7 @@ nothing changes until an operator opts in.
 
 | Field | Default | Meaning |
 |-------|---------|---------|
-| `timeout_ms` | `0` | Time budget per target attempt; `0` means none. For a **streamed** chat it bounds the wait for the **first chunk carrying text or a tool call** — the role-only and empty deltas a model sends while it thinks do not count, so a tier that thinks past its budget falls through instead of holding the client silent (a slow stream that has started is never cut); for a unary chat, a transcription or a speech request it bounds the **whole call**. A breach abandons the attempt and moves to the next target, exactly like a retryable error; the client sees one clean response from whichever target answers. |
+| `timeout_ms` | `0` | Time budget per target attempt; `0` means none. For a **streamed** chat it bounds the wait for the **first chunk carrying text or a tool call** — the role-only and empty deltas a model sends while it thinks do not count, so a tier that thinks past its budget falls through instead of holding the client silent (a slow stream that has started is never cut); for a unary chat, a transcription or a speech request it bounds the **whole call**, and for a non-streaming chat or embeddings call it replaces `UPSTREAM_CHAT_TIMEOUT`, so it may be longer than that ceiling. A breach abandons the attempt and moves to the next target, exactly like a retryable error; the client sees one clean response from whichever target answers, or `504` when no target does. A breach counts against the tier's breaker; it marks the target unavailable only as the third timeout in a row (see "Target unavailability" below). A target that failed is not called again within the same request. At most `86400000` (24 hours). |
 | `fallback_on_auth` | `false` | Also move on when the upstream refuses the gateway's own credentials or account: HTTP `401`/`403`, and Google `PERMISSION_DENIED`, `UNAUTHENTICATED`, `FAILED_PRECONDITION` or a `BILLING_DISABLED` reason. Off, such an error fails the request as before. |
 | `unavailable_initial_ms` | `200` | Gateway-wide only (no per-target override) — see "Target unavailability" below. |
 | `unavailable_max_ms` | `25600` | Gateway-wide only — see "Target unavailability" below. |
@@ -311,7 +311,22 @@ to the exact same target.
 
 A tier-attributable failure (the same ones the breaker counts — see "Only
 failures that say something about the tier count" above) marks its
-`(provider, upstream_model)` unavailable. The rest of that request is
+`(provider, upstream_model)` unavailable. A timeout — a target that ran
+past its `timeout_ms` or, without one, past `UPSTREAM_CHAT_TIMEOUT` — is
+treated as slow rather than down: it logs `tier attempt failed` with reason
+`timeout`, counts against the breaker and moves the request on to the next
+tier, but marks the target only when it is the **third timeout in a row**
+for that `(provider, upstream_model)`, counted across every alias and
+replica. Any answer from the target in between — a success, an error the
+request itself caused, or any other failure (which marks it at once) —
+starts the count again; while the run goes on, each further timeout marks
+it again. A run is forgotten 25 hours after its last timeout. One slow
+request therefore never takes a target out of rotation, but one that hangs
+on every call does, breaker or no breaker. The reset is best effort: it is
+written after the answer, off the response path, so a success that races
+a third timeout on another replica may still leave the target marked
+briefly, and while Redis is unreachable each replica counts on its own.
+The rest of that request is
 unaffected — it still tries every other target as normal — but the next
 request that resolves to that exact target skips it without a call, until
 the mark expires. There is no separate background prober: the next real
@@ -330,16 +345,17 @@ How long a mark lasts:
   mark against a target uses `unavailable_initial_ms`; each further mark
   against the SAME target (its previous mark having already expired)
   doubles from the last one, capped at `unavailable_max_ms`. A target that
-  goes on to succeed resets this memory, so its next failure (if any)
-  starts again at `unavailable_initial_ms` rather than wherever the
-  doubling had climbed to.
+  goes on to succeed resets this memory (best effort, as above), so its
+  next failure (if any) starts again at `unavailable_initial_ms` rather
+  than wherever the doubling had climbed to.
 
 State is shared by every replica through Redis, the same as the breaker;
 Redis unreachable fails open (nothing is treated as unavailable, same as
 before this existed) rather than blocking traffic.
 
 Logs `target marked unavailable` with `provider`, `upstream_model`,
-`duration_ms` and `source` (`retry_after` or `default_backoff`). A skipped
+`duration_ms` and `source` (`retry_after`, `default_backoff`, or
+`consecutive_timeouts` for a mark after a run of timeouts). A skipped
 attempt counts in the `tier attempt failed` / fallback bookkeeping with
 reason `unavailable`, the same as a `quarantined` breaker skip. A request
 whose every target is marked unavailable fails with `503`, as when every tier

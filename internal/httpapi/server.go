@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -88,6 +89,7 @@ type Server struct {
 	catalog       catalogCache     // per-provider upstream model list micro-cache
 	breaker       *breaker.Breaker // per-tier circuit breaker; nil admits everything
 	unavail       *unavail.Store   // per-(provider,model) Retry-After-aware skip; nil Check never skips
+	bg            sync.WaitGroup   // store writes executePlan runs off the response path (inBackground)
 	affinity      *affinity.Store  // session pins to a backup tier; nil pins nothing
 	speechCache   *speechcache.Cache
 	lcr           *lcr.Store    // per-(provider,model) EWMA availability for the lcr strategy; nil Snapshot returns all-1.0

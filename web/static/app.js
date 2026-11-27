@@ -1776,6 +1776,100 @@ function parseTargetOptions(text) {
   return v;
 }
 
+// msToSecondsText shows a stored millisecond duration as seconds for an
+// editor field: unset is empty, 0 stays "0", 1500 is "1.5". Top-level so
+// web/targetoptions.test.mjs can extract it.
+function msToSecondsText(ms) {
+  if (typeof ms !== "number" || !Number.isFinite(ms)) return "";
+  return String(Math.round(ms) / 1000);
+}
+
+// parseSecondsToMs reads a seconds field back as whole milliseconds: empty is
+// undefined (not set), otherwise a plain decimal ("30", "1.5"), above 0 when
+// positive is true, and at most maxSeconds when given (timeouts: 86400, the
+// server's 24 h limit). Decimals are fine down to one millisecond.
+function parseSecondsToMs(text, what, positive, maxSeconds) {
+  const t = String(text ?? "").trim();
+  if (!t) return undefined;
+  const rule = positive ? "a number of seconds above 0" : "a number of seconds, 0 or more";
+  if (!/^\d+(\.\d+)?$/.test(t)) throw new Error(`${what} must be ${rule}, like 30 or 1.5`);
+  const s = Number(t);
+  if (positive && s === 0) throw new Error(`${what} must be ${rule}`);
+  if (maxSeconds !== undefined && s > maxSeconds) {
+    throw new Error(`${what} must be at most ${maxSeconds} seconds${maxSeconds === 86400 ? " (24 hours)" : ""}`);
+  }
+  const ms = Math.round(s * 1000);
+  if (!Number.isSafeInteger(ms)) throw new Error(`${what} is too large`);
+  if (s > 0 && ms === 0) throw new Error(`${what} must be at least 0.001 seconds`);
+  return ms;
+}
+
+// targetOptionsForm splits a target's stored options into the alias editor's
+// structured fields (strings, "" = not set) and the Advanced JSON text, which
+// holds every other key, including breaker keys without a field of their
+// own. A key is lifted into a field only when it has a type and range that
+// field accepts on save, so a round trip never changes it and a stored value
+// the field would refuse stays in Advanced instead of blocking an unrelated
+// edit. Top-level so web/targetoptions.test.mjs can extract it.
+function targetOptionsForm(o) {
+  const rest = o && typeof o === "object" && !Array.isArray(o) ? { ...o } : {};
+  const tri = (v) => (v === true ? "yes" : "no");
+  const f = { timeout: "", fallback_on_auth: "", thinking: "", breaker_enabled: "", breaker_failures: "", breaker_cooldown: "" };
+  if (Number.isInteger(rest.timeout_ms) && rest.timeout_ms >= 0 && rest.timeout_ms <= 86400000) { f.timeout = msToSecondsText(rest.timeout_ms); delete rest.timeout_ms; }
+  if (typeof rest.fallback_on_auth === "boolean") { f.fallback_on_auth = tri(rest.fallback_on_auth); delete rest.fallback_on_auth; }
+  if (rest.thinking === "off") { f.thinking = "off"; delete rest.thinking; }
+  const b = rest.breaker;
+  if (b && typeof b === "object" && !Array.isArray(b)) {
+    const br = { ...b };
+    if (typeof br.enabled === "boolean") { f.breaker_enabled = tri(br.enabled); delete br.enabled; }
+    if (Number.isInteger(br.failures) && br.failures > 0) { f.breaker_failures = String(br.failures); delete br.failures; }
+    if (Number.isSafeInteger(br.cooldown_ms) && br.cooldown_ms > 0) { f.breaker_cooldown = msToSecondsText(br.cooldown_ms); delete br.cooldown_ms; }
+    if (Object.keys(br).length) rest.breaker = br; else delete rest.breaker;
+  }
+  f.advanced = targetOptionsText(rest);
+  return f;
+}
+
+// targetOptionsFromForm is targetOptionsForm in reverse: the Advanced JSON is
+// the base, every structured field that is set adds its key, and an unset
+// field leaves the key out (or as Advanced has it). A key set both in its
+// field and in Advanced is refused, so neither value is dropped unseen; a
+// null in Advanced is unset (the server reads it so) and the field fills it.
+// Throws with the field's or key's name on bad input.
+function targetOptionsFromForm(f) {
+  let o;
+  try { o = parseTargetOptions(f.advanced); } catch (e) { throw new Error("Advanced (JSON): " + e.message); }
+  const both = (key) => new Error(`${key} is set both in its field and in Advanced (JSON); keep one`);
+  const put = (obj, key, v, name) => {
+    if (v === undefined) return;
+    if (obj[key] !== undefined && obj[key] !== null) throw both(name || key);
+    obj[key] = v;
+  };
+  const tri = (v) => (v === "yes" ? true : v === "no" ? false : undefined);
+  put(o, "timeout_ms", parseSecondsToMs(f.timeout, "timeout", false, 86400));
+  put(o, "fallback_on_auth", tri(f.fallback_on_auth));
+  put(o, "thinking", f.thinking || undefined);
+  const br = {};
+  const enabled = tri(f.breaker_enabled);
+  if (enabled !== undefined) br.enabled = enabled;
+  const failures = String(f.breaker_failures ?? "").trim();
+  if (failures) {
+    if (!/^\d+$/.test(failures) || Number(failures) < 1) throw new Error("breaker failures must be a whole number above 0");
+    br.failures = Number(failures);
+  }
+  const cooldown = parseSecondsToMs(f.breaker_cooldown, "breaker cooldown", true);
+  if (cooldown !== undefined) br.cooldown_ms = cooldown;
+  if (Object.keys(br).length) {
+    if (o.breaker != null && (typeof o.breaker !== "object" || Array.isArray(o.breaker))) {
+      throw new Error("Advanced (JSON): breaker must be a JSON object");
+    }
+    const merged = { ...(o.breaker || {}) };
+    for (const [k, v] of Object.entries(br)) put(merged, k, v, "breaker." + k);
+    o.breaker = merged;
+  }
+  return o;
+}
+
 // affinityTTLText shows an alias's stored session pin TTL (seconds) as hours
 // for the editor; the default (0) is an empty field. Top-level so
 // web/affinityttl.test.mjs can extract it.
@@ -1870,7 +1964,7 @@ async function adminAliases(c) {
       al.map((a) => `<tr><td class="mono">${esc(a.alias)}</td><td>${esc(a.protocol)}</td>
         <td>${esc(a.strategy || "round_robin")}</td>
         <td>${a.dlp_model_scan ? `<span class="badge neutral">on</span>` : `<span class="badge revoked">off</span>`}</td>
-        <td class="mono">${(a.targets || []).map((t) => `${esc(t.provider)}/${esc(t.upstream_model)} (p${t.priority}${t.options && t.options.timeout_ms ? `, ${fmtNum(t.options.timeout_ms)}ms` : ""})`).join("<br>") || "—"}</td>
+        <td class="mono">${(a.targets || []).map((t) => `${esc(t.provider)}/${esc(t.upstream_model)} (p${t.priority}${t.options && typeof t.options.timeout_ms === "number" ? (t.options.timeout_ms ? `, ${msToSecondsText(t.options.timeout_ms)}s` : ", no budget") : ""})`).join("<br>") || "—"}</td>
         <td class="actions"><button class="btn ghost sm" data-health="${esc(a.alias)}">Health</button>
           <button class="btn ghost sm" data-edit='${esc(JSON.stringify(a))}'>Edit</button>
           <button class="btn danger sm" data-del="${esc(a.alias)}">Delete</button></td></tr>`)) +
@@ -1900,8 +1994,8 @@ async function failoverPanel(el) {
     <div class="panel-body">
       <div class="hint">Used by every target whose own options do not set the key.</div>
       <div class="form-grid">
-        <label class="field"><span class="lab">Time budget per target, ms (0 = none)</span>
-          <input id="fo-timeout" type="number" min="0" value="${Number(f.timeout_ms) || 0}" /></label>
+        <label class="field"><span class="lab">Time budget per target, seconds (0 = none)</span>
+          <input id="fo-timeout" type="text" inputmode="decimal" value="${esc(msToSecondsText(Number(f.timeout_ms) || 0))}" /></label>
         <label class="field check"><input type="checkbox" id="fo-auth" ${f.fallback_on_auth ? "checked" : ""} /><span class="lab">Try the next tier on upstream auth/billing errors</span></label>
         <label class="field"><span class="lab">Unavailable backoff start, ms</span>
           <input id="fo-uinit" type="number" min="0" value="${Number(f.unavailable_initial_ms) || 0}" /></label>
@@ -1913,10 +2007,11 @@ async function failoverPanel(el) {
       <div class="panel-actions"><button class="btn" id="fo-save">Save failover defaults</button></div>
     </div></div>`;
   $("#fo-save", el).addEventListener("click", async () => {
-    let breaker;
+    let breaker, timeoutMS;
+    try { timeoutMS = parseSecondsToMs($("#fo-timeout", el).value, "Time budget", false, 86400) ?? 0; } catch (e) { toast(e.message, "err"); return; }
     try { breaker = parseTargetOptions($("#fo-breaker", el).value); } catch (e) { toast("breaker: " + e.message, "err"); return; }
     const x = await api("PUT", "/api/admin/failover", {
-      timeout_ms: Number($("#fo-timeout", el).value) || 0,
+      timeout_ms: timeoutMS,
       fallback_on_auth: $("#fo-auth", el).checked,
       unavailable_initial_ms: Number($("#fo-uinit", el).value) || 0,
       unavailable_max_ms: Number($("#fo-umax", el).value) || 0,
@@ -1934,6 +2029,19 @@ async function editAlias(c, a) {
   let providers = ((pr.data && pr.data.providers) || []).map((p) => p.name);
   if (providers.length === 0) providers = ["mock"];
   const existingAliases = ((ar.data && ar.data.aliases) || []).map((x) => x.alias);
+  // Gateway-wide failover defaults, shown as what an unset target field
+  // means. Optional: without them the fields just say "default".
+  const fr = await api("GET", "/api/admin/failover");
+  const fo = fr.ok && fr.data ? fr.data : null;
+  const fob = fo && fo.breaker && typeof fo.breaker === "object" ? fo.breaker : {};
+  const yesNo = (v) => (typeof v === "boolean" ? ` (${v ? "yes" : "no"})` : "");
+  const dflt = {
+    timeout: !fo ? "default" : Number(fo.timeout_ms) > 0 ? `default ${msToSecondsText(Number(fo.timeout_ms))}` : "default: none",
+    auth: "default" + (fo ? yesNo(!!fo.fallback_on_auth) : ""),
+    brEnabled: "default" + yesNo(fob.enabled),
+    brFailures: Number.isInteger(fob.failures) ? `default ${fob.failures}` : "default",
+    brCooldown: typeof fob.cooldown_ms === "number" ? `default ${msToSecondsText(fob.cooldown_ms)}` : "default",
+  };
 
   const targets = (a.targets && a.targets.length)
     ? a.targets
@@ -1971,8 +2079,8 @@ async function editAlias(c, a) {
     <div class="tgt-head"><span>Tier</span><span>Provider</span><span>Upstream model</span><span>Label</span><span></span></div>
     <div id="al-targets"></div>
     <button type="button" class="btn ghost sm" id="al-add">+ Add target</button>
-    <details class="hint opts-ref"><summary>Target options reference (JSON, optional)</summary>
-      <span class="mono">timeout_ms</span> — time budget (first chunk for streams, whole call otherwise); <span class="mono">fallback_on_auth</span> — try the next tier on upstream auth/billing errors; <span class="mono">breaker</span> — circuit breaker for the tier, e.g. <span class="mono">{"enabled":true,"failures":3,"cooldown_ms":60000}</span>; <span class="mono">recognition_models</span> — recognition model per BCP-47 language, e.g. <span class="mono">{"en-US":"telephony"}</span> (google-speech); <span class="mono">voices</span> — canonical voice → <span class="mono">{"voice","model"}</span> this target speaks it with; <span class="mono">default_voices</span> — voice per BCP-47 language for unmapped voices, e.g. <span class="mono">{"en":{"voice":"onyx"}}</span>; <span class="mono">send_language</span> — <span class="mono">true</span> sends an OpenAI-compatible speech target the request language (multilingual models with one voice); <span class="mono">stream_speech</span> — <span class="mono">true</span> streams this speech target's audio as it arrives.
+    <details class="hint opts-ref"><summary>Advanced (JSON) keys reference</summary>
+      Timeout, auth/billing fallback, thinking and the breaker's on/failures/cooldown have their own fields; an empty field uses the failover default. Advanced holds the rest: <span class="mono">breaker</span> — further circuit breaker keys for the tier, e.g. <span class="mono">{"error_rate":0.5,"window_ms":60000,"min_requests":10,"max_cooldown_ms":600000,"stable_ms":300000}</span>; <span class="mono">recognition_models</span> — recognition model per BCP-47 language, e.g. <span class="mono">{"en-US":"telephony"}</span> (google-speech); <span class="mono">voices</span> — canonical voice → <span class="mono">{"voice","model"}</span> this target speaks it with; <span class="mono">default_voices</span> — voice per BCP-47 language for unmapped voices, e.g. <span class="mono">{"en":{"voice":"onyx"}}</span>; <span class="mono">send_language</span> — <span class="mono">true</span> sends an OpenAI-compatible speech target the request language (multilingual models with one voice); <span class="mono">stream_speech</span> — <span class="mono">true</span> streams this speech target's audio as it arrives.
     </details>
     <div class="form-sect">Behaviour</div>
     <div class="form-grid">
@@ -2051,7 +2159,10 @@ async function editAlias(c, a) {
     modelEl.addEventListener(modelEl.tagName === "SELECT" ? "change" : "input", onModelChange);
     onModelChange();
   }
+  const triOpts = (v, dl) => [["", dl], ["yes", "yes"], ["no", "no"]].map(([val, text]) =>
+    `<option value="${val}" ${val === v ? "selected" : ""}>${esc(text)}</option>`).join("");
   function addRow(t) {
+    const f = targetOptionsForm(t.options);
     const row = document.createElement("div");
     row.className = "tgt";
     row.innerHTML = `
@@ -2060,8 +2171,51 @@ async function editAlias(c, a) {
       <span class="t-model-slot"></span>
       <input class="t-label" placeholder="label (X-Backend-Model)" value="${esc(t.display_label || "")}" aria-label="label" />
       <button type="button" class="btn danger sm t-del" title="remove target">×</button>
-      <input class="t-opts mono" placeholder='options, e.g. {"timeout_ms":2000,"fallback_on_auth":true}' value="${esc(targetOptionsText(t.options))}" aria-label="options" />`;
+      <div class="t-opts">
+        <label class="t-fld"><span class="t-lab">Timeout, s</span>
+          <input class="t-timeout" type="text" inputmode="decimal" placeholder="${esc(dflt.timeout)}" value="${esc(f.timeout)}" title="time budget for this target in seconds; 0 = no budget; empty = failover default" /></label>
+        <label class="t-fld t-auth-fld"><span class="t-lab" title="Fall back on upstream auth/billing errors">Auth/billing fallback</span>
+          <select class="t-auth" title="Fall back on upstream auth/billing errors">${triOpts(f.fallback_on_auth, dflt.auth)}</select></label>
+        <button type="button" class="btn ghost sm t-more-btn" aria-expanded="false"></button>
+      </div>
+      <div class="t-more" hidden>
+        <label class="t-fld"><span class="t-lab">Thinking</span>
+          <select class="t-thinking"><option value="">default (as the client asks)</option><option value="off" ${f.thinking === "off" ? "selected" : ""}>off</option></select></label>
+        <div class="t-breaker"><span class="t-lab t-sub" title="The breaker is per tier: each key comes from the first target of the tier that sets it.">Breaker (tier)</span>
+          <label class="t-fld"><span class="t-lab">On</span><select class="t-br-enabled">${triOpts(f.breaker_enabled, dflt.brEnabled)}</select></label>
+          <label class="t-fld"><span class="t-lab">Failures</span><input class="t-br-failures" type="text" inputmode="numeric" placeholder="${esc(dflt.brFailures)}" value="${esc(f.breaker_failures)}" /></label>
+          <label class="t-fld"><span class="t-lab">Cooldown, s</span><input class="t-br-cooldown" type="text" inputmode="decimal" placeholder="${esc(dflt.brCooldown)}" value="${esc(f.breaker_cooldown)}" /></label></div>
+        <label class="t-fld t-adv"><span class="t-lab">Advanced (JSON)</span>
+          <textarea class="t-advanced mono" rows="2" spellcheck="false" placeholder='e.g. {"voices":{"en-US-Neural2-F":{"voice":"nova"}}}'>${esc(f.advanced)}</textarea></label>
+      </div>`;
     row.querySelector(".t-del").addEventListener("click", () => row.remove());
+    // "More" says what is set behind it, so a collapsed row never hides a
+    // setting from the operator.
+    const moreBtn = row.querySelector(".t-more-btn");
+    const morePanel = row.querySelector(".t-more");
+    const markMore = () => {
+      const set = [];
+      if (row.querySelector(".t-thinking").value) set.push("thinking");
+      if ([".t-br-enabled", ".t-br-failures", ".t-br-cooldown"].some((q) => row.querySelector(q).value.trim())) set.push("breaker");
+      try {
+        for (const k of Object.keys(parseTargetOptions(row.querySelector(".t-advanced").value))) if (!set.includes(k)) set.push(k);
+      } catch (_) { set.push("advanced"); }
+      moreBtn.textContent = (morePanel.hidden ? "More" : "Less") +
+        (set.length ? ` · ${set[0]}${set.length > 1 ? ` +${set.length - 1}` : ""}` : "");
+      moreBtn.title = set.length ? "Set: " + set.join(", ") : "";
+      // The Advanced field grows with its content while the panel is open.
+      const adv = row.querySelector(".t-advanced");
+      if (!morePanel.hidden) { adv.style.height = "auto"; adv.style.height = Math.min(adv.scrollHeight + 2, 220) + "px"; }
+    };
+    row.openMore = () => { morePanel.hidden = false; moreBtn.setAttribute("aria-expanded", "true"); markMore(); };
+    moreBtn.addEventListener("click", () => {
+      morePanel.hidden = !morePanel.hidden;
+      moreBtn.setAttribute("aria-expanded", String(!morePanel.hidden));
+      markMore();
+    });
+    morePanel.addEventListener("input", markMore);
+    morePanel.addEventListener("change", markMore);
+    markMore();
     const slot = row.querySelector(".t-model-slot");
     const provSel = row.querySelector(".t-prov");
     const labelInput = row.querySelector(".t-label");
@@ -2104,13 +2258,28 @@ async function editAlias(c, a) {
     try {
       affinityTTL = parseAffinityTTL($("#al-affinity-ttl", bg).value);
       cacheTTL = parseSynthCacheTTL($("#al-ttscache-ttl", bg).value);
-      tlist = [...tdiv.querySelectorAll(".tgt")].map((r) => ({
-        priority: Number(r.querySelector(".t-prio").value) || 0,
-        provider: r.querySelector(".t-prov").value,
-        upstream_model: r.querySelector(".t-model").value.trim(),
-        display_label: r.querySelector(".t-label").value.trim(),
-        options: parseTargetOptions(r.querySelector(".t-opts").value),
-      })).filter((t) => t.upstream_model);
+      tlist = [...tdiv.querySelectorAll(".tgt")].map((r, i) => {
+        const v = (q) => r.querySelector(q).value;
+        let options;
+        try {
+          options = targetOptionsFromForm({
+            timeout: v(".t-timeout"), fallback_on_auth: v(".t-auth"), thinking: v(".t-thinking"),
+            breaker_enabled: v(".t-br-enabled"), breaker_failures: v(".t-br-failures"),
+            breaker_cooldown: v(".t-br-cooldown"), advanced: v(".t-advanced"),
+          });
+        } catch (e) {
+          // The bad field may sit behind "More": open it so it can be seen.
+          if (!/^timeout/.test(e.message)) r.openMore();
+          throw new Error(`Target ${i + 1}: ${e.message}`);
+        }
+        return {
+          priority: Number(r.querySelector(".t-prio").value) || 0,
+          provider: r.querySelector(".t-prov").value,
+          upstream_model: r.querySelector(".t-model").value.trim(),
+          display_label: r.querySelector(".t-label").value.trim(),
+          options,
+        };
+      }).filter((t) => t.upstream_model);
     } catch (e) { toast(e.message, "err"); return; }
     if (tlist.length === 0) { toast("Add at least one target with a model", "err"); return; }
     const x = await api("PUT", `/api/admin/aliases/${encodeURIComponent(alias)}`,

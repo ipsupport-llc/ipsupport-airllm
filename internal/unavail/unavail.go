@@ -5,10 +5,12 @@
 // this does not replace — see internal/httpapi/tier_breaker.go for the
 // existing per-(alias,tier) circuit breaker).
 //
-// There is no error-rate window, no consecutive-failure counter, and no
-// half-open probe-admission race: the next real request IS the probe — if
-// it also fails, it falls through to the next tier exactly like any other
-// failed attempt, and the caller never knows a "probe" happened. State is
+// There is no error-rate window and no half-open probe-admission race: the
+// next real request IS the probe — if it also fails, it falls through to
+// the next tier exactly like any other failed attempt, and the caller never
+// knows a "probe" happened. The one counter is of consecutive timeouts
+// (AddTimeout), which the caller turns into a mark only after a run of
+// them, since one slow answer does not make a target down. State is
 // shared via Redis so every gateway replica sees the same mark; Redis being
 // unreachable fails OPEN (nothing is treated as unavailable) rather than
 // blocking traffic — this is a politeness optimization, not a safety
@@ -34,6 +36,12 @@ type Key struct {
 
 func (k Key) redisKey() string { return "air:unavail:" + k.Provider + ":" + k.UpstreamModel }
 
+// timeoutsKey holds k's consecutive-timeout count. Its own prefix, so no
+// provider name can make it collide with a redisKey.
+func (k Key) timeoutsKey() string {
+	return "air:unavail-timeouts:" + k.Provider + ":" + k.UpstreamModel
+}
+
 // record is the stored state: skip while now < UntilMS; BackoffMS is the
 // duration that produced UntilMS, read back on the next failure to double
 // from rather than restarting at the initial interval every time.
@@ -48,6 +56,18 @@ type record struct {
 // that a target nobody ever retries doesn't linger forever.
 const recordTTL = time.Hour
 
+// timeoutsTTL is how long a run of timeouts is remembered after its last
+// one: past the longest time budget a target can have (24 hours), so two
+// timeouts of a target that slow still count as a run.
+const timeoutsTTL = 25 * time.Hour
+
+// timeoutRun is the local copy of a target's consecutive-timeout count,
+// forgotten after until like the Redis key it mirrors.
+type timeoutRun struct {
+	n     int
+	until time.Time
+}
+
 // Store holds every tracked target's mark. The zero value is not ready to
 // use — construct with New.
 type Store struct {
@@ -55,13 +75,16 @@ type Store struct {
 	now   func() time.Time
 	mu    sync.Mutex
 	local map[Key]record
+	// timeouts is the local copy of each target's consecutive-timeout
+	// count, used when there is no Redis or it is unreachable.
+	timeouts map[Key]timeoutRun
 }
 
 // New returns a Store backed by rdb. A nil rdb keeps all state in process
 // (every replica sees only its own marks — acceptable for a single-replica
 // deployment, and still strictly better than no tracking at all).
 func New(rdb *redis.Client) *Store {
-	return &Store{rdb: rdb, now: time.Now, local: map[Key]record{}}
+	return &Store{rdb: rdb, now: time.Now, local: map[Key]record{}, timeouts: map[Key]timeoutRun{}}
 }
 
 // WithClock replaces time.Now, for tests. Returns s for chaining at
@@ -125,16 +148,63 @@ func (s *Store) Mark(ctx context.Context, k Key, retryAfter *time.Duration, init
 }
 
 // Clear removes k's mark, so the next failure starts fresh at initial
-// rather than doubling from stale history.
+// rather than doubling from stale history, and its timeout count: what a
+// success calls, so both go in one Redis DEL.
 func (s *Store) Clear(ctx context.Context, k Key) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	delete(s.local, k)
+	delete(s.timeouts, k)
 	s.mu.Unlock()
 	if s.rdb != nil {
-		_ = s.rdb.Del(ctx, k.redisKey()).Err()
+		_ = s.rdb.Del(ctx, k.redisKey(), k.timeoutsKey()).Err()
+	}
+}
+
+// AddTimeout counts one more timeout against k and returns how many there
+// have now been in a row (since the last ResetTimeouts or Clear). The count
+// is shared through Redis, so every replica's timeouts add up; with Redis
+// unreachable it falls back to this replica's own count.
+func (s *Store) AddTimeout(ctx context.Context, k Key) int {
+	if s == nil {
+		return 0
+	}
+	n := 0
+	if s.rdb != nil {
+		pipe := s.rdb.TxPipeline()
+		incr := pipe.Incr(ctx, k.timeoutsKey())
+		pipe.Expire(ctx, k.timeoutsKey(), timeoutsTTL)
+		if _, err := pipe.Exec(ctx); err == nil {
+			n = int(incr.Val())
+		}
+	}
+	now := s.now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if n == 0 {
+		// No Redis, or it is unreachable: count locally.
+		n = 1
+		if run := s.timeouts[k]; now.Before(run.until) {
+			n = run.n + 1
+		}
+	}
+	s.timeouts[k] = timeoutRun{n: n, until: now.Add(timeoutsTTL)}
+	return n
+}
+
+// ResetTimeouts ends k's run of timeouts: it answered, or failed some
+// other way.
+func (s *Store) ResetTimeouts(ctx context.Context, k Key) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	delete(s.timeouts, k)
+	s.mu.Unlock()
+	if s.rdb != nil {
+		_ = s.rdb.Del(ctx, k.timeoutsKey()).Err()
 	}
 }
 

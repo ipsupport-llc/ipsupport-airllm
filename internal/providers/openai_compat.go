@@ -49,10 +49,12 @@ func NewOpenAICompat(name, kind, baseURL, apiKey string) *OpenAICompat {
 
 // SetChatTimeout overrides the ceiling Chat (and Embeddings) enforce on a
 // single non-streaming call. Zero or negative restores defaultChatTimeout.
-// This is independent of a target's own per-attempt timeout_ms
-// (routing.TargetOptions), which bounds the call from the caller's side by
-// cancelling its context; this one is a ceiling the provider applies
-// itself, underneath whatever context it was given.
+// It applies only to a call that carries no budget of its own: a target's
+// timeout_ms (routing.TargetOptions, or the gateway-wide default) is
+// enforced by the caller cancelling the call's context, and recorded on it
+// with WithCallBudget, and a call that carries one skips this ceiling — the
+// budget replaces it. A call the ceiling cuts off while its caller still
+// waits fails with ErrCodeUpstreamTimeout.
 func (p *OpenAICompat) SetChatTimeout(d time.Duration) { p.chatTimeout = d }
 
 func (p *OpenAICompat) Name() string     { return p.name }
@@ -76,13 +78,10 @@ func audioHTTPError(name string, status int, body []byte, header http.Header) er
 }
 
 // Chat performs a non-streaming upstream call.
-func (p *OpenAICompat) Chat(ctx context.Context, in llm.ChatRequest) (llm.ChatResponse, error) {
-	timeout := p.chatTimeout
-	if timeout <= 0 {
-		timeout = defaultChatTimeout
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+func (p *OpenAICompat) Chat(parent context.Context, in llm.ChatRequest) (_ llm.ChatResponse, err error) {
+	ctx, cancel, ceiling := withCeiling(parent, p.chatTimeout)
 	defer cancel()
+	defer func() { err = ceilingError(parent, ctx, p.name, ceiling, err) }()
 
 	body, err := openai.EncodeChatRequest(withoutToolCallExtras(withThinkingOff(p.kind, in)), false)
 	if err != nil {
@@ -119,13 +118,10 @@ func (p *OpenAICompat) ChatStream(ctx context.Context, in llm.ChatRequest, yield
 // OpenAI-compatible vendor this gateway talks to also serves. Vertex does
 // not implement this interface; see its own doc comment for why it stays
 // scoped to chat and streaming only.
-func (p *OpenAICompat) Embeddings(ctx context.Context, in llm.EmbeddingsRequest) (llm.EmbeddingsResponse, error) {
-	timeout := p.chatTimeout
-	if timeout <= 0 {
-		timeout = defaultChatTimeout
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+func (p *OpenAICompat) Embeddings(parent context.Context, in llm.EmbeddingsRequest) (_ llm.EmbeddingsResponse, err error) {
+	ctx, cancel, ceiling := withCeiling(parent, p.chatTimeout)
 	defer cancel()
+	defer func() { err = ceilingError(parent, ctx, p.name, ceiling, err) }()
 
 	body, err := openai.EncodeEmbeddingsRequest(in)
 	if err != nil {

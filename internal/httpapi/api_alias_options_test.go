@@ -30,6 +30,7 @@ func TestPutAliasRejectsInvalidTargetOptions(t *testing.T) {
 		"not an object":           `"fast"`,
 		"array":                   `[1]`,
 		"negative budget":         `{"timeout_ms":-1}`,
+		"budget over 24 hours":    `{"timeout_ms":86400001}`,
 		"budget of wrong type":    `{"timeout_ms":"2s"}`,
 		"flag of wrong type":      `{"fallback_on_auth":"yes"}`,
 		"breaker not an object":   `{"breaker":"on"}`,
@@ -281,6 +282,11 @@ func TestFailoverDefaultsRoundTrip(t *testing.T) {
 	s.handleAdminPutFailover(rec, bad)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("negative default budget: status = %d, want 400 before anything is saved", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	s.handleAdminPutFailover(rec, httptest.NewRequest(http.MethodPut, "/api/admin/failover", strings.NewReader(`{"timeout_ms":86400001}`)))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "at most 86400000") {
+		t.Errorf("default budget over 24h: status = %d (%s), want 400 naming the cap", rec.Code, rec.Body.String())
 	}
 	rec = httptest.NewRecorder()
 	s.handleAdminPutFailover(rec, httptest.NewRequest(http.MethodPut, "/api/admin/failover", strings.NewReader(`{"breaker":{"min_requests":-1}}`)))
