@@ -217,7 +217,7 @@ func runAttempt(ctx context.Context, provider string, budget time.Duration, call
 	// Claim the outcome before looking at it: a budget that runs out after
 	// the call already returned must not relabel that call's own error.
 	returnedFirst := state.CompareAndSwap(attemptPending, attemptReturned)
-	if err != nil && !returnedFirst && state.Load() == attemptExpired && ctx.Err() == nil && !providers.IsUpstreamAnswer(err) {
+	if err != nil && !returnedFirst && state.Load() == attemptExpired && ctx.Err() == nil && !providers.IsUpstreamAnswer(err) && !errors.Is(err, errServedWithoutCall) {
 		err = &providers.Error{
 			Status:    http.StatusGatewayTimeout,
 			Retryable: true,
@@ -541,13 +541,16 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 					}
 				default:
 					// The request itself was the problem: no verdict on the
-					// tier. But the target did answer (the client's own
-					// cancellation returned above), which ends a run of
-					// timeouts.
+					// tier. When the target did answer (the client's own
+					// cancellation returned above), that ends a run of
+					// timeouts; a local failure that never reached it does
+					// not.
 					if adm.Probe {
 						s.breaker.AbandonProbe(ctx, key, set)
 					}
-					s.inBackground(ctx, func(bctx context.Context) { s.unavail.ResetTimeouts(bctx, unavailKey) })
+					if providers.IsUpstreamAnswer(callErr) {
+						s.inBackground(ctx, func(bctx context.Context) { s.unavail.ResetTimeouts(bctx, unavailKey) })
+					}
 					s.metrics.TierAttempt(plan.Alias, tierLabel, "request_error", time.Since(began))
 				}
 
