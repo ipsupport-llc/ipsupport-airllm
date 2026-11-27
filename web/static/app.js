@@ -1785,18 +1785,21 @@ function msToSecondsText(ms) {
 }
 
 // parseSecondsToMs reads a seconds field back as whole milliseconds: empty is
-// undefined (not set), otherwise a plain decimal ("30", "1.5") of at most
-// 86400 (24 h, the server's limit too), above 0 when positive is true.
-// Decimals are fine down to one millisecond.
-function parseSecondsToMs(text, what, positive) {
+// undefined (not set), otherwise a plain decimal ("30", "1.5"), above 0 when
+// positive is true, and at most maxSeconds when given (timeouts: 86400, the
+// server's 24 h limit). Decimals are fine down to one millisecond.
+function parseSecondsToMs(text, what, positive, maxSeconds) {
   const t = String(text ?? "").trim();
   if (!t) return undefined;
   const rule = positive ? "a number of seconds above 0" : "a number of seconds, 0 or more";
   if (!/^\d+(\.\d+)?$/.test(t)) throw new Error(`${what} must be ${rule}, like 30 or 1.5`);
   const s = Number(t);
   if (positive && s === 0) throw new Error(`${what} must be ${rule}`);
-  if (s > 86400) throw new Error(`${what} must be at most 86400 seconds (24 hours)`);
+  if (maxSeconds !== undefined && s > maxSeconds) {
+    throw new Error(`${what} must be at most ${maxSeconds} seconds${maxSeconds === 86400 ? " (24 hours)" : ""}`);
+  }
   const ms = Math.round(s * 1000);
+  if (!Number.isSafeInteger(ms)) throw new Error(`${what} is too large`);
   if (s > 0 && ms === 0) throw new Error(`${what} must be at least 0.001 seconds`);
   return ms;
 }
@@ -1811,9 +1814,8 @@ function parseSecondsToMs(text, what, positive) {
 function targetOptionsForm(o) {
   const rest = o && typeof o === "object" && !Array.isArray(o) ? { ...o } : {};
   const tri = (v) => (v === true ? "yes" : "no");
-  const msOK = (v, min) => Number.isInteger(v) && v >= min && v <= 86400000;
   const f = { timeout: "", fallback_on_auth: "", thinking: "", breaker_enabled: "", breaker_failures: "", breaker_cooldown: "" };
-  if (msOK(rest.timeout_ms, 0)) { f.timeout = msToSecondsText(rest.timeout_ms); delete rest.timeout_ms; }
+  if (Number.isInteger(rest.timeout_ms) && rest.timeout_ms >= 0 && rest.timeout_ms <= 86400000) { f.timeout = msToSecondsText(rest.timeout_ms); delete rest.timeout_ms; }
   if (typeof rest.fallback_on_auth === "boolean") { f.fallback_on_auth = tri(rest.fallback_on_auth); delete rest.fallback_on_auth; }
   if (rest.thinking === "off") { f.thinking = "off"; delete rest.thinking; }
   const b = rest.breaker;
@@ -1821,7 +1823,7 @@ function targetOptionsForm(o) {
     const br = { ...b };
     if (typeof br.enabled === "boolean") { f.breaker_enabled = tri(br.enabled); delete br.enabled; }
     if (Number.isInteger(br.failures) && br.failures > 0) { f.breaker_failures = String(br.failures); delete br.failures; }
-    if (msOK(br.cooldown_ms, 1)) { f.breaker_cooldown = msToSecondsText(br.cooldown_ms); delete br.cooldown_ms; }
+    if (Number.isSafeInteger(br.cooldown_ms) && br.cooldown_ms > 0) { f.breaker_cooldown = msToSecondsText(br.cooldown_ms); delete br.cooldown_ms; }
     if (Object.keys(br).length) rest.breaker = br; else delete rest.breaker;
   }
   f.advanced = targetOptionsText(rest);
@@ -1831,7 +1833,8 @@ function targetOptionsForm(o) {
 // targetOptionsFromForm is targetOptionsForm in reverse: the Advanced JSON is
 // the base, every structured field that is set adds its key, and an unset
 // field leaves the key out (or as Advanced has it). A key set both in its
-// field and in Advanced is refused, so neither value is dropped unseen.
+// field and in Advanced is refused, so neither value is dropped unseen; a
+// null in Advanced is unset (the server reads it so) and the field fills it.
 // Throws with the field's or key's name on bad input.
 function targetOptionsFromForm(f) {
   let o;
@@ -1839,11 +1842,11 @@ function targetOptionsFromForm(f) {
   const both = (key) => new Error(`${key} is set both in its field and in Advanced (JSON); keep one`);
   const put = (obj, key, v, name) => {
     if (v === undefined) return;
-    if (key in obj) throw both(name || key);
+    if (obj[key] !== undefined && obj[key] !== null) throw both(name || key);
     obj[key] = v;
   };
   const tri = (v) => (v === "yes" ? true : v === "no" ? false : undefined);
-  put(o, "timeout_ms", parseSecondsToMs(f.timeout, "timeout"));
+  put(o, "timeout_ms", parseSecondsToMs(f.timeout, "timeout", false, 86400));
   put(o, "fallback_on_auth", tri(f.fallback_on_auth));
   put(o, "thinking", f.thinking || undefined);
   const br = {};
@@ -1857,7 +1860,7 @@ function targetOptionsFromForm(f) {
   const cooldown = parseSecondsToMs(f.breaker_cooldown, "breaker cooldown", true);
   if (cooldown !== undefined) br.cooldown_ms = cooldown;
   if (Object.keys(br).length) {
-    if (o.breaker !== undefined && (o.breaker === null || typeof o.breaker !== "object" || Array.isArray(o.breaker))) {
+    if (o.breaker != null && (typeof o.breaker !== "object" || Array.isArray(o.breaker))) {
       throw new Error("Advanced (JSON): breaker must be a JSON object");
     }
     const merged = { ...(o.breaker || {}) };
@@ -2005,7 +2008,7 @@ async function failoverPanel(el) {
     </div></div>`;
   $("#fo-save", el).addEventListener("click", async () => {
     let breaker, timeoutMS;
-    try { timeoutMS = parseSecondsToMs($("#fo-timeout", el).value, "Time budget") ?? 0; } catch (e) { toast(e.message, "err"); return; }
+    try { timeoutMS = parseSecondsToMs($("#fo-timeout", el).value, "Time budget", false, 86400) ?? 0; } catch (e) { toast(e.message, "err"); return; }
     try { breaker = parseTargetOptions($("#fo-breaker", el).value); } catch (e) { toast("breaker: " + e.message, "err"); return; }
     const x = await api("PUT", "/api/admin/failover", {
       timeout_ms: timeoutMS,
