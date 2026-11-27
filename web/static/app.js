@@ -1785,14 +1785,17 @@ function msToSecondsText(ms) {
 }
 
 // parseSecondsToMs reads a seconds field back as whole milliseconds: empty is
-// undefined (not set), otherwise a non-negative number, or a positive one when
-// positive is true. Decimals are fine down to one millisecond.
+// undefined (not set), otherwise a plain decimal ("30", "1.5") of at most
+// 86400 (24 h, the server's limit too), above 0 when positive is true.
+// Decimals are fine down to one millisecond.
 function parseSecondsToMs(text, what, positive) {
   const t = String(text ?? "").trim();
   if (!t) return undefined;
-  const s = Number(t);
   const rule = positive ? "a number of seconds above 0" : "a number of seconds, 0 or more";
-  if (!Number.isFinite(s) || s < 0 || (positive && s === 0)) throw new Error(`${what} must be ${rule}`);
+  if (!/^\d+(\.\d+)?$/.test(t)) throw new Error(`${what} must be ${rule}, like 30 or 1.5`);
+  const s = Number(t);
+  if (positive && s === 0) throw new Error(`${what} must be ${rule}`);
+  if (s > 86400) throw new Error(`${what} must be at most 86400 seconds (24 hours)`);
   const ms = Math.round(s * 1000);
   if (s > 0 && ms === 0) throw new Error(`${what} must be at least 0.001 seconds`);
   return ms;
@@ -1801,22 +1804,24 @@ function parseSecondsToMs(text, what, positive) {
 // targetOptionsForm splits a target's stored options into the alias editor's
 // structured fields (strings, "" = not set) and the Advanced JSON text, which
 // holds every other key, including breaker keys without a field of their
-// own. A key is lifted into a field only when it has the type that field
-// writes back, so a round trip never changes it. Top-level so
-// web/targetoptions.test.mjs can extract it.
+// own. A key is lifted into a field only when it has a type and range that
+// field accepts on save, so a round trip never changes it and a stored value
+// the field would refuse stays in Advanced instead of blocking an unrelated
+// edit. Top-level so web/targetoptions.test.mjs can extract it.
 function targetOptionsForm(o) {
   const rest = o && typeof o === "object" && !Array.isArray(o) ? { ...o } : {};
   const tri = (v) => (v === true ? "yes" : "no");
+  const msOK = (v, min) => Number.isInteger(v) && v >= min && v <= 86400000;
   const f = { timeout: "", fallback_on_auth: "", thinking: "", breaker_enabled: "", breaker_failures: "", breaker_cooldown: "" };
-  if (typeof rest.timeout_ms === "number") { f.timeout = msToSecondsText(rest.timeout_ms); delete rest.timeout_ms; }
+  if (msOK(rest.timeout_ms, 0)) { f.timeout = msToSecondsText(rest.timeout_ms); delete rest.timeout_ms; }
   if (typeof rest.fallback_on_auth === "boolean") { f.fallback_on_auth = tri(rest.fallback_on_auth); delete rest.fallback_on_auth; }
   if (rest.thinking === "off") { f.thinking = "off"; delete rest.thinking; }
   const b = rest.breaker;
   if (b && typeof b === "object" && !Array.isArray(b)) {
     const br = { ...b };
     if (typeof br.enabled === "boolean") { f.breaker_enabled = tri(br.enabled); delete br.enabled; }
-    if (Number.isInteger(br.failures)) { f.breaker_failures = String(br.failures); delete br.failures; }
-    if (typeof br.cooldown_ms === "number") { f.breaker_cooldown = msToSecondsText(br.cooldown_ms); delete br.cooldown_ms; }
+    if (Number.isInteger(br.failures) && br.failures > 0) { f.breaker_failures = String(br.failures); delete br.failures; }
+    if (msOK(br.cooldown_ms, 1)) { f.breaker_cooldown = msToSecondsText(br.cooldown_ms); delete br.cooldown_ms; }
     if (Object.keys(br).length) rest.breaker = br; else delete rest.breaker;
   }
   f.advanced = targetOptionsText(rest);
@@ -1824,18 +1829,23 @@ function targetOptionsForm(o) {
 }
 
 // targetOptionsFromForm is targetOptionsForm in reverse: the Advanced JSON is
-// the base, every structured field that is set overwrites its key, and an
-// unset field leaves the key out (or as Advanced has it). Throws with the
-// field's name on bad input.
+// the base, every structured field that is set adds its key, and an unset
+// field leaves the key out (or as Advanced has it). A key set both in its
+// field and in Advanced is refused, so neither value is dropped unseen.
+// Throws with the field's or key's name on bad input.
 function targetOptionsFromForm(f) {
   let o;
   try { o = parseTargetOptions(f.advanced); } catch (e) { throw new Error("Advanced (JSON): " + e.message); }
+  const both = (key) => new Error(`${key} is set both in its field and in Advanced (JSON); keep one`);
+  const put = (obj, key, v, name) => {
+    if (v === undefined) return;
+    if (key in obj) throw both(name || key);
+    obj[key] = v;
+  };
   const tri = (v) => (v === "yes" ? true : v === "no" ? false : undefined);
-  const timeout = parseSecondsToMs(f.timeout, "timeout");
-  if (timeout !== undefined) o.timeout_ms = timeout;
-  const auth = tri(f.fallback_on_auth);
-  if (auth !== undefined) o.fallback_on_auth = auth;
-  if (f.thinking) o.thinking = f.thinking;
+  put(o, "timeout_ms", parseSecondsToMs(f.timeout, "timeout"));
+  put(o, "fallback_on_auth", tri(f.fallback_on_auth));
+  put(o, "thinking", f.thinking || undefined);
   const br = {};
   const enabled = tri(f.breaker_enabled);
   if (enabled !== undefined) br.enabled = enabled;
@@ -1850,7 +1860,9 @@ function targetOptionsFromForm(f) {
     if (o.breaker !== undefined && (o.breaker === null || typeof o.breaker !== "object" || Array.isArray(o.breaker))) {
       throw new Error("Advanced (JSON): breaker must be a JSON object");
     }
-    o.breaker = { ...(o.breaker || {}), ...br };
+    const merged = { ...(o.breaker || {}) };
+    for (const [k, v] of Object.entries(br)) put(merged, k, v, "breaker." + k);
+    o.breaker = merged;
   }
   return o;
 }
@@ -1949,7 +1961,7 @@ async function adminAliases(c) {
       al.map((a) => `<tr><td class="mono">${esc(a.alias)}</td><td>${esc(a.protocol)}</td>
         <td>${esc(a.strategy || "round_robin")}</td>
         <td>${a.dlp_model_scan ? `<span class="badge neutral">on</span>` : `<span class="badge revoked">off</span>`}</td>
-        <td class="mono">${(a.targets || []).map((t) => `${esc(t.provider)}/${esc(t.upstream_model)} (p${t.priority}${t.options && typeof t.options.timeout_ms === "number" ? (t.options.timeout_ms ? `, ${msToSecondsText(t.options.timeout_ms)}s` : ", no timeout") : ""})`).join("<br>") || "—"}</td>
+        <td class="mono">${(a.targets || []).map((t) => `${esc(t.provider)}/${esc(t.upstream_model)} (p${t.priority}${t.options && typeof t.options.timeout_ms === "number" ? (t.options.timeout_ms ? `, ${msToSecondsText(t.options.timeout_ms)}s` : ", no budget") : ""})`).join("<br>") || "—"}</td>
         <td class="actions"><button class="btn ghost sm" data-health="${esc(a.alias)}">Health</button>
           <button class="btn ghost sm" data-edit='${esc(JSON.stringify(a))}'>Edit</button>
           <button class="btn danger sm" data-del="${esc(a.alias)}">Delete</button></td></tr>`)) +
