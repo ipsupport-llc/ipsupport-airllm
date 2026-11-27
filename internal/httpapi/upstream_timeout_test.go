@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/llm"
+	"github.com/ipsupport-llc/ipsupport-airllm/internal/metrics"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/providers"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/routing"
 	"github.com/ipsupport-llc/ipsupport-airllm/internal/unavail"
@@ -19,13 +20,23 @@ import (
 
 // These tests pin the interplay between a target's timeout_ms and the
 // provider's own non-streaming ceiling (UPSTREAM_CHAT_TIMEOUT), and that a
-// timeout of either kind does not mark the target unavailable.
+// timeout of either kind marks the target unavailable only after
+// timeoutsBeforeUnavailable of them in a row.
 
 const testCeiling = 50 * time.Millisecond
 
 // slowUpstream answers every call after delay (a chat completion, or an SSE
 // stream when the request asks for one), counting calls.
 func slowUpstream(t *testing.T, delay time.Duration) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var d atomic.Int64
+	d.Store(int64(delay))
+	return variableUpstream(t, &d)
+}
+
+// variableUpstream is slowUpstream with a delay that can change between
+// calls.
+func variableUpstream(t *testing.T, delay *atomic.Int64) (*httptest.Server, *atomic.Int32) {
 	t.Helper()
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -34,7 +45,7 @@ func slowUpstream(t *testing.T, delay time.Duration) (*httptest.Server, *atomic.
 		select {
 		case <-r.Context().Done():
 			return
-		case <-time.After(delay):
+		case <-time.After(time.Duration(delay.Load())):
 		}
 		if strings.Contains(string(body), `"stream":true`) {
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -225,5 +236,107 @@ func TestStreamIgnoresCeiling(t *testing.T) {
 		if content != "ok" {
 			t.Errorf("timeout_ms=%v: content = %q, want ok", opts.TimeoutMS, content)
 		}
+	}
+}
+
+// TestThirdTimeoutInARowMarksUnavailable runs with the breaker off, the
+// default: one or two timeouts leave the target in rotation, the third in
+// a row marks it, and the next request skips it without a call.
+func TestThirdTimeoutInARowMarksUnavailable(t *testing.T) {
+	up, calls := slowUpstream(t, 150*time.Millisecond)
+	s := newUnavailTestServer(t, newFakeClock(), slowProvider(up))
+	plan := soloPlan(routing.TargetOptions{})
+
+	for i := 1; i < timeoutsBeforeUnavailable; i++ {
+		_, err := unaryChat(s, plan)
+		wantTimeout(t, s, err, providers.ErrCodeUpstreamTimeout)
+	}
+	if _, err := unaryChat(s, plan); attemptFailureReason(err) != "timeout" {
+		t.Fatalf("third request err = %v, want a timeout", err)
+	}
+	if _, skip := s.unavail.Check(context.Background(), slowKey); !skip {
+		t.Fatal("the third timeout in a row did not mark the target unavailable")
+	}
+	if _, err := unaryChat(s, plan); !errors.Is(err, errAllUnavailable) {
+		t.Errorf("fourth request err = %v, want %v", err, errAllUnavailable)
+	}
+	if calls.Load() != 3 {
+		t.Errorf("upstream called %d times, want 3", calls.Load())
+	}
+}
+
+// TestSuccessResetsTheTimeoutRun: timeouts only count while nothing
+// answers in between.
+func TestSuccessResetsTheTimeoutRun(t *testing.T) {
+	var delay atomic.Int64
+	up, calls := variableUpstream(t, &delay)
+	s := newUnavailTestServer(t, newFakeClock(), slowProvider(up))
+	plan := soloPlan(routing.TargetOptions{})
+	timeouts := func(n int) {
+		t.Helper()
+		delay.Store(int64(150 * time.Millisecond))
+		for i := 0; i < n; i++ {
+			_, err := unaryChat(s, plan)
+			wantTimeout(t, s, err, providers.ErrCodeUpstreamTimeout) // also: still unmarked
+		}
+	}
+
+	timeouts(2)
+	delay.Store(0)
+	if _, err := unaryChat(s, plan); err != nil {
+		t.Fatalf("fast answer: %v", err)
+	}
+	timeouts(2)
+	if calls.Load() != 5 {
+		t.Errorf("upstream called %d times, want 5", calls.Load())
+	}
+}
+
+// TestFailedTargetIsNotRetriedOnABusyPass: a busy target sends the request
+// round the plan again, but a target that already failed in this request is
+// not called a second time.
+func TestFailedTargetIsNotRetriedOnABusyPass(t *testing.T) {
+	up, calls := slowUpstream(t, time.Second)
+	reg := providers.NewRegistry()
+	reg.Register(providers.NewOpenAICompat("slow", "openai", up.URL, ""), 0)
+	reg.Register(providers.NewMock("mock-ok"), 1)
+	s := &Server{router: routing.NewRouter(nil), metrics: metrics.New()}
+	s.regPtr.Store(reg)
+	busy, _ := reg.Get("mock-ok")
+	if !busy.Acquire() {
+		t.Fatal("could not occupy mock-ok's only slot")
+	}
+	defer busy.Release()
+	plan := budgetPlan(routing.Target{Provider: "slow", UpstreamModel: "m", Options: routing.TargetOptions{TimeoutMS: ms(50)}})
+
+	_, err := unaryChat(s, plan)
+	if attemptFailureReason(err) != "timeout" {
+		t.Errorf("err = %v, want the slow target's timeout", err)
+	}
+	if calls.Load() != 1 {
+		t.Errorf("slow target called %d times, want 1: it already failed in this request", calls.Load())
+	}
+}
+
+// TestRunAttemptKeepsAnUpstreamRefusalPastTheBudget: a non-retryable
+// upstream answer that comes back as the budget runs out is that answer,
+// not a timeout; the budget's own cancellation still is one.
+func TestRunAttemptKeepsAnUpstreamRefusalPastTheBudget(t *testing.T) {
+	refusal := &providers.Error{Status: http.StatusBadRequest, Message: "upstream slow returned 400: bad request"}
+	_, err := runAttempt(context.Background(), "slow", 10*time.Millisecond, func(ctx context.Context, _ func() bool) error {
+		<-ctx.Done()
+		return refusal
+	})
+	if err != refusal {
+		t.Errorf("err = %v, want the upstream's 400 kept", err)
+	}
+
+	_, err = runAttempt(context.Background(), "slow", 10*time.Millisecond, func(ctx context.Context, _ func() bool) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	var pe *providers.Error
+	if !errors.As(err, &pe) || pe.Code != errCodeTierTimeout {
+		t.Errorf("err = %v, want the budget's cancellation relabelled tier_timeout", err)
 	}
 }

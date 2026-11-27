@@ -175,6 +175,11 @@ type VoiceChoice struct {
 // voiceGenders are the genders a voice may be described with.
 var voiceGenders = map[string]bool{"": true, "male": true, "female": true, "neutral": true}
 
+// MaxTimeoutMS is the largest timeout_ms a target or the gateway-wide
+// default may have: 24 hours, far past any real call and far short of
+// overflowing a time.Duration.
+const MaxTimeoutMS = 86_400_000
+
 // ParseTargetOptions decodes a stored or submitted options object. Empty
 // input and JSON null are the empty object. Anything that is not an object,
 // or a known key of the wrong type or out of range, is an error.
@@ -192,6 +197,9 @@ func ParseTargetOptions(raw []byte) (TargetOptions, error) {
 	}
 	if o.TimeoutMS != nil && *o.TimeoutMS < 0 {
 		return o, fmt.Errorf("invalid options: timeout_ms must not be negative")
+	}
+	if o.TimeoutMS != nil && *o.TimeoutMS > MaxTimeoutMS {
+		return o, fmt.Errorf("invalid options: timeout_ms must be at most %d (24 hours)", MaxTimeoutMS)
 	}
 	if err := o.Breaker.Validate(); err != nil {
 		return o, fmt.Errorf("invalid options: %w", err)

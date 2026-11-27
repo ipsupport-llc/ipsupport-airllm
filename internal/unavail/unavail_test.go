@@ -181,4 +181,59 @@ func TestStoreFailsOpenWithoutRedis(t *testing.T) {
 	if remaining, skip := s.Check(ctx, k); !skip || remaining <= 0 {
 		t.Errorf("Check right after Mark with Redis down: skip=%v remaining=%v, want the local fallback to report skip=true", skip, remaining)
 	}
+	if n := s.AddTimeout(ctx, k); n != 1 {
+		t.Errorf("AddTimeout with Redis down = %d, want 1 from the local count", n)
+	}
+}
+
+func TestTimeoutRunCountsUntilReset(t *testing.T) {
+	s := New(nil)
+	ctx, k := context.Background(), testKey()
+	for want := 1; want <= 3; want++ {
+		if n := s.AddTimeout(ctx, k); n != want {
+			t.Fatalf("AddTimeout = %d, want %d", n, want)
+		}
+	}
+	s.ResetTimeouts(ctx, k)
+	if n := s.AddTimeout(ctx, k); n != 1 {
+		t.Errorf("after ResetTimeouts: AddTimeout = %d, want 1", n)
+	}
+	s.Clear(ctx, k)
+	if n := s.AddTimeout(ctx, k); n != 1 {
+		t.Errorf("after Clear: AddTimeout = %d, want 1", n)
+	}
+	if n := s.AddTimeout(ctx, Key{Provider: "other", UpstreamModel: "m"}); n != 1 {
+		t.Errorf("another target: AddTimeout = %d, want its own count of 1", n)
+	}
+}
+
+// TestTimeoutRunIsSharedThroughRedis: every replica's timeouts add up, and
+// a reset on one replica ends the run for all.
+func TestTimeoutRunIsSharedThroughRedis(t *testing.T) {
+	dsn := os.Getenv("TEST_REDIS_URL")
+	if dsn == "" {
+		t.Skip("TEST_REDIS_URL not set; skipping real-Redis timeout-count test")
+	}
+	opt, err := redis.ParseURL(dsn)
+	if err != nil {
+		t.Fatalf("parse redis url: %v", err)
+	}
+	rdb := redis.NewClient(opt)
+	t.Cleanup(func() { _ = rdb.Close() })
+	k := Key{Provider: fmt.Sprintf("unavail-timeouts-%d", time.Now().UnixNano()), UpstreamModel: "m"}
+	t.Cleanup(func() { _ = rdb.Del(context.Background(), k.timeoutsKey()).Err() })
+	if !strings.HasPrefix(k.timeoutsKey(), "air:") {
+		t.Fatalf("redis key %q must live under the air: keyspace", k.timeoutsKey())
+	}
+
+	ctx := context.Background()
+	a, b := New(rdb), New(rdb)
+	a.AddTimeout(ctx, k)
+	if n := b.AddTimeout(ctx, k); n != 2 {
+		t.Errorf("second replica's AddTimeout = %d, want 2", n)
+	}
+	a.ResetTimeouts(ctx, k)
+	if n := b.AddTimeout(ctx, k); n != 1 {
+		t.Errorf("after a reset on the other replica: AddTimeout = %d, want 1", n)
+	}
 }

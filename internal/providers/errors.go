@@ -57,9 +57,16 @@ type Error struct {
 	// body carried one. Message holds the full detail for logs (provider
 	// name, status, raw body); this is the part a client may be shown.
 	VendorMessage string
+	// cause is the failure underneath a transport error (no upstream
+	// answer at all), so errors.Is can see e.g. a context deadline
+	// through it. nil for an error built from a real upstream answer.
+	cause error
 }
 
 func (e *Error) Error() string { return e.Message }
+
+// Unwrap is the transport failure underneath e, or nil.
+func (e *Error) Unwrap() error { return e.cause }
 
 // IsRetryable reports whether err is a retryable provider Error.
 func IsRetryable(err error) bool {
@@ -256,9 +263,9 @@ func classifyErrorBody(body []byte) string {
 // (cost, concurrency slot, latency) nobody is waiting for anymore.
 func transportError(err error) *Error {
 	if errors.Is(err, context.Canceled) {
-		return &Error{Status: http.StatusBadGateway, Retryable: false, Message: err.Error()}
+		return &Error{Status: http.StatusBadGateway, Retryable: false, Message: err.Error(), cause: err}
 	}
-	return &Error{Status: http.StatusBadGateway, Retryable: true, Message: err.Error()}
+	return &Error{Status: http.StatusBadGateway, Retryable: true, Message: err.Error(), cause: err}
 }
 
 // ollamaModelNotFoundPattern matches Ollama's reply for a model it has not

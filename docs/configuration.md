@@ -151,7 +151,7 @@ nothing changes until an operator opts in.
 
 | Field | Default | Meaning |
 |-------|---------|---------|
-| `timeout_ms` | `0` | Time budget per target attempt; `0` means none. For a **streamed** chat it bounds the wait for the **first chunk carrying text or a tool call** — the role-only and empty deltas a model sends while it thinks do not count, so a tier that thinks past its budget falls through instead of holding the client silent (a slow stream that has started is never cut); for a unary chat, a transcription or a speech request it bounds the **whole call**, and for a non-streaming chat or embeddings call it replaces `UPSTREAM_CHAT_TIMEOUT`, so it may be longer than that ceiling. A breach abandons the attempt and moves to the next target, exactly like a retryable error; the client sees one clean response from whichever target answers, or `504` when no target does. A breach counts against the tier's breaker but does not mark the target unavailable (see "Target unavailability" below). |
+| `timeout_ms` | `0` | Time budget per target attempt; `0` means none. For a **streamed** chat it bounds the wait for the **first chunk carrying text or a tool call** — the role-only and empty deltas a model sends while it thinks do not count, so a tier that thinks past its budget falls through instead of holding the client silent (a slow stream that has started is never cut); for a unary chat, a transcription or a speech request it bounds the **whole call**, and for a non-streaming chat or embeddings call it replaces `UPSTREAM_CHAT_TIMEOUT`, so it may be longer than that ceiling. A breach abandons the attempt and moves to the next target, exactly like a retryable error; the client sees one clean response from whichever target answers, or `504` when no target does. A breach counts against the tier's breaker; it marks the target unavailable only as the third timeout in a row (see "Target unavailability" below). A target that failed is not called again within the same request. At most `86400000` (24 hours). |
 | `fallback_on_auth` | `false` | Also move on when the upstream refuses the gateway's own credentials or account: HTTP `401`/`403`, and Google `PERMISSION_DENIED`, `UNAUTHENTICATED`, `FAILED_PRECONDITION` or a `BILLING_DISABLED` reason. Off, such an error fails the request as before. |
 | `unavailable_initial_ms` | `200` | Gateway-wide only (no per-target override) — see "Target unavailability" below. |
 | `unavailable_max_ms` | `25600` | Gateway-wide only — see "Target unavailability" below. |
@@ -311,12 +311,17 @@ to the exact same target.
 
 A tier-attributable failure (the same ones the breaker counts — see "Only
 failures that say something about the tier count" above) marks its
-`(provider, upstream_model)` unavailable — except a timeout: a target that
-ran past its `timeout_ms` or, without one, past `UPSTREAM_CHAT_TIMEOUT` is
-slow, not down. It counts against the breaker (so a target that really
-hangs still trips it by failure rate) and the request moves on to the next
-tier, but the target is not marked and the next request still tries it.
-Such an attempt logs `tier attempt failed` with reason `timeout`. The rest of that request is
+`(provider, upstream_model)` unavailable. A timeout — a target that ran
+past its `timeout_ms` or, without one, past `UPSTREAM_CHAT_TIMEOUT` — is
+treated as slow rather than down: it logs `tier attempt failed` with reason
+`timeout`, counts against the breaker and moves the request on to the next
+tier, but marks the target only when it is the **third timeout in a row**
+for that `(provider, upstream_model)`, counted across every alias and
+replica. Any answer from the target in between, or any other failure
+(which marks it at once), starts the count again; while the run goes on,
+each further timeout marks it again. One slow request therefore never
+takes a target out of rotation, but one that hangs on every call does,
+breaker or no breaker. The rest of that request is
 unaffected — it still tries every other target as normal — but the next
 request that resolves to that exact target skips it without a call, until
 the mark expires. There is no separate background prober: the next real
@@ -344,7 +349,8 @@ Redis unreachable fails open (nothing is treated as unavailable, same as
 before this existed) rather than blocking traffic.
 
 Logs `target marked unavailable` with `provider`, `upstream_model`,
-`duration_ms` and `source` (`retry_after` or `default_backoff`). A skipped
+`duration_ms` and `source` (`retry_after`, `default_backoff`, or
+`consecutive_timeouts` for a mark after a run of timeouts). A skipped
 attempt counts in the `tier attempt failed` / fallback bookkeeping with
 reason `unavailable`, the same as a `quarantined` breaker skip. A request
 whose every target is marked unavailable fails with `503`, as when every tier

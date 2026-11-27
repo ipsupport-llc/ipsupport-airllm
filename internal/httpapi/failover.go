@@ -66,6 +66,9 @@ func (s *Server) applyFailover(raw []byte) {
 	if cfg.TimeoutMS < 0 {
 		cfg.TimeoutMS = 0
 	}
+	if cfg.TimeoutMS > routing.MaxTimeoutMS {
+		cfg.TimeoutMS = routing.MaxTimeoutMS
+	}
 	if cfg.Breaker.Validate() != nil {
 		cfg.Breaker = routing.BreakerOptions{}
 	}
@@ -101,6 +104,10 @@ func (s *Server) handleAdminPutFailover(w http.ResponseWriter, r *http.Request) 
 	}
 	if body.TimeoutMS < 0 {
 		writeControlError(w, http.StatusBadRequest, "timeout_ms must not be negative")
+		return
+	}
+	if body.TimeoutMS > routing.MaxTimeoutMS {
+		writeControlError(w, http.StatusBadRequest, fmt.Sprintf("timeout_ms must be at most %d (24 hours)", routing.MaxTimeoutMS))
 		return
 	}
 	if err := body.Breaker.Validate(); err != nil {
@@ -159,6 +166,19 @@ var errServedWithoutCall = errors.New("served without an upstream call")
 // failure would.
 const errCodeTierTimeout = "tier_timeout"
 
+// timeoutsBeforeUnavailable is how many timeouts in a row, with no answer
+// in between, mark a target unavailable. One slow answer is not a down
+// target; a run of them is one that hangs, and with the breaker off by
+// default nothing else would stop every request from waiting on it.
+const timeoutsBeforeUnavailable = 3
+
+// attemptID names one target of a plan, to remember within a request
+// which targets already failed.
+type attemptID struct {
+	tier                    int
+	provider, upstreamModel string
+}
+
 // Attempt states for runAttempt's budget race. Whichever of the timer, a
 // first chunk and the call's return moves the state off pending first wins.
 const (
@@ -198,7 +218,7 @@ func runAttempt(ctx context.Context, provider string, budget time.Duration, call
 	// Claim the outcome before looking at it: a budget that runs out after
 	// the call already returned must not relabel that call's own error.
 	returnedFirst := state.CompareAndSwap(attemptPending, attemptReturned)
-	if err != nil && !returnedFirst && state.Load() == attemptExpired && ctx.Err() == nil {
+	if err != nil && !returnedFirst && state.Load() == attemptExpired && ctx.Err() == nil && !isFinalAnswer(err) {
 		err = &providers.Error{
 			Status:    http.StatusGatewayTimeout,
 			Retryable: true,
@@ -207,6 +227,15 @@ func runAttempt(ctx context.Context, provider string, budget time.Duration, call
 		}
 	}
 	return state.Load() == attemptCommitted, err
+}
+
+// isFinalAnswer reports whether err is a non-retryable provider error that
+// is not the budget's own cancellation: an upstream's real refusal that
+// arrived as the budget ran out, which runAttempt keeps rather than
+// relabelling as a timeout.
+func isFinalAnswer(err error) bool {
+	var pe *providers.Error
+	return errors.As(err, &pe) && !pe.Retryable && !errors.Is(err, context.Canceled)
 }
 
 // execResult is what executing a plan did: the target that served the
@@ -358,6 +387,9 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 	}()
 
 	sawBusy := false
+	// failed is every target that already failed in this request: a later
+	// pass over the plan (after a busy target) does not call it again.
+	failed := map[attemptID]bool{}
 	// forced is the tier the last-resort pass forces a probe on, -1 on the
 	// first pass; forcedCall is whether that pass made its one call.
 	forced, forcedCall := -1, false
@@ -381,6 +413,10 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 					continue
 				}
 				if forced >= 0 && (t.Tier != forced || forcedCall) {
+					continue
+				}
+				id := attemptID{tier: t.Tier, provider: t.Provider, upstreamModel: t.UpstreamModel}
+				if failed[id] {
 					continue
 				}
 				res.Target = t
@@ -456,6 +492,7 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 				recordSuccess := func() {
 					if recorded.CompareAndSwap(false, true) {
 						s.breaker.Record(ctx, key, set, false, adm.Probe)
+						s.unavail.ResetTimeouts(ctx, unavailKey)
 						s.metrics.TierAttempt(plan.Alias, tierLabel, "success", time.Since(began))
 						if plan.Strategy == "lcr" {
 							s.lcr.Record(ctx, lcr.Key{Provider: t.Provider, UpstreamModel: t.UpstreamModel}, true)
@@ -494,12 +531,17 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 				case countsAgainstTier(pol, callErr):
 					s.breaker.Record(ctx, key, set, true, adm.Probe)
 					s.metrics.TierAttempt(plan.Alias, tierLabel, "failure", time.Since(began))
-					// A timeout is a slow answer, not a down target: the
-					// breaker still counts it, so one that really hangs
-					// trips by failure rate, but it does not shut the
-					// target off for every other client.
-					if !isTimeout(callErr) {
+					// A timeout is a slow answer, not a down target: it
+					// marks the target only once timeoutsBeforeUnavailable
+					// of them come in a row. Any other failure marks it at
+					// once and ends such a run.
+					if isTimeout(callErr) {
+						if s.unavail.AddTimeout(ctx, unavailKey) >= timeoutsBeforeUnavailable {
+							s.markUnavailable(ctx, unavailKey, callErr)
+						}
+					} else {
 						s.markUnavailable(ctx, unavailKey, callErr)
+						s.unavail.ResetTimeouts(ctx, unavailKey)
 					}
 					if plan.Strategy == "lcr" {
 						s.lcr.Record(ctx, lcr.Key{Provider: unavailKey.Provider, UpstreamModel: unavailKey.UpstreamModel}, false)
@@ -519,6 +561,7 @@ func (s *Server) executePlan(ctx context.Context, plan *routing.Plan, supports f
 					return res, true, callErr
 				}
 				lastErr = callErr
+				failed[id] = true
 				logAttemptFailure(plan.Alias, t, callErr, time.Since(began), session)
 				if !pol.fallsThrough(callErr) {
 					return res, false, callErr
@@ -581,7 +624,7 @@ func logAttemptFailure(alias string, t routing.Target, err error, latency time.D
 }
 
 // markUnavailable marks k unavailable after a tier-attributable failure
-// other than a timeout (see isTimeout):
+// (a timeout only once it is the timeoutsBeforeUnavailable-th in a row):
 // the upstream's own Retry-After when callErr carries one, else the
 // gateway's configured default backoff (doubling from this target's own
 // last mark, capped). Logs the duration actually used, so an operator sees
@@ -612,14 +655,18 @@ func (s *Server) markUnavailable(ctx context.Context, k unavail.Key, callErr err
 	max := time.Duration(maxMS) * time.Millisecond
 	dur := s.unavail.Mark(ctx, k, retryAfter, initial, max)
 	slog.Warn("target marked unavailable", "provider", k.Provider, "upstream_model", k.UpstreamModel,
-		"duration_ms", dur.Milliseconds(), "source", unavailSource(retryAfter))
+		"duration_ms", dur.Milliseconds(), "source", unavailSource(retryAfter, callErr))
 }
 
 // unavailSource names where markUnavailable's duration came from, for the
-// log line above.
-func unavailSource(retryAfter *time.Duration) string {
-	if retryAfter != nil {
+// log line above: the upstream's Retry-After, or the default backoff after
+// a run of timeouts or after any other failure.
+func unavailSource(retryAfter *time.Duration, callErr error) string {
+	switch {
+	case retryAfter != nil:
 		return "retry_after"
+	case isTimeout(callErr):
+		return "consecutive_timeouts"
 	}
 	return "default_backoff"
 }

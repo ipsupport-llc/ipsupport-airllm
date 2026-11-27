@@ -49,10 +49,13 @@ func withCeiling(ctx context.Context, ceiling time.Duration) (context.Context, c
 
 // ceilingError replaces err, the failure of a call made under cctx (from
 // withCeiling over parent), with an ErrCodeUpstreamTimeout error when it was
-// the ceiling that ran out and the caller is still waiting. Any other error
-// is returned unchanged.
+// the ceiling that ran out and the caller is still waiting: the ceiling's
+// deadline has passed and err is that deadline (directly or under a
+// transport error). Any other error — an upstream answer that happened to
+// arrive as the deadline passed, among them — is returned unchanged.
 func ceilingError(parent, cctx context.Context, name string, ceiling time.Duration, err error) error {
-	if err == nil || ceiling <= 0 || parent.Err() != nil || !errors.Is(cctx.Err(), context.DeadlineExceeded) {
+	if err == nil || ceiling <= 0 || parent.Err() != nil ||
+		!errors.Is(cctx.Err(), context.DeadlineExceeded) || !errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
 	return &Error{

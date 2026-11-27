@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -113,4 +114,41 @@ func TestCallBudgetReplacesTheVertexCeiling(t *testing.T) {
 	}
 	_, err := p.Chat(context.Background(), chatIn)
 	wantCeilingTimeout(t, err)
+}
+
+func TestChatCeilingDuringBodyReadIsATimeout(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"id":"c","choices":[`)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	t.Cleanup(up.Close)
+	p := NewOpenAICompat("up", "openai", up.URL, "")
+	p.SetChatTimeout(50 * time.Millisecond)
+
+	_, err := p.Chat(context.Background(), chatIn)
+	wantCeilingTimeout(t, err)
+}
+
+// TestCeilingErrorOnlyReplacesTheDeadline: once the ceiling has passed,
+// only the deadline itself becomes upstream_timeout; an upstream answer or
+// an unrelated failure that came back at that moment is left as it is.
+func TestCeilingErrorOnlyReplacesTheDeadline(t *testing.T) {
+	parent := context.Background()
+	cctx, cancel := context.WithTimeout(parent, time.Nanosecond)
+	defer cancel()
+	<-cctx.Done()
+
+	answer := httpError("up", http.StatusServiceUnavailable, []byte(`{"error":{"message":"overloaded"}}`), nil)
+	if got := ceilingError(parent, cctx, "up", time.Second, answer); got != answer {
+		t.Errorf("an upstream 503 was replaced: %v", got)
+	}
+	other := errors.New("invalid character in response")
+	if got := ceilingError(parent, cctx, "up", time.Second, other); got != other {
+		t.Errorf("an unrelated error was replaced: %v", got)
+	}
+	transport := transportError(&url.Error{Op: "Post", URL: "http://x", Err: context.DeadlineExceeded})
+	wantCeilingTimeout(t, ceilingError(parent, cctx, "up", time.Second, transport))
 }
